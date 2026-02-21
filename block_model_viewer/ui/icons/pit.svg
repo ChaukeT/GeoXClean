@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <g fill="none" stroke="#1f2937" stroke-width="2" stroke-linejoin="round">
+    <!-- Concentric stepped pit -->
+    <path d="M10 22 L54 22 L48 28 L16 28 Z" fill="#fde68a"/>
+    <path d="M16 28 L48 28 L44 34 L20 34 Z" fill="#fbbf24"/>
+    <path d="M20 34 L44 34 L40 40 L24 40 Z" fill="#f59e0b"/>
+    <path d="M24 40 L40 40 L36 46 L28 46 Z" fill="#d97706"/>
+  </g>
+</svg>

@@ -1,0 +1,280 @@
+"""
+Workflow Status Widget for GeoX.
+
+Displays geostatistics workflow progress in the status bar:
+Drillholes -> Composites -> Variogram -> Estimation
+
+Each stage shows status (pending/available/completed) and is clickable
+to open the relevant panel.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional, Dict
+from enum import Enum
+
+from PyQt6.QtWidgets import (
+    QWidget, QHBoxLayout, QLabel, QFrame, QToolTip, QVBoxLayout
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtGui import QCursor
+
+from .modern_styles import get_theme_colors, ModernColors
+logger = logging.getLogger(__name__)
+
+
+class WorkflowStage(Enum):
+    """Geostatistics workflow stages."""
+    DRILLHOLES = ("drillholes", "Drillholes", "Load drillhole data")
+    COMPOSITING = ("compositing", "Composites", "Create composites from assays")
+    VARIOGRAM = ("variogram", "Variogram", "Model spatial variability")
+    ESTIMATION = ("estimation", "Estimation", "Run kriging or simulation")
+
+
+class StageStatus(Enum):
+    """Status of each workflow stage."""
+    PENDING = ("#666666", "Pending", "gray")
+    AVAILABLE = ("#ff9800", "Data available", "orange")
+    COMPLETED = ("#4CAF50", "Completed", "green")
+    ERROR = ("#f44336", "Error", "red")
+
+
+class WorkflowStageIndicator(QFrame):
+    """Individual stage indicator widget."""
+
+    clicked = pyqtSignal(str)  # stage_id
+
+    def __init__(self, stage: WorkflowStage, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.stage = stage
+        self._status = StageStatus.PENDING
+        self._data_count = 0
+
+        self.setFixedSize(75, 45)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._setup_ui()
+        self._update_style()
+
+
+
+    def _get_stylesheet(self) -> str:
+        """Get the stylesheet for current theme."""
+        color = self._status.value[0]  # Get color from status
+        return f"""
+
+                    WorkflowStageIndicator {{
+                        background: #2a2a2a;
+                        border: 1px solid {color};
+                        border-radius: 4px;
+                    }}
+                    WorkflowStageIndicator:hover {{
+                        background: #3a3a3a;
+                        border: 2px solid {color};
+                    }}
+
+        """
+
+    def refresh_theme(self):
+        """Update colors when theme changes."""
+        colors = get_theme_colors()
+        # Re-apply stylesheet with new theme colors
+        if hasattr(self, "setStyleSheet"):
+            # Rebuild stylesheet with new theme colors
+            self.setStyleSheet(self._get_stylesheet())
+        # Refresh child widgets
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "refresh_theme"):
+                child.refresh_theme()
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(1)
+
+        # Status indicator (colored dot)
+        self._indicator = QLabel()
+        self._indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._indicator.setFixedHeight(16)
+        layout.addWidget(self._indicator)
+
+        # Stage name
+        self._name_label = QLabel(self.stage.value[1])
+        self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_label.setStyleSheet("color: #ccc; font-size: 8px;")
+        layout.addWidget(self._name_label)
+
+        # Count label (optional)
+        self._count_label = QLabel("")
+        self._count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._count_label.setStyleSheet("color: #888; font-size: 7px;")
+        layout.addWidget(self._count_label)
+
+    def set_status(self, status: StageStatus, count: int = 0):
+        """Update stage status and count."""
+        self._status = status
+        self._data_count = count
+        self._update_style()
+
+        if count > 0:
+            self._count_label.setText(f"({count:,})")
+        else:
+            self._count_label.setText("")
+
+    def _update_style(self):
+        """Update widget styling based on status."""
+        color = self._status.value[0]
+
+        # Update indicator dot
+        self._indicator.setText("●")
+        self._indicator.setStyleSheet(f"color: {color}; font-size: 14px;")
+
+        # Update frame border
+        self.setStyleSheet(self._get_stylesheet())
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.stage.value[0])
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        tooltip_text = f"{self.stage.value[2]}\nStatus: {self._status.value[1]}"
+        if self._data_count > 0:
+            tooltip_text += f"\nCount: {self._data_count:,}"
+        QToolTip.showText(QCursor.pos(), tooltip_text)
+        super().enterEvent(event)
+
+
+class WorkflowStatusWidget(QFrame):
+    """
+    Workflow status indicator showing geostatistics pipeline progress.
+
+    Displays: Drillholes -> Composites -> Variogram -> Estimation
+
+    Each stage is clickable to open the relevant panel.
+    """
+
+    stage_clicked = pyqtSignal(str)  # stage_id
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._registry = None
+        self._stages: Dict[str, WorkflowStageIndicator] = {}
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setFixedHeight(50)
+        self.setStyleSheet(f"""
+            WorkflowStatusWidget {{
+                background: {ModernColors.PANEL_BG};
+                border: 1px solid #444;
+                border-radius: 6px;
+            }}
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(3)
+
+        # Create stage indicators
+        stages = list(WorkflowStage)
+        for i, stage in enumerate(stages):
+            indicator = WorkflowStageIndicator(stage)
+            indicator.clicked.connect(self.stage_clicked)
+            self._stages[stage.value[0]] = indicator
+            layout.addWidget(indicator)
+
+            # Add arrow between stages (except last)
+            if i < len(stages) - 1:
+                arrow = QLabel("→")
+                arrow.setStyleSheet("color: #555; font-size: 12px;")
+                arrow.setFixedWidth(15)
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(arrow)
+
+    def sizeHint(self) -> QSize:
+        return QSize(350, 50)
+
+    def connect_registry(self, registry):
+        """Connect to DataRegistry for automatic updates."""
+        self._registry = registry
+
+        if registry:
+            # Connect to registry signals
+            if hasattr(registry, 'drillholeDataLoaded'):
+                registry.drillholeDataLoaded.connect(self._on_drillhole_data)
+            if hasattr(registry, 'compositesLoaded'):
+                registry.compositesLoaded.connect(self._on_composites_data)
+            if hasattr(registry, 'variogramResultsLoaded'):
+                registry.variogramResultsLoaded.connect(self._on_variogram_data)
+            if hasattr(registry, 'krigingResultsLoaded'):
+                registry.krigingResultsLoaded.connect(self._on_estimation_data)
+
+            # Check initial state
+            self._refresh_from_registry()
+
+    def _refresh_from_registry(self):
+        """Refresh all stages from registry."""
+        if not self._registry:
+            return
+
+        try:
+            # Check drillholes
+            dh_data = self._registry.get_drillhole_data()
+            if dh_data:
+                count = 0
+                if isinstance(dh_data, dict):
+                    assays = dh_data.get('assays')
+                    if assays is not None and hasattr(assays, '__len__'):
+                        count = len(assays)
+                self._stages['drillholes'].set_status(StageStatus.COMPLETED, count)
+                self._stages['compositing'].set_status(StageStatus.AVAILABLE)
+
+            # Check composites
+            composites = self._registry.get_composites()
+            if composites is not None and len(composites) > 0:
+                self._stages['compositing'].set_status(StageStatus.COMPLETED, len(composites))
+                self._stages['variogram'].set_status(StageStatus.AVAILABLE)
+
+            # Check variogram
+            vario = self._registry.get_variogram_results()
+            if vario:
+                self._stages['variogram'].set_status(StageStatus.COMPLETED)
+                self._stages['estimation'].set_status(StageStatus.AVAILABLE)
+
+            # Check estimation
+            kriging = self._registry.get_data('kriging_results')
+            if kriging:
+                self._stages['estimation'].set_status(StageStatus.COMPLETED)
+
+        except Exception as e:
+            logger.debug(f"Error refreshing workflow status: {e}")
+
+    def _on_drillhole_data(self, data):
+        """Handle drillhole data loaded."""
+        count = 0
+        if isinstance(data, dict):
+            assays = data.get('assays')
+            if assays is not None and hasattr(assays, '__len__'):
+                count = len(assays)
+        self._stages['drillholes'].set_status(StageStatus.COMPLETED, count)
+        self._stages['compositing'].set_status(StageStatus.AVAILABLE)
+
+    def _on_composites_data(self, data):
+        """Handle composites loaded."""
+        count = len(data) if data is not None and hasattr(data, '__len__') else 0
+        self._stages['compositing'].set_status(StageStatus.COMPLETED, count)
+        self._stages['variogram'].set_status(StageStatus.AVAILABLE)
+
+    def _on_variogram_data(self, data):
+        """Handle variogram results loaded."""
+        self._stages['variogram'].set_status(StageStatus.COMPLETED)
+        self._stages['estimation'].set_status(StageStatus.AVAILABLE)
+
+    def _on_estimation_data(self, data):
+        """Handle estimation results loaded."""
+        self._stages['estimation'].set_status(StageStatus.COMPLETED)
+
+    def reset(self):
+        """Reset all stages to pending."""
+        for stage in self._stages.values():
+            stage.set_status(StageStatus.PENDING)

@@ -1,0 +1,403 @@
+"""
+Dialog for adding legend elements.
+
+Provides a tree view of available layers and their properties,
+allowing users to select which data to add to the legend.
+"""
+
+from __future__ import annotations
+
+from typing import Optional, Dict, List, Tuple, Any, TYPE_CHECKING
+import logging
+
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
+    QPushButton, QLabel, QFrame, QHeaderView, QAbstractItemView
+)
+from PyQt6.QtGui import QFont, QColor, QIcon
+from PyQt6.QtCore import Qt, pyqtSignal
+
+if TYPE_CHECKING:
+    from ..visualization.renderer import Renderer
+
+from .modern_styles import get_theme_colors, ModernColors
+logger = logging.getLogger(__name__)
+
+
+class LegendAddDialog(QDialog):
+    """
+    Dialog for selecting layers/properties to add to the legend.
+
+    Displays a tree view of available layers and their properties,
+    with icons indicating continuous vs discrete data types.
+    """
+
+    # Signal emitted when user selects an item
+    # (layer_name, property_name or None, is_discrete)
+    item_selected = pyqtSignal(str, object, bool)
+
+    def __init__(self, renderer: "Renderer", parent: Optional[QVBoxLayout] = None):
+        super().__init__(parent)
+        self.renderer = renderer
+        self._selected_layer: Optional[str] = None
+        self._selected_property: Optional[str] = None
+        self._is_discrete: bool = False
+
+        self._setup_ui()
+        self._populate_tree()
+
+
+
+    def _get_stylesheet(self) -> str:
+        """Get the stylesheet for current theme."""
+        return f"""
+        
+                    QDialog {{
+                        background-color: {ModernColors.PANEL_BG};
+                    }}
+                    QLabel {{
+                        color: {ModernColors.TEXT_PRIMARY};
+                    }}
+                    QTreeWidget {{
+                        background-color: #252526;
+                        border: 1px solid #3C3C3C;
+                        border-radius: 4px;
+                        color: {ModernColors.TEXT_PRIMARY};
+                        selection-background-color: #094771;
+                    }}
+                    QTreeWidget::item {{
+                        padding: 4px 8px;
+                    }}
+                    QTreeWidget::item:hover {{
+                        background-color: #2D2D30;
+                    }}
+                    QTreeWidget::item:selected {{
+                        background-color: #094771;
+                    }}
+                    QTreeWidget::branch:has-children:!has-siblings:closed,
+                    QTreeWidget::branch:closed:has-children:has-siblings {{
+                        border-image: none;
+                        image: url(:/icons/branch-closed.png);
+                    }}
+                    QTreeWidget::branch:open:has-children:!has-siblings,
+                    QTreeWidget::branch:open:has-children:has-siblings {{
+                        border-image: none;
+                        image: url(:/icons/branch-open.png);
+                    }}
+                    QPushButton {{
+                        background-color: #0E639C;
+                        border: none;
+                        border-radius: 4px;
+                        color: white;
+                        padding: 8px 16px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #1177BB;
+                    }}
+                    QPushButton:pressed {{
+                        background-color: #094771;
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #3C3C3C;
+                        color: #808080;
+                    }}
+                    QPushButton#cancelBtn {{
+                        background-color: #3C3C3C;
+                    }}
+                    QPushButton#cancelBtn:hover {{
+                        background-color: #505050;
+                    }}
+                
+        """
+
+    def refresh_theme(self):
+        """Update colors when theme changes."""
+        colors = get_theme_colors()
+        # Re-apply stylesheet with new theme colors
+        if hasattr(self, "setStyleSheet"):
+            # Rebuild stylesheet with new theme colors
+            self.setStyleSheet(self._get_stylesheet())
+        # Refresh child widgets
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "refresh_theme"):
+                child.refresh_theme()
+    def _setup_ui(self):
+        """Build the dialog UI."""
+        self.setWindowTitle("Add Legend Element")
+        self.setMinimumSize(350, 400)
+        self.resize(400, 500)
+
+        # Dark theme
+        self.setStyleSheet(self._get_stylesheet())
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # Header
+        header = QLabel("Select a layer or property to add to the legend:")
+        header.setFont(QFont("Segoe UI", 11))
+        layout.addWidget(header)
+
+        # Tree widget
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Name", "Type"])
+        self._tree.setColumnCount(2)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._tree.setExpandsOnDoubleClick(True)
+
+        # Column sizing
+        header_view = self._tree.header()
+        header_view.setStretchLastSection(False)
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header_view.resizeSection(1, 80)
+
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+
+        layout.addWidget(self._tree, 1)
+
+        # Info label
+        self._info_label = QLabel("")
+        self._info_label.setStyleSheet("color: #808080; font-size: 10px;")
+        layout.addWidget(self._info_label)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+
+        button_layout.addStretch()
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setObjectName("cancelBtn")
+        self._cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self._cancel_btn)
+
+        self._add_btn = QPushButton("Add")
+        self._add_btn.setEnabled(False)
+        self._add_btn.clicked.connect(self._on_add_clicked)
+        button_layout.addWidget(self._add_btn)
+
+        layout.addLayout(button_layout)
+
+    def _populate_tree(self):
+        """Populate tree with available layers and properties."""
+        self._tree.clear()
+
+        if not self.renderer or not hasattr(self.renderer, 'active_layers'):
+            return
+
+        # Group layers by type
+        block_model_layers = []
+        drillhole_layers = []
+        geology_layers = []
+        other_layers = []
+
+        for layer_name, layer_info in self.renderer.active_layers.items():
+            layer_type = layer_info.get('type', 'unknown')
+
+            if 'block' in layer_type.lower() or 'Block Model' in layer_name:
+                block_model_layers.append((layer_name, layer_info))
+            elif 'drillhole' in layer_type.lower() or 'Drillhole' in layer_name:
+                drillhole_layers.append((layer_name, layer_info))
+            elif 'geology' in layer_type.lower() or 'surface' in layer_type.lower():
+                geology_layers.append((layer_name, layer_info))
+            else:
+                other_layers.append((layer_name, layer_info))
+
+        # Add Block Models group
+        if block_model_layers:
+            self._add_layer_group("Block Models", block_model_layers)
+
+        # Add Drillholes group
+        if drillhole_layers:
+            self._add_layer_group("Drillholes", drillhole_layers)
+
+        # Add Geology group
+        if geology_layers:
+            self._add_layer_group("Geology", geology_layers)
+
+        # Add Other group
+        if other_layers:
+            self._add_layer_group("Other", other_layers)
+
+        # Expand all by default
+        self._tree.expandAll()
+
+    def _add_layer_group(self, group_name: str, layers: List[Tuple[str, Dict]]):
+        """Add a layer group to the tree."""
+        group_item = QTreeWidgetItem([group_name, ""])
+        group_item.setFlags(group_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        group_item.setFont(0, QFont("Segoe UI", 10, QFont.Weight.Bold))
+        group_item.setForeground(0, QColor(180, 180, 180))
+        self._tree.addTopLevelItem(group_item)
+
+        for layer_name, layer_info in layers:
+            self._add_layer_item(group_item, layer_name, layer_info)
+
+    def _add_layer_item(self, parent: QTreeWidgetItem, layer_name: str, layer_info: Dict):
+        """Add a layer item with its properties."""
+        # Get properties
+        properties = layer_info.get('properties', [])
+        layer_type = layer_info.get('type', 'unknown')
+        layer_type_lower = layer_type.lower()
+        layer_name_lower = layer_name.lower()
+
+        # Determine if layer itself is selectable (for geology/drillhole layers)
+        is_layer_discrete = (
+            'geology' in layer_type_lower or
+            'surface' in layer_type_lower or
+            'drillhole' in layer_type_lower or
+            'drillholes' in layer_name_lower
+        )
+
+        # For drillholes, check if they're lithology-colored (discrete)
+        if 'drillhole' in layer_type_lower or 'drillholes' in layer_name_lower:
+            data = layer_info.get('data')
+            if isinstance(data, dict):
+                color_mode = data.get('color_mode', 'Lithology')
+                lith_colors = data.get('lith_colors', {})
+                is_layer_discrete = (color_mode == 'Lithology') or bool(lith_colors)
+
+        if properties:
+            # Layer has properties - add as expandable
+            layer_item = QTreeWidgetItem([layer_name, ""])
+            layer_item.setData(0, Qt.ItemDataRole.UserRole, {
+                'layer': layer_name,
+                'property': None,
+                'discrete': is_layer_discrete
+            })
+
+            if is_layer_discrete:
+                layer_item.setText(1, "Discrete")
+                layer_item.setForeground(1, QColor(129, 199, 132))  # Green
+            else:
+                layer_item.setFlags(layer_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+
+            parent.addChild(layer_item)
+
+            # Add property items
+            for prop in properties:
+                self._add_property_item(layer_item, layer_name, prop, layer_info)
+        else:
+            # No properties - layer is directly selectable (e.g., geology)
+            layer_item = QTreeWidgetItem([layer_name, "Discrete" if is_layer_discrete else "Layer"])
+            layer_item.setData(0, Qt.ItemDataRole.UserRole, {
+                'layer': layer_name,
+                'property': None,
+                'discrete': is_layer_discrete
+            })
+
+            if is_layer_discrete:
+                layer_item.setForeground(1, QColor(129, 199, 132))  # Green
+
+            parent.addChild(layer_item)
+
+    def _add_property_item(self, parent: QTreeWidgetItem, layer_name: str, prop: str, layer_info: Dict):
+        """Add a property item."""
+        # Determine if property is discrete
+        # Usually discrete if it's a string-based property or has few unique values
+        is_discrete = self._detect_discrete_property(layer_name, prop, layer_info)
+
+        type_text = "Discrete" if is_discrete else "Continuous"
+        color = QColor(129, 199, 132) if is_discrete else QColor(100, 181, 246)  # Green or Blue
+
+        prop_item = QTreeWidgetItem([prop, type_text])
+        prop_item.setData(0, Qt.ItemDataRole.UserRole, {
+            'layer': layer_name,
+            'property': prop,
+            'discrete': is_discrete
+        })
+        prop_item.setForeground(1, color)
+
+        parent.addChild(prop_item)
+
+    def _detect_discrete_property(self, layer_name: str, prop: str, layer_info: Dict) -> bool:
+        """Detect if a property should be treated as discrete."""
+        # Known discrete property names
+        discrete_keywords = [
+            'lithology', 'lith', 'rock', 'type', 'zone', 'domain', 'unit',
+            'formation', 'class', 'category', 'code', 'id', 'name'
+        ]
+
+        prop_lower = prop.lower()
+        for keyword in discrete_keywords:
+            if keyword in prop_lower:
+                return True
+
+        # Check if we have data to analyze
+        data = layer_info.get('data')
+        if data is not None and hasattr(data, 'point_data'):
+            try:
+                import numpy as np
+                prop_data = data.point_data.get(prop)
+                if prop_data is not None:
+                    # Check if string type
+                    if prop_data.dtype.kind in ('U', 'S', 'O'):
+                        return True
+                    # Check unique count
+                    unique_count = len(np.unique(prop_data[np.isfinite(prop_data) if prop_data.dtype.kind in ('f', 'i') else np.ones(len(prop_data), dtype=bool)]))
+                    if unique_count <= 20:
+                        return True
+            except Exception:
+                pass
+
+        return False
+
+    def _on_selection_changed(self):
+        """Handle tree selection change."""
+        selected = self._tree.selectedItems()
+        if not selected:
+            self._add_btn.setEnabled(False)
+            self._info_label.setText("")
+            self._selected_layer = None
+            self._selected_property = None
+            return
+
+        item = selected[0]
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+
+        if data is None:
+            self._add_btn.setEnabled(False)
+            self._info_label.setText("")
+            self._selected_layer = None
+            self._selected_property = None
+            return
+
+        self._selected_layer = data['layer']
+        self._selected_property = data.get('property')
+        self._is_discrete = data.get('discrete', False)
+
+        self._add_btn.setEnabled(True)
+
+        # Update info label
+        if self._selected_property:
+            info = f"Add {self._selected_property} from {self._selected_layer}"
+        else:
+            info = f"Add {self._selected_layer}"
+        self._info_label.setText(info)
+
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int):
+        """Handle double-click to quickly add."""
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is not None:
+            self._on_add_clicked()
+
+    def _on_add_clicked(self):
+        """Handle add button click."""
+        if self._selected_layer:
+            self.item_selected.emit(
+                self._selected_layer,
+                self._selected_property,
+                self._is_discrete
+            )
+            self.accept()
+
+    def get_selection(self) -> Optional[Tuple[str, Optional[str], bool]]:
+        """Get the current selection."""
+        if self._selected_layer:
+            return (self._selected_layer, self._selected_property, self._is_discrete)
+        return None

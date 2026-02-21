@@ -1,0 +1,839 @@
+"""
+Column Mapping Dialog for Block Model Data - Clean, Functional Design.
+Allows users to map their CSV columns to required block model fields.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional, Dict, Set
+import pandas as pd
+
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QScrollArea, QWidget, QFrame
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QCursor
+from .modern_styles import get_theme_colors, ModernColors
+
+logger = logging.getLogger(__name__)
+
+
+class BlockMappingRow(QFrame):
+    """Clean row for mapping a block model field."""
+
+    def __init__(self, field_key: str, field_label: str, required: bool,
+                 columns: list, auto_match: Optional[str] = None, parent=None):
+        super().__init__(parent)
+        self.field_key = field_key
+        self.field_label = field_label
+        self.required = required
+        self.columns = columns
+
+        self._setup_ui(columns, auto_match)
+
+    def _get_row_stylesheet(self) -> str:
+        """Generate theme-aware stylesheet for the row."""
+        colors = get_theme_colors()
+        return f"""
+            #BlockMappingRow {{
+                background-color: {colors.CARD_BG};
+                border: 1px solid {colors.BORDER};
+                border-radius: 4px;
+            }}
+            #BlockMappingRow:hover {{
+                background-color: {colors.CARD_HOVER};
+                border-color: {colors.BORDER_LIGHT};
+            }}
+        """
+
+    def _get_combo_stylesheet(self) -> str:
+        """Generate theme-aware stylesheet for the combo box."""
+        colors = get_theme_colors()
+        return f"""
+            QComboBox {{
+                background-color: {colors.ELEVATED_BG};
+                color: {colors.TEXT_PRIMARY};
+                border: 1px solid {colors.BORDER};
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 9pt;
+                font-weight: 500;
+            }}
+            QComboBox:hover {{
+                background-color: {colors.CARD_HOVER};
+                border-color: {colors.BORDER_LIGHT};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {colors.ELEVATED_BG};
+                color: {colors.TEXT_PRIMARY};
+                border: 1px solid {colors.BORDER};
+                selection-background-color: {colors.SUCCESS};
+            }}
+        """
+    
+    def _setup_ui(self, columns: list, auto_match: Optional[str]):
+        colors = get_theme_colors()
+        self.setFixedHeight(28)
+        self.setObjectName("BlockMappingRow")
+
+        self.setStyleSheet(self._get_row_stylesheet())
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(8)
+
+        # Status indicator
+        self.status_indicator = QFrame()
+        self.status_indicator.setFixedSize(6, 6)
+        layout.addWidget(self.status_indicator)
+
+        # Field name with badge
+        name_layout = QHBoxLayout()
+        name_layout.setSpacing(4)
+
+        self.name_label = QLabel(self.field_label)
+        self.name_label.setStyleSheet(f"QLabel {{ color: {colors.TEXT_PRIMARY}; background: transparent; font-size: 10pt; font-weight: bold; }}")
+        name_layout.addWidget(self.name_label)
+
+        if self.required:
+            self.badge = QLabel("REQ")
+            self.badge.setStyleSheet(f"QLabel {{ font-size: 7pt; font-weight: bold; padding: 2px 5px; background-color: {colors.ERROR}; color: white; border-radius: 2px; }}")
+            name_layout.addWidget(self.badge)
+        else:
+            self.badge = QLabel("OPT")
+            self.badge.setStyleSheet(f"QLabel {{ font-size: 7pt; font-weight: bold; padding: 2px 5px; background-color: {colors.TEXT_DISABLED}; color: white; border-radius: 2px; }}")
+            name_layout.addWidget(self.badge)
+
+        name_layout.addStretch()
+        layout.addLayout(name_layout, 1)
+
+        # Combo box
+        self.combo = QComboBox()
+        self.combo.setMinimumWidth(160)
+        self.combo.setFixedHeight(22)
+        self.combo.addItems(['— Select Column —'] + columns)
+        self.combo.setStyleSheet(self._get_combo_stylesheet())
+
+        if auto_match:
+            try:
+                self.combo.setCurrentText(auto_match)
+            except:
+                pass
+
+        layout.addWidget(self.combo)
+
+        self.combo.currentTextChanged.connect(self._update_status)
+        self._update_status()
+    
+    def _update_status(self):
+        """Update status indicator color based on selection."""
+        colors = get_theme_colors()
+        selected = self.combo.currentText()
+        if selected == '— Select Column —':
+            color = colors.ERROR if self.required else colors.TEXT_DISABLED
+        else:
+            color = colors.SUCCESS
+        self.status_indicator.setStyleSheet(f"border-radius: 4px; background-color: {color};")
+
+    def refresh_theme(self):
+        """Refresh all styles when theme changes."""
+        colors = get_theme_colors()
+        self.setStyleSheet(self._get_row_stylesheet())
+        self.combo.setStyleSheet(self._get_combo_stylesheet())
+        self.name_label.setStyleSheet(f"QLabel {{ color: {colors.TEXT_PRIMARY}; background: transparent; font-size: 10pt; font-weight: bold; }}")
+
+        if self.required:
+            self.badge.setStyleSheet(f"QLabel {{ font-size: 7pt; font-weight: bold; padding: 2px 5px; background-color: {colors.ERROR}; color: white; border-radius: 2px; }}")
+        else:
+            self.badge.setStyleSheet(f"QLabel {{ font-size: 7pt; font-weight: bold; padding: 2px 5px; background-color: {colors.TEXT_DISABLED}; color: white; border-radius: 2px; }}")
+
+        self._update_status()
+    
+    def get_selected(self) -> Optional[str]:
+        selected = self.combo.currentText()
+        return None if selected == '— Select Column —' else selected
+    
+    def set_column(self, column: str):
+        self.combo.setCurrentText(column)
+
+
+class PropertyCard(QFrame):
+    """Clean card for selecting a property column."""
+
+    toggled = pyqtSignal(str, bool)
+
+    def __init__(self, column_name: str, series: pd.Series, parent=None):
+        super().__init__(parent)
+        self.column_name = column_name
+        self._is_selected = True
+        self.count = len(series.dropna())
+        self._setup_ui()
+        self._apply_style()
+
+    def _setup_ui(self):
+        colors = get_theme_colors()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(32)
+        self.setObjectName("PropertyCard")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        # Selection indicator
+        self.indicator = QFrame()
+        self.indicator.setFixedSize(12, 12)
+        layout.addWidget(self.indicator)
+
+        # Column info
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(0)
+
+        self.name_label = QLabel(self.column_name)
+        info_layout.addWidget(self.name_label)
+
+        self.type_label = QLabel(f"{self.count:,} values")
+        self.type_label.setStyleSheet(f"font-size: 7pt; color: {colors.TEXT_SECONDARY};")
+        info_layout.addWidget(self.type_label)
+
+        layout.addLayout(info_layout, 1)
+
+    def _apply_style(self):
+        """Apply theme-aware styling based on selection state."""
+        colors = get_theme_colors()
+        if self._is_selected:
+            # Light green background for selected state
+            bg_color = "#d1fae5" if get_theme_colors() == get_theme_colors.__class__.__bases__[0] else "#e8f5e9"
+            hover_color = "#a7f3d0" if get_theme_colors() == get_theme_colors.__class__.__bases__[0] else "#c8e6c9"
+            text_color = "#065f46" if get_theme_colors() == get_theme_colors.__class__.__bases__[0] else "#1b5e20"
+
+            self.setStyleSheet(f"""
+                #PropertyCard {{
+                    background-color: {bg_color};
+                    border: 2px solid {colors.SUCCESS};
+                    border-radius: 4px;
+                }}
+                #PropertyCard:hover {{ background-color: {hover_color}; }}
+            """)
+            self.indicator.setStyleSheet(f"background-color: {colors.SUCCESS}; border-radius: 6px;")
+            self.name_label.setStyleSheet(f"color: {text_color}; font-size: 9pt; font-weight: 700;")
+        else:
+            self.setStyleSheet(f"""
+                #PropertyCard {{
+                    background-color: {colors.ELEVATED_BG};
+                    border: 2px solid {colors.BORDER};
+                    border-radius: 4px;
+                }}
+                #PropertyCard:hover {{ background-color: {colors.CARD_HOVER}; }}
+            """)
+            self.indicator.setStyleSheet(f"background-color: {colors.TEXT_DISABLED}; border-radius: 6px;")
+            self.name_label.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 9pt; font-weight: 600;")
+
+        # Update type label
+        self.type_label.setStyleSheet(f"font-size: 7pt; color: {colors.TEXT_SECONDARY};")
+    
+    def mousePressEvent(self, event):
+        self._is_selected = not self._is_selected
+        self._apply_style()
+        self.toggled.emit(self.column_name, self._is_selected)
+        super().mousePressEvent(event)
+
+    def setSelected(self, selected: bool):
+        self._is_selected = selected
+        self._apply_style()
+
+    def isSelected(self) -> bool:
+        return self._is_selected
+
+    def refresh_theme(self):
+        """Refresh styles when theme changes."""
+        self._apply_style()
+
+
+class BlockModelColumnMappingDialog(QDialog):
+    """Clean, functional dialog for mapping block model columns."""
+    
+    def __init__(self, df: pd.DataFrame, parent=None):
+        super().__init__(parent)
+        self.df = df
+        self.column_mapping: Dict[str, str] = {}
+        self.selected_property_columns: Set[str] = set()
+        self.mapping_rows: Dict[str, BlockMappingRow] = {}
+        
+        self.setWindowTitle("Map Block Model Columns")
+        self.setModal(True)
+        self.resize(800, 600)
+        self.setMaximumHeight(614)  # 80% of 768px screen
+        
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        colors = get_theme_colors()
+        self.setStyleSheet(f"QDialog {{ background-color: {colors.PANEL_BG}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(10, 8, 10, 8)
+
+        # Header (Fixed)
+        self.header = QFrame()
+        self.header.setStyleSheet(f"background-color: {colors.SUCCESS}; border-radius: 8px; padding: 8px;")
+        header_layout = QHBoxLayout(self.header)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+        header_layout.setSpacing(10)
+
+        icon_label = QLabel("🧊")
+        icon_label.setStyleSheet("font-size: 24px; background: transparent;")
+        header_layout.addWidget(icon_label)
+
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(0)
+        self.title_label = QLabel("Map Block Model Columns")
+        self.title_label.setStyleSheet("color: white; font-size: 12pt; font-weight: 700; background: transparent;")
+        title_layout.addWidget(self.title_label)
+
+        self.info_label = QLabel(f"{len(self.df):,} blocks  •  {len(self.df.columns)} columns")
+        self.info_label.setStyleSheet("color: rgba(255,255,255,0.9); font-size: 9pt; background: transparent;")
+        title_layout.addWidget(self.info_label)
+        header_layout.addLayout(title_layout, 1)
+
+        self.auto_btn = QPushButton("✨ Auto-Detect")
+        self.auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.auto_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: white; color: #065f46;
+                border: none; border-radius: 5px; padding: 6px 14px;
+                font-size: 9pt; font-weight: 700;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.TEXT_PRIMARY}; }}
+        """)
+        self.auto_btn.clicked.connect(self._auto_detect_all)
+        header_layout.addWidget(self.auto_btn)
+        layout.addWidget(self.header)
+        
+        # Scrollable Body
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setSpacing(6)
+        scroll_layout.setContentsMargins(0, 0, 4, 0)
+        
+        # Collapsible Preview
+        self.preview_header = QPushButton("📋 Data Preview ▸")
+        self.preview_header.setCheckable(True)
+        self.preview_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.preview_header.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                border: 1px solid {colors.BORDER}; border-radius: 4px;
+                padding: 6px 10px; text-align: left; font-weight: 600; font-size: 9pt;
+            }}
+            QPushButton:hover {{ background-color: {colors.CARD_HOVER}; }}
+            QPushButton:checked {{ border-color: {colors.SUCCESS}; }}
+        """)
+        scroll_layout.addWidget(self.preview_header)
+        
+        self.preview_widget = QWidget()
+        preview_layout = QVBoxLayout(self.preview_widget)
+        preview_layout.setContentsMargins(6, 4, 6, 4)
+        preview_layout.setSpacing(4)
+        
+        max_cols = 8
+        preview_cols = list(self.df.columns[:max_cols])
+        
+        self.preview_table = QTableWidget()
+        self.preview_table.setRowCount(3)
+        self.preview_table.setColumnCount(len(preview_cols))
+        self.preview_table.setHorizontalHeaderLabels(preview_cols)
+        self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.preview_table.verticalHeader().setVisible(False)
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                border: 1px solid {colors.BORDER}; border-radius: 4px;
+                gridline-color: {colors.DIVIDER};
+            }}
+            QTableWidget::item {{ padding: 4px; }}
+            QTableWidget::item:alternate {{ background-color: {colors.CARD_BG}; }}
+            QHeaderView::section {{
+                background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                padding: 6px; border: none; border-bottom: 2px solid {colors.SUCCESS};
+                font-weight: 600; font-size: 7pt;
+            }}
+        """)
+        
+        for i in range(3):
+            for j, col in enumerate(preview_cols):
+                value = str(self.df[col].iloc[i])[:20]
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.preview_table.setItem(i, j, item)
+        
+        self.preview_table.setFixedHeight(80)
+        preview_layout.addWidget(self.preview_table)
+        
+        if len(self.df.columns) > max_cols:
+            self.more_label = QLabel(f"+ {len(self.df.columns) - max_cols} more columns")
+            self.more_label.setStyleSheet(f"color: {colors.TEXT_DISABLED}; font-size: 7pt; font-style: italic;")
+            preview_layout.addWidget(self.more_label)
+
+        self.preview_widget.setVisible(False)  # Collapsed by default
+        scroll_layout.addWidget(self.preview_widget)
+
+        self.preview_header.toggled.connect(lambda checked: (
+            self.preview_widget.setVisible(checked),
+            self.preview_header.setText("📋 Data Preview ▾" if checked else "📋 Data Preview ▸")
+        ))
+
+        # Section 1: Coordinates (Required)
+        self.coord_group = QGroupBox("🎯 Coordinates (Required)")
+        self.coord_group.setStyleSheet(f"""
+            QGroupBox {{
+                color: {colors.TEXT_PRIMARY}; font-weight: 600; font-size: 10pt;
+                background-color: {colors.ELEVATED_BG};
+                border: 1px solid {colors.BORDER}; border-radius: 4px;
+                margin-top: 6px; padding-top: 10px;
+            }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 2px 6px; }}
+        """)
+        coord_layout = QVBoxLayout(self.coord_group)
+        coord_layout.setContentsMargins(6, 6, 6, 6)
+        coord_layout.setSpacing(4)
+
+        self.combo_boxes = {}
+        columns = self.df.columns.tolist()
+
+        coord_fields = {
+            'X': ('X Coordinate (Easting)', True),
+            'Y': ('Y Coordinate (Northing)', True),
+            'Z': ('Z Coordinate (Elevation)', True),
+        }
+
+        for key, (label, req) in coord_fields.items():
+            match = self._auto_detect_column(key)
+            row = BlockMappingRow(key, label, req, columns, match)
+            coord_layout.addWidget(row)
+            self.mapping_rows[key] = row
+            self.combo_boxes[key] = row.combo
+
+        scroll_layout.addWidget(self.coord_group)
+
+        # Section 2: Block Attributes (Collapsible)
+        self.attr_header = QPushButton("📐 Block Attributes (Optional) ▸")
+        self.attr_header.setCheckable(True)
+        self.attr_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.attr_header.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                border: 1px solid {colors.BORDER}; border-radius: 4px;
+                padding: 6px 10px; text-align: left; font-weight: 600; font-size: 9pt;
+            }}
+            QPushButton:hover {{ background-color: {colors.CARD_HOVER}; }}
+            QPushButton:checked {{ border-color: {colors.SUCCESS}; }}
+        """)
+        scroll_layout.addWidget(self.attr_header)
+        
+        self.attr_widget = QWidget()
+        attr_layout = QVBoxLayout(self.attr_widget)
+        attr_layout.setContentsMargins(6, 4, 6, 4)
+        attr_layout.setSpacing(4)
+        
+        attr_fields = {
+            'DX': ('Block Size X', False),
+            'DY': ('Block Size Y', False),
+            'DZ': ('Block Size Z', False)
+        }
+        
+        for key, (label, req) in attr_fields.items():
+            match = self._auto_detect_column(key)
+            row = BlockMappingRow(key, label, req, columns, match)
+            attr_layout.addWidget(row)
+            self.mapping_rows[key] = row
+            self.combo_boxes[key] = row.combo
+        
+        self.attr_widget.setVisible(False)  # Collapsed by default
+        scroll_layout.addWidget(self.attr_widget)
+
+        self.attr_header.toggled.connect(lambda checked: (
+            self.attr_widget.setVisible(checked),
+            self.attr_header.setText("📐 Block Attributes (Optional) ▾" if checked else "📐 Block Attributes (Optional) ▸")
+        ))
+        
+        # Section 3: Property Selection
+        def get_mapped():
+            return {r.get_selected() for r in self.mapping_rows.values() if r.get_selected()}
+        
+        mapped = get_mapped()
+        excluded = {'X', 'Y', 'Z', 'DX', 'DY', 'DZ', 'XC', 'YC', 'ZC', 
+                   'XINC', 'YINC', 'ZINC', 'X_CENTER', 'Y_CENTER', 'Z_CENTER',
+                   'X_COORD', 'Y_COORD', 'Z_COORD', 'EASTING', 'NORTHING', 'ELEVATION'}
+        
+        numeric_cols = [c for c in self.df.columns 
+                       if pd.api.types.is_numeric_dtype(self.df[c])
+                       and c not in mapped
+                       and c.upper() not in excluded]
+        
+        if numeric_cols:
+            self.prop_group = QGroupBox("📊 Select Property Columns")
+            self.prop_group.setStyleSheet(f"""
+                QGroupBox {{
+                    color: {colors.TEXT_PRIMARY}; font-weight: 600; font-size: 10pt;
+                    background-color: {colors.ELEVATED_BG};
+                    border: 1px solid {colors.BORDER}; border-radius: 4px;
+                    margin-top: 6px; padding-top: 10px;
+                }}
+                QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 2px 6px; }}
+            """)
+            prop_layout = QVBoxLayout(self.prop_group)
+            prop_layout.setSpacing(4)
+            prop_layout.setContentsMargins(6, 6, 6, 6)
+
+            header_layout = QHBoxLayout()
+            self.info_label_prop = QLabel("Click to toggle")
+            self.info_label_prop.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 8pt;")
+            header_layout.addWidget(self.info_label_prop, 1)
+
+            self.count_label = QLabel(f"{len(numeric_cols)}/{len(numeric_cols)}")
+            # Initial styling (will be set by _update_count after cards are created)
+            header_layout.addWidget(self.count_label)
+            prop_layout.addLayout(header_layout)
+            
+            prop_scroll = QScrollArea()
+            prop_scroll.setWidgetResizable(True)
+            prop_scroll.setMinimumHeight(80)
+            prop_scroll.setMaximumHeight(120)
+            prop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            prop_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+            
+            cards_widget = QWidget()
+            cards_layout = QVBoxLayout(cards_widget)
+            cards_layout.setSpacing(4)
+            cards_layout.setContentsMargins(0, 0, 4, 0)
+            
+            self.property_cards = {}
+            for col in sorted(numeric_cols):
+                card = PropertyCard(col, self.df[col])
+                card.toggled.connect(self._on_property_toggled)
+                cards_layout.addWidget(card)
+                self.property_cards[col] = card
+                self.selected_property_columns.add(col)
+            
+            cards_layout.addStretch()
+            prop_scroll.setWidget(cards_widget)
+            prop_layout.addWidget(prop_scroll)
+            
+            btn_layout = QHBoxLayout()
+            btn_layout.setSpacing(6)
+
+            self.sel_all = QPushButton("Select All")
+            self.sel_all.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.sel_all.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {colors.CARD_HOVER}; color: {colors.TEXT_PRIMARY};
+                    border: 1px solid {colors.BORDER}; border-radius: 4px;
+                    padding: 4px 10px; font-weight: 600; font-size: 8pt;
+                }}
+                QPushButton:hover {{ background-color: {colors.BORDER_LIGHT}; }}
+            """)
+            self.sel_all.clicked.connect(self._select_all_properties)
+
+            self.desel_all = QPushButton("Deselect All")
+            self.desel_all.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.desel_all.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {colors.CARD_HOVER}; color: {colors.TEXT_PRIMARY};
+                    border: 1px solid {colors.BORDER}; border-radius: 4px;
+                    padding: 4px 10px; font-weight: 600; font-size: 8pt;
+                }}
+                QPushButton:hover {{ background-color: {colors.BORDER_LIGHT}; }}
+            """)
+            self.desel_all.clicked.connect(self._deselect_all_properties)
+
+            btn_layout.addWidget(self.sel_all)
+            btn_layout.addWidget(self.desel_all)
+            btn_layout.addStretch()
+            prop_layout.addLayout(btn_layout)
+
+            scroll_layout.addWidget(self.prop_group)
+        else:
+            # No property group created
+            self.prop_group = None
+            self.count_label = None
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, 1)  # Give scroll area stretch priority
+        
+        # Footer (Fixed)
+        self.footer = QFrame()
+        self.footer.setStyleSheet(f"background-color: {colors.ELEVATED_BG}; border-top: 1px solid {colors.BORDER};")
+        footer_layout = QHBoxLayout(self.footer)
+        footer_layout.setContentsMargins(0, 8, 0, 0)
+        footer_layout.setSpacing(8)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 8pt;")
+        footer_layout.addWidget(self.status_label, 1)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.setMinimumWidth(80)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.BORDER_LIGHT}; color: {colors.TEXT_PRIMARY};
+                border: none; border-radius: 5px;
+                padding: 8px 16px; font-size: 9pt; font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {colors.CARD_HOVER}; }}
+        """)
+        self.cancel_btn.clicked.connect(self.reject)
+        footer_layout.addWidget(self.cancel_btn)
+
+        self.accept_btn = QPushButton("✓ Apply Mapping")
+        self.accept_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.accept_btn.setDefault(True)
+        self.accept_btn.setMinimumWidth(120)
+        self.accept_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.SUCCESS}; color: white;
+                border: none; border-radius: 5px;
+                padding: 8px 16px; font-size: 9pt; font-weight: 700;
+            }}
+            QPushButton:hover {{ background-color: {colors.ACCENT_SECONDARY}; }}
+        """)
+        self.accept_btn.clicked.connect(self._validate_and_accept)
+        footer_layout.addWidget(self.accept_btn)
+
+        layout.addWidget(self.footer)
+    
+    def _auto_detect_column(self, key: str) -> Optional[str]:
+        cols_upper = [c.upper() for c in self.df.columns]
+        patterns = {
+            'X': ['X', 'X_CENTER', 'X_CENTRE', 'XC', 'XPOS', 'X_COORD', 'EASTING'],
+            'Y': ['Y', 'Y_CENTER', 'Y_CENTRE', 'YC', 'YPOS', 'Y_COORD', 'NORTHING'],
+            'Z': ['Z', 'Z_CENTER', 'Z_CENTRE', 'ZC', 'ZPOS', 'Z_COORD', 'ELEVATION', 'RL'],
+            'DX': ['DX', 'DX_SIZE', 'SIZE_X', 'WIDTH', 'XSIZE', 'XINC'],
+            'DY': ['DY', 'DY_SIZE', 'SIZE_Y', 'LENGTH', 'YSIZE', 'YINC'],
+            'DZ': ['DZ', 'DZ_SIZE', 'SIZE_Z', 'HEIGHT', 'ZSIZE', 'ZINC']
+        }
+        if key in patterns:
+            for pat in patterns[key]:
+                if pat in cols_upper:
+                    return self.df.columns[cols_upper.index(pat)]
+        return None
+    
+    def _on_property_toggled(self, col: str, selected: bool):
+        if selected:
+            self.selected_property_columns.add(col)
+        else:
+            self.selected_property_columns.discard(col)
+        self._update_count()
+    
+    def _update_count(self):
+        """Update property count label with theme-aware styling."""
+        if not hasattr(self, 'count_label') or not hasattr(self, 'property_cards') or self.count_label is None:
+            return
+
+        colors = get_theme_colors()
+        total = len(self.property_cards)
+        sel = len(self.selected_property_columns)
+        self.count_label.setText(f"{sel}/{total}")
+
+        if sel == 0:
+            # Error state - no properties selected
+            self.count_label.setStyleSheet(f"""
+                color: {colors.ERROR}; background: rgba(244,67,54,0.15);
+                padding: 3px 8px; border-radius: 8px; border: 1px solid {colors.ERROR};
+                font-size: 8pt; font-weight: 700;
+            """)
+        elif sel == total:
+            # Success state - all properties selected
+            self.count_label.setStyleSheet(f"""
+                color: {colors.SUCCESS}; background: rgba(76,175,80,0.15);
+                padding: 3px 8px; border-radius: 8px; border: 1px solid {colors.SUCCESS};
+                font-size: 8pt; font-weight: 700;
+            """)
+        else:
+            # Info state - partial selection
+            self.count_label.setStyleSheet(f"""
+                color: {colors.INFO}; background: rgba(33,150,243,0.15);
+                padding: 3px 8px; border-radius: 8px; border: 1px solid {colors.INFO};
+                font-size: 8pt; font-weight: 700;
+            """)
+    
+    def _select_all_properties(self):
+        if hasattr(self, 'property_cards'):
+            for col, card in self.property_cards.items():
+                card.setSelected(True)
+                self.selected_property_columns.add(col)
+            self._update_count()
+    
+    def _deselect_all_properties(self):
+        if hasattr(self, 'property_cards'):
+            for card in self.property_cards.values():
+                card.setSelected(False)
+            self.selected_property_columns.clear()
+            self._update_count()
+    
+    def _auto_detect_all(self):
+        """Auto-detect all column mappings."""
+        colors = get_theme_colors()
+        count = 0
+        for key, row in self.mapping_rows.items():
+            match = self._auto_detect_column(key)
+            if match:
+                row.set_column(match)
+                count += 1
+        self.status_label.setText(f"✓ Auto-detected {count}/{len(self.mapping_rows)} columns")
+        self.status_label.setStyleSheet(f"color: {colors.SUCCESS}; font-size: 9pt; font-weight: 600;")
+    
+    def _validate_and_accept(self):
+        """Validate mappings and accept dialog."""
+        colors = get_theme_colors()
+        self.column_mapping = {}
+        for key, row in self.mapping_rows.items():
+            sel = row.get_selected()
+            if sel:
+                self.column_mapping[key] = sel
+
+        if hasattr(self, 'property_cards'):
+            self.selected_property_columns.clear()
+            for col, card in self.property_cards.items():
+                if card.isSelected():
+                    self.selected_property_columns.add(col)
+
+        req = ['X', 'Y', 'Z']
+        missing = [f for f in req if f not in self.column_mapping]
+        if missing:
+            self.status_label.setText(f"✗ Missing required: {', '.join(missing)}")
+            self.status_label.setStyleSheet(f"color: {colors.ERROR}; font-size: 9pt; font-weight: 700;")
+            return
+
+        mapped = list(self.column_mapping.values())
+        dups = [c for c in mapped if mapped.count(c) > 1]
+        if dups:
+            self.status_label.setText(f"✗ Duplicate mappings: {', '.join(set(dups))}")
+            self.status_label.setStyleSheet(f"color: {colors.ERROR}; font-size: 9pt; font-weight: 700;")
+            return
+
+        self.accept()
+    
+    def get_mapping(self) -> Dict[str, str]:
+        return self.column_mapping
+
+    def get_selected_properties(self) -> Set[str]:
+        return self.selected_property_columns
+
+    def refresh_theme(self):
+        """Refresh all styles when theme changes."""
+        colors = get_theme_colors()
+
+        # Update dialog background
+        self.setStyleSheet(f"QDialog {{ background-color: {colors.PANEL_BG}; }}")
+
+        # Update header
+        self.header.setStyleSheet(f"background-color: {colors.SUCCESS}; border-radius: 8px; padding: 8px;")
+
+        # Update collapsible headers
+        for header_btn in [self.preview_header, self.attr_header]:
+            header_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                    border: 1px solid {colors.BORDER}; border-radius: 4px;
+                    padding: 6px 10px; text-align: left; font-weight: 600; font-size: 9pt;
+                }}
+                QPushButton:hover {{ background-color: {colors.CARD_HOVER}; }}
+                QPushButton:checked {{ border-color: {colors.SUCCESS}; }}
+            """)
+
+        # Update preview table
+        self.preview_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                border: 1px solid {colors.BORDER}; border-radius: 4px;
+                gridline-color: {colors.DIVIDER};
+            }}
+            QTableWidget::item {{ padding: 4px; }}
+            QTableWidget::item:alternate {{ background-color: {colors.CARD_BG}; }}
+            QHeaderView::section {{
+                background-color: {colors.ELEVATED_BG}; color: {colors.TEXT_PRIMARY};
+                padding: 6px; border: none; border-bottom: 2px solid {colors.SUCCESS};
+                font-weight: 600; font-size: 7pt;
+            }}
+        """)
+
+        # Update "more columns" label if it exists
+        if hasattr(self, 'more_label'):
+            self.more_label.setStyleSheet(f"color: {colors.TEXT_DISABLED}; font-size: 7pt; font-style: italic;")
+
+        # Update group boxes
+        for group in [self.coord_group, self.prop_group if hasattr(self, 'prop_group') and self.prop_group else None]:
+            if group:
+                group.setStyleSheet(f"""
+                    QGroupBox {{
+                        color: {colors.TEXT_PRIMARY}; font-weight: 600; font-size: 10pt;
+                        background-color: {colors.ELEVATED_BG};
+                        border: 1px solid {colors.BORDER}; border-radius: 4px;
+                        margin-top: 6px; padding-top: 10px;
+                    }}
+                    QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 2px 6px; }}
+                """)
+
+        # Update all mapping rows
+        for row in self.mapping_rows.values():
+            row.refresh_theme()
+
+        # Update property cards
+        if hasattr(self, 'property_cards'):
+            for card in self.property_cards.values():
+                card.refresh_theme()
+
+        # Update property section labels and buttons
+        if hasattr(self, 'info_label_prop'):
+            self.info_label_prop.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 8pt;")
+
+        if hasattr(self, 'sel_all') and hasattr(self, 'desel_all'):
+            button_style = f"""
+                QPushButton {{
+                    background-color: {colors.CARD_HOVER}; color: {colors.TEXT_PRIMARY};
+                    border: 1px solid {colors.BORDER}; border-radius: 4px;
+                    padding: 4px 10px; font-weight: 600; font-size: 8pt;
+                }}
+                QPushButton:hover {{ background-color: {colors.BORDER_LIGHT}; }}
+            """
+            self.sel_all.setStyleSheet(button_style)
+            self.desel_all.setStyleSheet(button_style)
+
+        # Update count label
+        self._update_count()
+
+        # Update footer
+        self.footer.setStyleSheet(f"background-color: {colors.ELEVATED_BG}; border-top: 1px solid {colors.BORDER};")
+        self.status_label.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 8pt;")
+
+        # Update footer buttons
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.BORDER_LIGHT}; color: {colors.TEXT_PRIMARY};
+                border: none; border-radius: 5px;
+                padding: 8px 16px; font-size: 9pt; font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {colors.CARD_HOVER}; }}
+        """)
+
+        self.accept_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.SUCCESS}; color: white;
+                border: none; border-radius: 5px;
+                padding: 8px 16px; font-size: 9pt; font-weight: 700;
+            }}
+            QPushButton:hover {{ background-color: {colors.ACCENT_SECONDARY}; }}
+        """)

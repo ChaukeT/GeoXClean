@@ -1,0 +1,5 @@
+# Placeholder for Windows icon file
+# This file should be replaced with an actual .ico file (1024x1024 recommended)
+# Use a tool like ImageMagick or an icon editor to create from app_logo.png:
+# convert app_logo.png -resize 256x256 icon.ico
+

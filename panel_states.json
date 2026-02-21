@@ -1,0 +1,170 @@
+{
+  "panels": {
+    "PickInfoPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BlockInfoPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SelectionPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "CrossSectionManagerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "InteractiveSlicerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BaseDockPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DataViewerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "TableViewerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "StatisticsPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ChartsPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ProcessHistoryPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SwathPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "InSARPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DrillholePanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DrillholeImportPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DrillholeControlPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DrillholePlottingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DrillholeReportingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "QCWindow": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "CompositingWindow": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "UGAdvancedPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "StopeStabilityPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GeotechPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GeotechSummaryPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SlopeRiskPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SlopeStabilityPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BlockModelResourcePanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BlockPropertyCalculator": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GradeTransformationPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "KMeansClusteringPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GeologicalExplorerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DataRegistryStatusPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "IRRPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    }
+  },
+  "timestamp": "1771271600.7990744"
+}

@@ -1,0 +1,811 @@
+"""
+STRUCTURAL FEATURES IMPORT PANEL
+
+Purpose: Load faults, folds, and unconformities from CSV files with 
+flexible column mapping and format auto-detection.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Dict, Optional, Any, List
+
+import pandas as pd
+from .panel_manager import PanelCategory, DockArea
+
+from PyQt6.QtCore import Qt, QTimer
+from .modern_styles import get_theme_colors, ModernColors
+from PyQt6.QtWidgets import (
+    QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QProgressBar, QSplitter, QTextEdit, QVBoxLayout,
+    QWidget, QSizePolicy, QDialog, QFrame, QScrollArea, QTableWidget,
+    QTableWidgetItem, QHeaderView, QComboBox
+)
+
+from .base_analysis_panel import BaseAnalysisPanel
+from .modern_widgets import (
+    FileInputCard, ModernProgressBar, SectionHeader, 
+    StatusBadge, ActionButton, Colors
+)
+
+logger = logging.getLogger(__name__)
+
+
+class StructuralColumnMappingDialog(QDialog):
+    """
+    Column mapping dialog for structural CSV files.
+    
+    Auto-detects format and allows user to map columns for:
+    - Coordinates (X, Y, Z)
+    - Orientation (dip, dip_direction/azimuth)
+    - Fold axis (plunge, trend)
+    - Feature identification (feature_type, feature_name)
+    """
+    
+    def __init__(self, df: pd.DataFrame, detected_format: str = "unknown", parent=None):
+        super().__init__(parent)
+        self.df = df
+        self.detected_format = detected_format
+        self.setWindowTitle("Map Structural Columns")
+        self.setMinimumSize(700, 600)
+        self._build_ui()
+        self._auto_detect_columns()
+    
+
+
+    def _get_stylesheet(self) -> str:
+        """Get the stylesheet for current theme."""
+        return f"""
+        
+                    QDialog {{
+                        background-color: {ModernColors.PANEL_BG};
+                        color: {ModernColors.TEXT_PRIMARY};
+                    }}
+                    QLabel {{
+                        color: {ModernColors.TEXT_PRIMARY};
+                        background: transparent;
+                    }}
+                    QGroupBox {{
+                        color: {ModernColors.TEXT_PRIMARY};
+                        border: 1px solid {ModernColors.BORDER};
+                        border-radius: 8px;
+                        margin-top: 12px;
+                        padding-top: 8px;
+                        font-weight: 600;
+                    }}
+                    QGroupBox::title {{
+                        subcontrol-origin: margin;
+                        left: 12px;
+                        padding: 0 6px;
+                    }}
+                
+        """
+
+    def refresh_theme(self):
+        """Update colors when theme changes."""
+        colors = get_theme_colors()
+        # Re-apply stylesheet with new theme colors
+        if hasattr(self, "setStyleSheet"):
+            # Rebuild stylesheet with new theme colors
+            self.setStyleSheet(self._get_stylesheet())
+        # Refresh child widgets
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "refresh_theme"):
+                child.refresh_theme()
+    def _build_ui(self):
+        """Build the dialog UI."""
+        self.setStyleSheet(self._get_stylesheet())
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+        
+        # Header
+        header = QLabel(f"Map CSV Columns")
+        header.setStyleSheet(f"font-size: 18pt; font-weight: bold; color: {ModernColors.TEXT_PRIMARY};")
+        layout.addWidget(header)
+        
+        # Format detection info
+        format_label = QLabel(f"Detected format: {self.detected_format.upper()}")
+        format_label.setStyleSheet(f"font-size: 11pt; color: {ModernColors.TEXT_SECONDARY};")
+        layout.addWidget(format_label)
+        
+        # Preview table
+        preview_group = QGroupBox("Data Preview (first 5 rows)")
+        preview_layout = QVBoxLayout(preview_group)
+        
+        self.preview_table = QTableWidget()
+        self.preview_table.setMaximumHeight(150)
+        self._populate_preview()
+        preview_layout.addWidget(self.preview_table)
+        layout.addWidget(preview_group)
+        
+        # Column mapping section
+        mapping_group = QGroupBox("Column Mapping")
+        mapping_layout = QVBoxLayout(mapping_group)
+        
+        columns = ['— Not Mapped —'] + list(self.df.columns)
+        
+        # Coordinate mappings
+        coord_frame = QFrame()
+        coord_layout = QHBoxLayout(coord_frame)
+        coord_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.x_combo = self._create_mapping_row("X Coordinate", columns, coord_layout)
+        self.y_combo = self._create_mapping_row("Y Coordinate", columns, coord_layout)
+        self.z_combo = self._create_mapping_row("Z Coordinate", columns, coord_layout)
+        mapping_layout.addWidget(coord_frame)
+        
+        # Orientation mappings
+        orient_frame = QFrame()
+        orient_layout = QHBoxLayout(orient_frame)
+        orient_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.dip_combo = self._create_mapping_row("Dip (0-90°)", columns, orient_layout)
+        self.azimuth_combo = self._create_mapping_row("Dip Direction / Azimuth", columns, orient_layout)
+        mapping_layout.addWidget(orient_frame)
+        
+        # Fold axis mappings
+        fold_frame = QFrame()
+        fold_layout = QHBoxLayout(fold_frame)
+        fold_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.plunge_combo = self._create_mapping_row("Plunge (0-90°)", columns, fold_layout)
+        self.trend_combo = self._create_mapping_row("Trend (0-360°)", columns, fold_layout)
+        mapping_layout.addWidget(fold_frame)
+        
+        # Feature identification
+        feature_frame = QFrame()
+        feature_layout = QHBoxLayout(feature_frame)
+        feature_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.type_combo = self._create_mapping_row("Feature Type", columns, feature_layout)
+        self.name_combo = self._create_mapping_row("Feature Name", columns, feature_layout)
+        self.set_id_combo = self._create_mapping_row("Set ID", columns, feature_layout)
+        mapping_layout.addWidget(feature_frame)
+        
+        layout.addWidget(mapping_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.BORDER};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: none;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {ModernColors.TEXT_HINT};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        accept_btn = QPushButton("Accept Mapping")
+        accept_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.ACCENT_PRIMARY};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: #2563eb;
+            }}
+        """)
+        accept_btn.clicked.connect(self.accept)
+        button_layout.addWidget(accept_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def _create_mapping_row(self, label: str, columns: List[str], parent_layout) -> QComboBox:
+        """Create a mapping row with label and combo box."""
+        frame = QFrame()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+        
+        lbl = QLabel(label)
+        lbl.setStyleSheet(f"font-size: 10pt; color: {ModernColors.TEXT_SECONDARY}; font-weight: 600;")
+        layout.addWidget(lbl)
+        
+        combo = QComboBox()
+        combo.addItems(columns)
+        combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 4px;
+                padding: 6px 12px;
+                min-width: 120px;
+            }}
+            QComboBox:hover {{
+                border-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                selection-background-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+        """)
+        layout.addWidget(combo)
+        
+        parent_layout.addWidget(frame)
+        return combo
+    
+    def _populate_preview(self):
+        """Populate the preview table with first 5 rows."""
+        preview_df = self.df.head(5)
+        
+        self.preview_table.setColumnCount(len(preview_df.columns))
+        self.preview_table.setRowCount(len(preview_df))
+        self.preview_table.setHorizontalHeaderLabels(list(preview_df.columns))
+        
+        for i, row in preview_df.iterrows():
+            for j, val in enumerate(row):
+                item = QTableWidgetItem(str(val) if pd.notna(val) else "")
+                self.preview_table.setItem(i, j, item)
+        
+        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 4px;
+                gridline-color: {ModernColors.BORDER};
+            }}
+            QTableWidget::item {{
+                padding: 4px;
+            }}
+            QHeaderView::section {{
+                background-color: {ModernColors.PANEL_BG};
+                color: {ModernColors.TEXT_SECONDARY};
+                border: none;
+                padding: 6px;
+                font-weight: 600;
+            }}
+        """)
+    
+    def _auto_detect_columns(self):
+        """Auto-detect column mappings based on column names."""
+        cols_lower = {c.lower(): c for c in self.df.columns}
+        
+        # Coordinate patterns
+        x_patterns = ['x', 'x_coord', 'xc', 'xpos', 'easting', 'east']
+        y_patterns = ['y', 'y_coord', 'yc', 'ypos', 'northing', 'north']
+        z_patterns = ['z', 'z_coord', 'zc', 'zpos', 'elevation', 'elev', 'rl']
+        
+        for pattern in x_patterns:
+            if pattern in cols_lower:
+                self.x_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        for pattern in y_patterns:
+            if pattern in cols_lower:
+                self.y_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        for pattern in z_patterns:
+            if pattern in cols_lower:
+                self.z_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        # Orientation patterns
+        dip_patterns = ['dip', 'dip_angle', 'inclination']
+        azimuth_patterns = ['dip_direction', 'dipdirection', 'dd', 'azimuth', 'az']
+        
+        for pattern in dip_patterns:
+            if pattern in cols_lower:
+                self.dip_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        for pattern in azimuth_patterns:
+            if pattern in cols_lower:
+                self.azimuth_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        # Lineation patterns
+        plunge_patterns = ['plunge', 'plunge_angle', 'plng']
+        trend_patterns = ['trend', 'trend_azimuth', 'trd']
+        
+        for pattern in plunge_patterns:
+            if pattern in cols_lower:
+                self.plunge_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        for pattern in trend_patterns:
+            if pattern in cols_lower:
+                self.trend_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        # Feature patterns
+        type_patterns = ['feature_type', 'type', 'structure_type', 'category']
+        name_patterns = ['feature_name', 'name', 'structure_name', 'label', 'id']
+        set_patterns = ['set_id', 'set', 'group', 'family']
+        
+        for pattern in type_patterns:
+            if pattern in cols_lower:
+                self.type_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        for pattern in name_patterns:
+            if pattern in cols_lower:
+                self.name_combo.setCurrentText(cols_lower[pattern])
+                break
+        
+        for pattern in set_patterns:
+            if pattern in cols_lower:
+                self.set_id_combo.setCurrentText(cols_lower[pattern])
+                break
+    
+    def _get_selected(self, combo: QComboBox) -> Optional[str]:
+        """Get selected column or None if not mapped."""
+        val = combo.currentText()
+        return None if val == '— Not Mapped —' else val
+    
+    def get_mapping(self) -> Dict[str, Optional[str]]:
+        """Return the column mapping dictionary."""
+        return {
+            'x_col': self._get_selected(self.x_combo),
+            'y_col': self._get_selected(self.y_combo),
+            'z_col': self._get_selected(self.z_combo),
+            'dip_col': self._get_selected(self.dip_combo),
+            'dip_direction_col': self._get_selected(self.azimuth_combo),
+            'plunge_col': self._get_selected(self.plunge_combo),
+            'trend_col': self._get_selected(self.trend_combo),
+            'feature_type_col': self._get_selected(self.type_combo),
+            'feature_name_col': self._get_selected(self.name_combo),
+            'set_id_col': self._get_selected(self.set_id_combo),
+        }
+
+
+class StructuralImportPanel(BaseAnalysisPanel):
+    """
+    Panel for importing structural features (faults, folds, unconformities) from CSV.
+    """
+    
+    task_name = "load_structural_features"
+    
+    # PanelManager metadata
+    PANEL_ID = "StructuralImportPanel"
+    PANEL_NAME = "Import Structural Features"
+    PANEL_CATEGORY = PanelCategory.GEOLOGY
+    PANEL_DEFAULT_VISIBLE = False
+    PANEL_DEFAULT_DOCK_AREA = DockArea.RIGHT
+    
+    def __init__(self, parent=None):
+        super().__init__(parent=parent, panel_id="structural_import")
+        self.setWindowTitle("Import Structural Features")
+        if parent is not None:
+            self.setMinimumSize(900, 650)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._init_state()
+        self._build_ui()
+    
+    def _init_state(self):
+        """Initialize panel state."""
+        self.file_path = None
+        self.df_raw = None
+        self.column_mapping = None
+        self.detected_format = "unknown"
+        self.loaded_features = None
+    
+    def _build_ui(self):
+        """Build the panel UI."""
+        self.setStyleSheet(f"""
+            QWidget {{
+                font-family: 'Segoe UI', -apple-system, sans-serif;
+                color: {Colors.TEXT_PRIMARY};
+                background-color: {Colors.BG_PRIMARY};
+            }}
+            QGroupBox {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 12px;
+                margin-top: 16px;
+                padding-top: 12px;
+                font-weight: 600;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 16px;
+                padding: 0 8px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+        
+        # Clear existing layout from BaseAnalysisPanel
+        old_layout = self.layout()
+        if old_layout:
+            while old_layout.count():
+                item = old_layout.takeAt(0)
+                if item:
+                    widget = item.widget()
+                    if widget:
+                        widget.hide()
+                        widget.setParent(None)
+                        widget.deleteLater()
+                    del item
+            QWidget().setLayout(old_layout)
+        
+        # Create new main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Header
+        header = SectionHeader(
+            "Import Structural Features",
+            "Load faults, folds, and unconformities from CSV files"
+        )
+        main_layout.addWidget(header)
+        
+        # Main content with splitter
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
+        splitter.setStyleSheet(f"""
+            QSplitter::handle {{
+                background-color: {Colors.BORDER};
+            }}
+        """)
+        splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        # === LEFT PANEL: File Selection ===
+        left_widget = QFrame()
+        left_widget.setStyleSheet(f"background-color: {Colors.BG_SURFACE};")
+        left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        left_widget.setMinimumWidth(380)
+        left_widget.setMaximumWidth(450)
+        
+        l_layout = QVBoxLayout(left_widget)
+        l_layout.setContentsMargins(20, 20, 20, 20)
+        l_layout.setSpacing(16)
+        
+        # Section label
+        files_label = QLabel("SOURCE FILE")
+        files_label.setStyleSheet(f"""
+            color: {Colors.TEXT_SECONDARY};
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        """)
+        l_layout.addWidget(files_label)
+        
+        # File input card
+        self.file_card = FileInputCard(
+            label="Structural Data CSV",
+            file_filter="CSV Files (*.csv);;All Files (*)",
+            required=True,
+            icon="📊"
+        )
+        self.file_card.fileSelected.connect(self._on_file_selected)
+        self.file_card.fileCleared.connect(self._on_file_cleared)
+        l_layout.addWidget(self.file_card)
+        
+        # Format info frame
+        self.format_frame = QFrame()
+        self.format_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 12px;
+            }}
+        """)
+        format_layout = QVBoxLayout(self.format_frame)
+        format_layout.setContentsMargins(12, 12, 12, 12)
+        format_layout.setSpacing(8)
+        
+        self.format_label = QLabel("Detected Format: —")
+        self.format_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11pt;")
+        format_layout.addWidget(self.format_label)
+        
+        self.stats_label = QLabel("Rows: — | Columns: —")
+        self.stats_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 10pt;")
+        format_layout.addWidget(self.stats_label)
+        
+        self.format_frame.hide()
+        l_layout.addWidget(self.format_frame)
+        
+        l_layout.addStretch()
+        
+        # Action buttons
+        self.btn_configure = ActionButton("Configure Mapping", variant="secondary", icon="⚙️")
+        self.btn_configure.clicked.connect(self._on_configure_mapping)
+        self.btn_configure.setEnabled(False)
+        l_layout.addWidget(self.btn_configure)
+        
+        self.btn_load = ActionButton("Load to Registry", variant="primary", icon="📥")
+        self.btn_load.clicked.connect(self._on_load_clicked)
+        self.btn_load.setEnabled(False)
+        l_layout.addWidget(self.btn_load)
+        
+        splitter.addWidget(left_widget)
+        
+        # === RIGHT PANEL: Log & Results ===
+        right_widget = QFrame()
+        right_widget.setStyleSheet(f"background-color: {Colors.BG_PRIMARY};")
+        right_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        r_layout = QVBoxLayout(right_widget)
+        r_layout.setContentsMargins(20, 20, 20, 20)
+        r_layout.setSpacing(16)
+        
+        # Results section
+        results_label = QLabel("LOADED FEATURES")
+        results_label.setStyleSheet(f"""
+            color: {Colors.TEXT_SECONDARY};
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        """)
+        r_layout.addWidget(results_label)
+        
+        # Features table
+        self.features_table = QTableWidget()
+        self.features_table.setColumnCount(4)
+        self.features_table.setHorizontalHeaderLabels(["Type", "Name", "Points", "Orientations"])
+        self.features_table.horizontalHeader().setStretchLastSection(True)
+        self.features_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.features_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                gridline-color: {Colors.BORDER};
+            }}
+            QTableWidget::item {{
+                padding: 8px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+            QHeaderView::section {{
+                background-color: {Colors.BG_PRIMARY};
+                color: {Colors.TEXT_SECONDARY};
+                border: none;
+                padding: 8px;
+                font-weight: 600;
+            }}
+        """)
+        r_layout.addWidget(self.features_table)
+        
+        # Log section
+        log_label = QLabel("LOG")
+        log_label.setStyleSheet(f"""
+            color: {Colors.TEXT_SECONDARY};
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        """)
+        r_layout.addWidget(log_label)
+        
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(150)
+        self.log_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {Colors.BG_SURFACE};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 12px;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 10pt;
+            }}
+        """)
+        r_layout.addWidget(self.log_text)
+        
+        splitter.addWidget(right_widget)
+        splitter.setSizes([400, 600])
+        
+        main_layout.addWidget(splitter)
+    
+    def _log(self, message: str, level: str = "info"):
+        """Add message to log with color coding."""
+        colors = {
+            "success": f"{ModernColors.SUCCESS}",
+            "error": f"{ModernColors.ERROR}",
+            "warning": f"{ModernColors.WARNING}",
+            "info": f"{ModernColors.TEXT_SECONDARY}",
+        }
+        color = colors.get(level, colors["info"])
+        self.log_text.append(f'<span style="color: {color};">{message}</span>')
+    
+    def _on_file_selected(self, path: str):
+        """Handle file selection."""
+        try:
+            logger.info(f"Loading structural file: {path}")
+            self.file_path = Path(path)
+            
+            # Read CSV for preview
+            self.df_raw = pd.read_csv(path)
+            logger.info(f"Loaded {len(self.df_raw)} rows, {len(self.df_raw.columns)} columns")
+            
+            # Detect format
+            from ..parsers.structural_csv_parser import StructuralCSVParser, detect_structural_csv_format
+            
+            self.detected_format = detect_structural_csv_format(self.file_path).value
+            
+            # Update UI
+            self.format_label.setText(f"Detected Format: {self.detected_format.upper()}")
+            self.stats_label.setText(f"Rows: {len(self.df_raw):,} | Columns: {len(self.df_raw.columns)}")
+            self.format_frame.show()
+            
+            self.file_card.set_row_count(len(self.df_raw))
+            
+            self._log(f"✓ Loaded file: {self.file_path.name}", "success")
+            self._log(f"  Format: {self.detected_format.upper()}, {len(self.df_raw):,} rows", "info")
+            
+            # Enable buttons
+            self.btn_configure.setEnabled(True)
+            self.btn_load.setEnabled(True)
+            
+            # Auto-show mapping dialog
+            self._on_configure_mapping()
+            
+        except Exception as e:
+            logger.error(f"Error loading file: {e}", exc_info=True)
+            self._log(f"✗ Error: {str(e)}", "error")
+            QMessageBox.critical(self, "Load Error", f"Failed to load file:\n{str(e)}")
+    
+    def _on_file_cleared(self):
+        """Handle file cleared."""
+        self.file_path = None
+        self.df_raw = None
+        self.column_mapping = None
+        self.detected_format = "unknown"
+        
+        self.format_frame.hide()
+        self.btn_configure.setEnabled(False)
+        self.btn_load.setEnabled(False)
+        
+        self._log("File cleared", "info")
+    
+    def _on_configure_mapping(self):
+        """Open column mapping dialog."""
+        if self.df_raw is None:
+            return
+        
+        dialog = StructuralColumnMappingDialog(
+            self.df_raw, 
+            self.detected_format,
+            self
+        )
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.column_mapping = dialog.get_mapping()
+            self._log(f"Column mapping configured", "success")
+            
+            # Show mapping in log
+            mapped = {k: v for k, v in self.column_mapping.items() if v}
+            if mapped:
+                self._log(f"  Mapped: {', '.join(f'{k}={v}' for k, v in mapped.items())}", "info")
+    
+    def _on_load_clicked(self):
+        """Load structural features to registry."""
+        if self.file_path is None:
+            QMessageBox.warning(self, "No File", "Please select a CSV file first.")
+            return
+        
+        self._log("Loading structural features...", "info")
+        self.btn_load.setEnabled(False)
+        
+        try:
+            # Parse using structural CSV parser
+            from ..parsers.structural_csv_parser import StructuralCSVParser, ColumnMapping
+            
+            # Convert mapping dict to ColumnMapping object
+            mapping = None
+            if self.column_mapping:
+                mapping = ColumnMapping(**self.column_mapping)
+            
+            parser = StructuralCSVParser()
+            result = parser.parse(
+                file_path=self.file_path,
+                column_mapping=mapping,
+                validate=True,
+            )
+            
+            self.loaded_features = result.collection
+            
+            # Log results
+            fc = result.collection.feature_count
+            self._log(f"✓ Parsed: {fc['total']} features", "success")
+            self._log(f"  Faults: {fc['faults']}, Folds: {fc['folds']}, Unconformities: {fc['unconformities']}", "info")
+            
+            if result.validation_warnings:
+                self._log(f"  Warnings: {len(result.validation_warnings)}", "warning")
+            
+            if result.validation_errors:
+                self._log(f"  Errors: {len(result.validation_errors)}", "error")
+                for err in result.validation_errors[:5]:
+                    self._log(f"    - {err}", "error")
+            
+            # Update features table
+            self._update_features_table()
+            
+            # Register to controller
+            self._register_features()
+            
+        except Exception as e:
+            logger.error(f"Error loading features: {e}", exc_info=True)
+            self._log(f"✗ Error: {str(e)}", "error")
+            QMessageBox.critical(self, "Load Error", f"Failed to load features:\n{str(e)}")
+        
+        finally:
+            self.btn_load.setEnabled(True)
+    
+    def _update_features_table(self):
+        """Update the features table with loaded features."""
+        if self.loaded_features is None:
+            return
+        
+        features = self.loaded_features.all_features
+        self.features_table.setRowCount(len(features))
+        
+        for i, feature in enumerate(features):
+            # Type
+            type_item = QTableWidgetItem(feature.feature_type.value.capitalize())
+            self.features_table.setItem(i, 0, type_item)
+            
+            # Name
+            name_item = QTableWidgetItem(feature.name)
+            self.features_table.setItem(i, 1, name_item)
+            
+            # Points
+            points_item = QTableWidgetItem(str(feature.point_count))
+            self.features_table.setItem(i, 2, points_item)
+            
+            # Orientations
+            orient_count = 0
+            if hasattr(feature, 'orientations'):
+                orient_count = len(feature.orientations)
+            elif hasattr(feature, 'fold_axes'):
+                orient_count = len(feature.fold_axes)
+            orient_item = QTableWidgetItem(str(orient_count))
+            self.features_table.setItem(i, 3, orient_item)
+    
+    def _register_features(self):
+        """Register loaded features to the data controller."""
+        if self.loaded_features is None:
+            return
+        
+        try:
+            # Get the app controller
+            controller = self._get_controller()
+            if controller is None:
+                self._log("Warning: No controller available, features not registered", "warning")
+                return
+            
+            # Register via data controller
+            if hasattr(controller, 'data') and hasattr(controller.data, 'register_structural_features'):
+                controller.data.register_structural_features(self.loaded_features)
+                self._log("✓ Features registered to data controller", "success")
+            else:
+                self._log("Warning: Data controller not available", "warning")
+                
+        except Exception as e:
+            logger.error(f"Error registering features: {e}", exc_info=True)
+            self._log(f"Warning: Could not register features - {str(e)}", "warning")
+    
+    def _get_controller(self):
+        """Get the app controller from parent hierarchy."""
+        # Try to find MainWindow in parent hierarchy
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, 'controller'):
+                return parent.controller
+            parent = parent.parent()
+        return None
+

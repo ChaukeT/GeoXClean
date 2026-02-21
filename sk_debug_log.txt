@@ -1,0 +1,275 @@
+=== SIMPLE KRIGING DEBUG LOG ===
+Started: 2026-02-08 21:40:22
+============================================================
+
+[0.00s] Controller: _prepare_simple_kriging_payload called
+
+[0.00s] Debug mode activated by user
+
+[0.00s] Input Validation
+  params_keys: ['data', 'variable', 'debug_mode', 'grid_spec', 'parameters', '_progress_callback']
+
+[0.00s] Data Validation
+  n_rows: 4010
+  columns: ['HoleID', 'From', 'To', 'AL2O3', 'P', 'LENGTH', 'SIO2', 'FE', 'sample_count', 'support', 'is_partial', 'method', 'weighting', 'element_weights', 'total_length', 'total_mass', 'X', 'Y', 'Z', 'GLOBAL_INTERVAL_ID', 'declust_weight', 'declust_cell']
+  data_type: DataFrame
+
+[0.01s] Validation PASSED
+
+[0.01s] Proceeding to normal execution path with debug tracking
+
+[0.01s] Starting data validation
+
+[0.01s] Running data source validation
+
+[0.01s] Data source validation passed
+
+[0.01s] Cleaning data
+  original_rows: 4010
+  variable: AL2O3
+  columns: ['HoleID', 'From', 'To', 'AL2O3', 'P', 'LENGTH', 'SIO2', 'FE', 'sample_count', 'support', 'is_partial', 'method', 'weighting', 'element_weights', 'total_length', 'total_mass', 'X', 'Y', 'Z', 'GLOBAL_INTERVAL_ID', 'declust_weight', 'declust_cell']
+
+[0.01s] Data cleaned
+  cleaned_rows: 4010
+  dropped_rows: 0
+  has_attrs: True
+
+[0.01s] Extracting coordinates and values
+
+[0.02s] Coordinates extracted
+  n_samples: 4010
+  coords_shape: (4010, 3)
+  values_shape: (4010,)
+  values_min: 1.057
+  values_max: 5.687184079602002
+  values_mean: 3.002433343577074
+
+[0.02s] Building estimation grid
+
+[0.02s] Progress 5%: Creating estimation grid...
+[0.05s] Progress 10%: Starting Simple Kriging...
+[0.05s] CALLING simple_kriging_3d - CRITICAL EXECUTION POINT
+  n_data_samples: 4010
+  n_grid_points: 871488
+  variogram_type: spherical
+  ndmax: 12
+
+[0.08s] Progress 10%: Querying neighbors for 871,488 blocks...
+[98.74s] Progress 20%: Neighbor search complete
+[98.81s] Progress 30%: SK: 30% (5,000/871,488 blocks)
+[98.81s] Progress 30%: SK: 30% (10,000/871,488 blocks)
+[98.81s] Progress 31%: SK: 31% (15,000/871,488 blocks)
+[98.81s] Progress 31%: SK: 31% (20,000/871,488 blocks)
+[98.81s] Progress 31%: SK: 31% (25,000/871,488 blocks)
+[98.81s] Progress 32%: SK: 32% (30,000/871,488 blocks)
+[98.81s] Progress 32%: SK: 32% (35,000/871,488 blocks)
+[98.82s] Progress 32%: SK: 32% (40,000/871,488 blocks)
+[98.82s] Progress 33%: SK: 33% (45,000/871,488 blocks)
+[98.82s] Progress 33%: SK: 33% (50,000/871,488 blocks)
+[98.82s] Progress 34%: SK: 34% (55,000/871,488 blocks)
+[98.82s] Progress 34%: SK: 34% (60,000/871,488 blocks)
+[98.83s] Progress 34%: SK: 34% (65,000/871,488 blocks)
+[98.83s] Progress 35%: SK: 35% (70,000/871,488 blocks)
+[98.83s] Progress 35%: SK: 35% (75,000/871,488 blocks)
+[98.83s] Progress 35%: SK: 35% (80,000/871,488 blocks)
+[98.83s] Progress 36%: SK: 36% (85,000/871,488 blocks)
+[98.84s] Progress 36%: SK: 36% (90,000/871,488 blocks)
+[98.84s] Progress 37%: SK: 37% (95,000/871,488 blocks)
+[98.84s] Progress 37%: SK: 37% (100,000/871,488 blocks)
+[98.84s] Progress 37%: SK: 37% (105,000/871,488 blocks)
+[98.84s] Progress 38%: SK: 38% (110,000/871,488 blocks)
+[98.85s] Progress 38%: SK: 38% (115,000/871,488 blocks)
+[98.85s] Progress 38%: SK: 38% (120,000/871,488 blocks)
+[98.85s] Progress 39%: SK: 39% (125,000/871,488 blocks)
+[98.85s] Progress 39%: SK: 39% (130,000/871,488 blocks)
+[98.85s] Progress 40%: SK: 40% (135,000/871,488 blocks)
+[98.86s] Progress 40%: SK: 40% (140,000/871,488 blocks)
+[98.86s] Progress 40%: SK: 40% (145,000/871,488 blocks)
+[98.86s] Progress 41%: SK: 41% (150,000/871,488 blocks)
+[98.86s] Progress 41%: SK: 41% (155,000/871,488 blocks)
+[98.86s] Progress 41%: SK: 41% (160,000/871,488 blocks)
+[98.87s] Progress 42%: SK: 42% (165,000/871,488 blocks)
+[98.87s] Progress 42%: SK: 42% (170,000/871,488 blocks)
+[98.87s] Progress 43%: SK: 43% (175,000/871,488 blocks)
+[98.87s] Progress 43%: SK: 43% (180,000/871,488 blocks)
+[98.87s] Progress 43%: SK: 43% (185,000/871,488 blocks)
+[98.88s] Progress 44%: SK: 44% (190,000/871,488 blocks)
+[98.88s] Progress 44%: SK: 44% (195,000/871,488 blocks)
+[98.88s] Progress 44%: SK: 44% (200,000/871,488 blocks)
+[98.88s] Progress 45%: SK: 45% (205,000/871,488 blocks)
+[98.89s] Progress 45%: SK: 45% (210,000/871,488 blocks)
+[98.89s] Progress 45%: SK: 45% (215,000/871,488 blocks)
+[98.89s] Progress 46%: SK: 46% (220,000/871,488 blocks)
+[98.89s] Progress 46%: SK: 46% (225,000/871,488 blocks)
+[98.89s] Progress 47%: SK: 47% (230,000/871,488 blocks)
+[98.89s] Progress 47%: SK: 47% (235,000/871,488 blocks)
+[98.90s] Progress 47%: SK: 47% (240,000/871,488 blocks)
+[98.90s] Progress 48%: SK: 48% (245,000/871,488 blocks)
+[98.90s] Progress 48%: SK: 48% (250,000/871,488 blocks)
+[98.90s] Progress 48%: SK: 48% (255,000/871,488 blocks)
+[98.90s] Progress 49%: SK: 49% (260,000/871,488 blocks)
+[98.91s] Progress 49%: SK: 49% (265,000/871,488 blocks)
+[98.91s] Progress 50%: SK: 50% (270,000/871,488 blocks)
+[98.91s] Progress 50%: SK: 50% (275,000/871,488 blocks)
+[98.91s] Progress 50%: SK: 50% (280,000/871,488 blocks)
+[98.91s] Progress 51%: SK: 51% (285,000/871,488 blocks)
+[98.92s] Progress 51%: SK: 51% (290,000/871,488 blocks)
+[98.92s] Progress 51%: SK: 51% (295,000/871,488 blocks)
+[98.92s] Progress 52%: SK: 52% (300,000/871,488 blocks)
+[98.92s] Progress 52%: SK: 52% (305,000/871,488 blocks)
+[98.92s] Progress 53%: SK: 53% (310,000/871,488 blocks)
+[98.92s] Progress 53%: SK: 53% (315,000/871,488 blocks)
+[98.93s] Progress 53%: SK: 53% (320,000/871,488 blocks)
+[98.93s] Progress 54%: SK: 54% (325,000/871,488 blocks)
+[98.93s] Progress 54%: SK: 54% (330,000/871,488 blocks)
+[98.93s] Progress 54%: SK: 54% (335,000/871,488 blocks)
+[98.93s] Progress 55%: SK: 55% (340,000/871,488 blocks)
+[98.94s] Progress 55%: SK: 55% (345,000/871,488 blocks)
+[98.94s] Progress 56%: SK: 56% (350,000/871,488 blocks)
+[98.94s] Progress 56%: SK: 56% (355,000/871,488 blocks)
+[98.94s] Progress 56%: SK: 56% (360,000/871,488 blocks)
+[98.95s] Progress 57%: SK: 57% (365,000/871,488 blocks)
+[98.95s] Progress 57%: SK: 57% (370,000/871,488 blocks)
+[98.95s] Progress 57%: SK: 57% (375,000/871,488 blocks)
+[98.95s] Progress 58%: SK: 58% (380,000/871,488 blocks)
+[98.95s] Progress 58%: SK: 58% (385,000/871,488 blocks)
+[98.96s] Progress 58%: SK: 58% (390,000/871,488 blocks)
+[98.96s] Progress 59%: SK: 59% (395,000/871,488 blocks)
+[98.96s] Progress 59%: SK: 59% (400,000/871,488 blocks)
+[98.96s] Progress 60%: SK: 60% (405,000/871,488 blocks)
+[98.96s] Progress 60%: SK: 60% (410,000/871,488 blocks)
+[98.97s] Progress 60%: SK: 60% (415,000/871,488 blocks)
+[98.97s] Progress 61%: SK: 61% (420,000/871,488 blocks)
+[98.97s] Progress 61%: SK: 61% (425,000/871,488 blocks)
+[98.97s] Progress 61%: SK: 61% (430,000/871,488 blocks)
+[98.97s] Progress 62%: SK: 62% (435,000/871,488 blocks)
+[98.98s] Progress 62%: SK: 62% (440,000/871,488 blocks)
+[98.98s] Progress 63%: SK: 63% (445,000/871,488 blocks)
+[98.98s] Progress 63%: SK: 63% (450,000/871,488 blocks)
+[98.98s] Progress 63%: SK: 63% (455,000/871,488 blocks)
+[98.98s] Progress 64%: SK: 64% (460,000/871,488 blocks)
+[98.99s] Progress 64%: SK: 64% (465,000/871,488 blocks)
+[98.99s] Progress 64%: SK: 64% (470,000/871,488 blocks)
+[98.99s] Progress 65%: SK: 65% (475,000/871,488 blocks)
+[98.99s] Progress 65%: SK: 65% (480,000/871,488 blocks)
+[98.99s] Progress 66%: SK: 66% (485,000/871,488 blocks)
+[99.00s] Progress 66%: SK: 66% (490,000/871,488 blocks)
+[99.00s] Progress 66%: SK: 66% (495,000/871,488 blocks)
+[99.00s] Progress 67%: SK: 67% (500,000/871,488 blocks)
+[99.00s] Progress 67%: SK: 67% (505,000/871,488 blocks)
+[99.00s] Progress 67%: SK: 67% (510,000/871,488 blocks)
+[99.01s] Progress 68%: SK: 68% (515,000/871,488 blocks)
+[99.01s] Progress 68%: SK: 68% (520,000/871,488 blocks)
+[99.01s] Progress 69%: SK: 69% (525,000/871,488 blocks)
+[99.01s] Progress 69%: SK: 69% (530,000/871,488 blocks)
+[99.01s] Progress 69%: SK: 69% (535,000/871,488 blocks)
+[99.02s] Progress 70%: SK: 70% (540,000/871,488 blocks)
+[99.02s] Progress 70%: SK: 70% (545,000/871,488 blocks)
+[99.02s] Progress 70%: SK: 70% (550,000/871,488 blocks)
+[99.02s] Progress 71%: SK: 71% (555,000/871,488 blocks)
+[99.03s] Progress 71%: SK: 71% (560,000/871,488 blocks)
+[99.03s] Progress 71%: SK: 71% (565,000/871,488 blocks)
+[99.03s] Progress 72%: SK: 72% (570,000/871,488 blocks)
+[99.03s] Progress 72%: SK: 72% (575,000/871,488 blocks)
+[99.03s] Progress 73%: SK: 73% (580,000/871,488 blocks)
+[99.04s] Progress 73%: SK: 73% (585,000/871,488 blocks)
+[99.04s] Progress 73%: SK: 73% (590,000/871,488 blocks)
+[99.04s] Progress 74%: SK: 74% (595,000/871,488 blocks)
+[99.04s] Progress 74%: SK: 74% (600,000/871,488 blocks)
+[99.05s] Progress 74%: SK: 74% (605,000/871,488 blocks)
+[99.05s] Progress 75%: SK: 75% (610,000/871,488 blocks)
+[99.05s] Progress 75%: SK: 75% (615,000/871,488 blocks)
+[99.05s] Progress 76%: SK: 76% (620,000/871,488 blocks)
+[99.05s] Progress 76%: SK: 76% (625,000/871,488 blocks)
+[99.06s] Progress 76%: SK: 76% (630,000/871,488 blocks)
+[99.06s] Progress 77%: SK: 77% (635,000/871,488 blocks)
+[99.06s] Progress 77%: SK: 77% (640,000/871,488 blocks)
+[99.06s] Progress 77%: SK: 77% (645,000/871,488 blocks)
+[99.07s] Progress 78%: SK: 78% (650,000/871,488 blocks)
+[99.07s] Progress 78%: SK: 78% (655,000/871,488 blocks)
+[99.07s] Progress 79%: SK: 79% (660,000/871,488 blocks)
+[99.07s] Progress 79%: SK: 79% (665,000/871,488 blocks)
+[99.07s] Progress 79%: SK: 79% (670,000/871,488 blocks)
+[99.08s] Progress 80%: SK: 80% (675,000/871,488 blocks)
+[99.08s] Progress 80%: SK: 80% (680,000/871,488 blocks)
+[99.08s] Progress 80%: SK: 80% (685,000/871,488 blocks)
+[99.08s] Progress 81%: SK: 81% (690,000/871,488 blocks)
+[99.09s] Progress 81%: SK: 81% (695,000/871,488 blocks)
+[99.09s] Progress 82%: SK: 82% (700,000/871,488 blocks)
+[99.09s] Progress 82%: SK: 82% (705,000/871,488 blocks)
+[99.09s] Progress 82%: SK: 82% (710,000/871,488 blocks)
+[99.09s] Progress 83%: SK: 83% (715,000/871,488 blocks)
+[99.10s] Progress 83%: SK: 83% (720,000/871,488 blocks)
+[99.10s] Progress 83%: SK: 83% (725,000/871,488 blocks)
+[99.10s] Progress 84%: SK: 84% (730,000/871,488 blocks)
+[99.10s] Progress 84%: SK: 84% (735,000/871,488 blocks)
+[99.10s] Progress 84%: SK: 84% (740,000/871,488 blocks)
+[99.11s] Progress 85%: SK: 85% (745,000/871,488 blocks)
+[99.11s] Progress 85%: SK: 85% (750,000/871,488 blocks)
+[99.11s] Progress 86%: SK: 86% (755,000/871,488 blocks)
+[99.11s] Progress 86%: SK: 86% (760,000/871,488 blocks)
+[99.11s] Progress 86%: SK: 86% (765,000/871,488 blocks)
+[99.12s] Progress 87%: SK: 87% (770,000/871,488 blocks)
+[99.12s] Progress 87%: SK: 87% (775,000/871,488 blocks)
+[99.12s] Progress 87%: SK: 87% (780,000/871,488 blocks)
+[99.12s] Progress 88%: SK: 88% (785,000/871,488 blocks)
+[99.13s] Progress 88%: SK: 88% (790,000/871,488 blocks)
+[99.13s] Progress 89%: SK: 89% (795,000/871,488 blocks)
+[99.14s] Progress 89%: SK: 89% (800,000/871,488 blocks)
+[99.14s] Progress 89%: SK: 89% (805,000/871,488 blocks)
+[99.14s] Progress 90%: SK: 90% (810,000/871,488 blocks)
+[99.14s] Progress 90%: SK: 90% (815,000/871,488 blocks)
+[99.14s] Progress 90%: SK: 90% (820,000/871,488 blocks)
+[99.15s] Progress 91%: SK: 91% (825,000/871,488 blocks)
+[99.15s] Progress 91%: SK: 91% (830,000/871,488 blocks)
+[99.15s] Progress 92%: SK: 92% (835,000/871,488 blocks)
+[99.15s] Progress 92%: SK: 92% (840,000/871,488 blocks)
+[99.15s] Progress 92%: SK: 92% (845,000/871,488 blocks)
+[99.16s] Progress 93%: SK: 93% (850,000/871,488 blocks)
+[99.16s] Progress 93%: SK: 93% (855,000/871,488 blocks)
+[99.16s] Progress 93%: SK: 93% (860,000/871,488 blocks)
+[99.16s] Progress 94%: SK: 94% (865,000/871,488 blocks)
+[99.16s] Progress 94%: SK: 94% (870,000/871,488 blocks)
+[99.16s] Progress 95%: SK: 95% (871,488/871,488 blocks)
+[99.16s] Progress 100%: Simple Kriging complete
+[99.18s] simple_kriging_3d COMPLETED SUCCESSFULLY
+  estimates_shape: (871488,)
+  n_nan: 0
+  estimates_min: 1.8796422691541264
+  estimates_max: 4.202547395334882
+
+[99.26s] Payload packaged successfully
+
+[99.26s] Simple Kriging execution COMPLETED
+
+
+============================================================
+DEBUG SESSION SUMMARY
+============================================================
+Total stages: 18
+Error caught: False
+Last progress: 100%
+Total execution time: 99.26s
+
+Stage Timeline:
+  [0.00s] Controller: _prepare_simple_kriging_payload called
+  [0.00s] Debug mode activated by user
+  [0.00s] Input Validation
+  [0.00s] Data Validation
+  [0.01s] Validation PASSED
+  [0.01s] Proceeding to normal execution path with debug tracking
+  [0.01s] Starting data validation
+  [0.01s] Running data source validation
+  [0.01s] Data source validation passed
+  [0.01s] Cleaning data
+  [0.01s] Data cleaned
+  [0.01s] Extracting coordinates and values
+  [0.02s] Coordinates extracted
+  [0.02s] Building estimation grid
+  [0.05s] CALLING simple_kriging_3d - CRITICAL EXECUTION POINT
+  [99.18s] simple_kriging_3d COMPLETED SUCCESSFULLY
+  [99.26s] Payload packaged successfully
+  [99.26s] Simple Kriging execution COMPLETED
+
+============================================================
+End: 2026-02-08 21:42:01

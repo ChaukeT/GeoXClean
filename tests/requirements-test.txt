@@ -1,0 +1,20 @@
+# Test dependencies for GeoX Panel Debugger
+
+# Testing framework
+pytest>=7.0.0
+pytest-qt>=4.2.0
+pytest-cov>=4.0.0
+pytest-html>=3.1.0
+
+# Qt
+PyQt6>=6.4.0
+
+# Data processing
+numpy>=1.20.0
+pandas>=1.3.0
+
+# Visualization (headless mode)
+pyvista>=0.40.0
+
+# Reporting
+jinja2>=3.0.0

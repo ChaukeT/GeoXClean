@@ -1,0 +1,18 @@
+{
+  "command": "isce2 stripmapApp",
+  "created_at": "2026-01-24T17:18:21.466146",
+  "inputs": {
+    "aoi_bbox": null,
+    "aoi_mode": "Polygon File",
+    "aoi_polygon": null,
+    "dem_path": null,
+    "orbit_source": "ESA",
+    "processing_mode": "PS",
+    "sentinel_products": []
+  },
+  "job_id": "insar_20260124_171821",
+  "output_dir": "C:\\Users\\chauk\\Documents\\GeoX_Clean\\insar_runs\\insar_20260124_171821\\outputs",
+  "parameters": {},
+  "workflow": "stripmapApp",
+  "wsl_distro": null
+}

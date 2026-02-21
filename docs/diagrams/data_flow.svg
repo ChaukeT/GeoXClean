@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="240" viewBox="0 0 900 240">
+  <style>
+    .box { fill:#f6f9ff; stroke:#2b6cb0; stroke-width:1.5 }
+    .arrow { stroke:#2b6cb0; stroke-width:2; fill:none; marker-end:url(#arrowhead) }
+    .label { font-family: Arial, sans-serif; font-size:13px; fill:#0b3d91 }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2b6cb0"/>
+    </marker>
+  </defs>
+
+  <!-- Boxes -->
+  <rect x="40" y="30" width="200" height="120" class="box" rx="8"/>
+  <text x="140" y="55" text-anchor="middle" class="label">Data IO</text>
+  <text x="140" y="75" text-anchor="middle" font-size="11" fill="#244776">Import / Validate / Composite</text>
+
+  <rect x="340" y="30" width="220" height="120" class="box" rx="8"/>
+  <text x="450" y="55" text-anchor="middle" class="label">Geostats Engine</text>
+  <text x="450" y="75" text-anchor="middle" font-size="11" fill="#244776">Variogram / Interpolation / Simulation</text>
+
+  <rect x="660" y="30" width="200" height="120" class="box" rx="8"/>
+  <text x="760" y="55" text-anchor="middle" class="label">Rendering</text>
+  <text x="760" y="75" text-anchor="middle" font-size="11" fill="#244776">3D View (PyVista/VTK)</text>
+
+  <!-- Arrows -->
+  <path d="M 240 90 L 340 90" class="arrow" />
+  <text x="290" y="82" text-anchor="middle" font-size="12" fill="#0b3d91">coordinates, samples, params</text>
+
+  <path d="M 560 90 L 660 90" class="arrow" />
+  <text x="610" y="82" text-anchor="middle" font-size="12" fill="#0b3d91">meshes, attribute grid</text>
+
+  <!-- Notes -->
+  <text x="40" y="175" class="label">Notes: Data IO sanitizes inputs; Geostats produces interpolated grids and diagnostics; Rendering consumes geometry and attribute maps.</text>
+
+</svg>

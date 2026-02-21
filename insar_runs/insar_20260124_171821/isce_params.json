@@ -1,0 +1,14 @@
+{
+  "inputs": {
+    "aoi_bbox": null,
+    "aoi_mode": "Polygon File",
+    "aoi_polygon": null,
+    "dem_path": null,
+    "orbit_source": "ESA",
+    "processing_mode": "PS",
+    "sentinel_products": []
+  },
+  "output_dir": "C:\\Users\\chauk\\Documents\\GeoX_Clean\\insar_runs\\insar_20260124_171821\\outputs",
+  "parameters": {},
+  "workflow": "stripmapApp"
+}

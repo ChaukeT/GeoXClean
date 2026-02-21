@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(grep:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)",
+      "Read(//c/**)",
+      "Bash(find:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(cd:*)",
+      "WebFetch(domain:docs.pyvista.org)",
+      "Bash(start:*)",
+      "Bash(pyinstaller:*)",
+      "Bash(pushd:*)",
+      "Bash(timeout:*)",
+      "Bash(\"C:\\\\Program Files \\(x86\\)\\\\Inno Setup 6\\\\ISCC.exe\" \"c:\\\\Users\\\\chauk\\\\Documents\\\\GeoX_Clean\\\\installer\\\\BlockModelViewer.iss\")",
+      "Bash(findstr:*)",
+      "Bash(cmd /c \"dir /s c:\\\\Users\\\\chauk\\\\Documents\\\\GeoX_Clean\\\\dist\\\\GeoX\\\\_internal\\\\llvmlite 2>nul\")",
+      "Bash(cmd /c:*)",
+      "Bash(dumpbin:*)",
+      "Bash(ls \"c:\\\\Users\\\\chauk\\\\Documents\\\\GeoX_Clean\\\\block_model_viewer\\\\ui\"\" | grep -E \"panel)",
+      "Bash(window)",
+      "Bash(dialog \")",
+      "Bash(ls:*)",
+      "Bash(git checkout:*)",
+      "Bash(copy \"C:\\\\Users\\\\chauk\\\\Downloads\\\\renderer.py\" \"c:\\\\Users\\\\chauk\\\\Documents\\\\GeoX_Clean\\\\block_model_viewer\\\\visualization\\\\renderer.py\")",
+      "Bash(c:/Users/chauk/Documents/GeoX_Clean/tests/panel_debugger/tests/test_data_flow.py:*)",
+      "Bash(c:/Users/chauk/Documents/GeoX_Clean/tests/panel_debugger/tests/test_renderer.py:*)",
+      "Bash(c:/Users/chauk/Documents/GeoX_Clean/tests/panel_debugger/tests/test_coordinates.py:*)",
+      "Bash(c:/Users/chauk/Documents/GeoX_Clean/tests/panel_debugger/__main__.py:*)",
+      "Bash(c:/Users/chauk/Documents/GeoX_Clean/tests/panel_debugger/cli.py:*)",
+      "Bash(c:/Users/chauk/Documents/GeoX_Clean/tests/panel_debugger/FIX_SUMMARY.md:*)",
+      "Bash(iconv:*)",
+      "Bash(test:*)",
+      "Bash(\"C:/Program Files \\(x86\\)/Inno Setup 6/ISCC.exe\":*)",
+      "Bash(tee:*)",
+      "Bash(powershell \"Get-Content ''C:\\\\Users\\\\chauk\\\\Documents\\\\GeoX_Clean\\\\modeling_logs\\\\geox_session_20260218_174631.log'' | Select-String ''sgsim''\")",
+      "Bash(echo:*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\chauk\\Documents\\GeoX_Clean"
+    ]
+  }
+}

@@ -1,0 +1,5645 @@
+"""
+IRR Analysis Panel
+
+GUI panel for Risk-Adjusted Internal Rate of Return analysis using stochastic
+scenario simulation and MILP optimization.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional, List
+
+import numpy as np
+import pandas as pd
+
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+from PyQt6.QtWidgets import (
+    QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
+    QGroupBox, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit,
+    QProgressBar, QTabWidget, QTableWidget, QTableWidgetItem,
+    QFileDialog, QMessageBox, QCheckBox, QDialog, QDialogButtonBox,
+    QSizePolicy, QWidget, QFrame, QScrollArea, QListWidget, QStackedWidget,
+    QListWidgetItem
+)
+from .panel_manager import PanelCategory, DockArea
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font as ExcelFont, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    logger.warning("openpyxl not available - Excel export will be disabled")
+
+from .base_analysis_panel import BaseAnalysisPanel
+from .irr_results_controller import IRRResultsController
+from ..irr_engine.config_loader import get_default_config, save_config, load_config, IRRConfig
+from .modern_styles import (
+    get_theme_colors, ModernColors,
+    get_complete_panel_stylesheet, get_button_stylesheet,
+    get_group_box_stylesheet, get_progress_bar_stylesheet, get_label_stylesheet
+)
+from .collapsible_group import CollapsibleGroup
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# MODERN IRR PANEL STYLES
+# ============================================================================
+
+def get_irr_panel_stylesheet() -> str:
+    """Get complete modern stylesheet for IRR panel with custom enhancements."""
+    base = get_complete_panel_stylesheet()
+    
+    # Additional IRR-specific styles
+    irr_custom = f"""
+        /* Modern Tab Widget */
+        QTabWidget::pane {{
+            background-color: {ModernColors.PANEL_BG};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 8px;
+            margin-top: -1px;
+        }}
+        
+        QTabWidget::tab-bar {{
+            alignment: left;
+        }}
+        
+        QTabBar::tab {{
+            background-color: {ModernColors.CARD_BG};
+            color: {ModernColors.TEXT_SECONDARY};
+            border: 1px solid {ModernColors.BORDER};
+            border-bottom: none;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            padding: 10px 20px;
+            margin-right: 2px;
+            font-weight: 500;
+            min-width: 100px;
+        }}
+        
+        QTabBar::tab:selected {{
+            background-color: {ModernColors.ACCENT_PRIMARY};
+            color: white;
+            font-weight: 600;
+        }}
+        
+        QTabBar::tab:hover:!selected {{
+            background-color: {ModernColors.CARD_HOVER};
+            color: {ModernColors.TEXT_PRIMARY};
+        }}
+        
+        /* Modern Table Widget */
+        QTableWidget {{
+            background-color: {ModernColors.CARD_BG};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 6px;
+            gridline-color: {ModernColors.DIVIDER};
+            selection-background-color: {ModernColors.ACCENT_PRIMARY};
+            selection-color: white;
+        }}
+        
+        QTableWidget::item {{
+            padding: 8px 12px;
+            border-bottom: 1px solid {ModernColors.DIVIDER};
+        }}
+        
+        QTableWidget::item:selected {{
+            background-color: {ModernColors.ACCENT_PRIMARY};
+            color: white;
+        }}
+        
+        QHeaderView::section {{
+            background-color: {ModernColors.ELEVATED_BG};
+            color: {ModernColors.TEXT_PRIMARY};
+            padding: 10px 12px;
+            border: none;
+            border-bottom: 2px solid {ModernColors.ACCENT_PRIMARY};
+            font-weight: 600;
+            font-size: 12px;
+        }}
+        
+        /* Modern Text Edit */
+        QTextEdit {{
+            background-color: {ModernColors.CARD_BG};
+            color: {ModernColors.TEXT_PRIMARY};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 6px;
+            padding: 10px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+        }}
+        
+        QTextEdit:focus {{
+            border-color: {ModernColors.ACCENT_PRIMARY};
+        }}
+        
+        /* Status Cards */
+        QFrame[objectName="StatusCard"] {{
+            background-color: {ModernColors.CARD_BG};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 8px;
+            padding: 16px;
+        }}
+        
+        /* Info Banner */
+        QLabel[objectName="InfoBanner"] {{
+            background-color: rgba(14, 122, 202, 0.15);
+            color: {ModernColors.INFO};
+            border: 1px solid {ModernColors.INFO};
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-weight: 500;
+        }}
+        
+        /* Success Banner */
+        QLabel[objectName="SuccessBanner"] {{
+            background-color: rgba(76, 175, 80, 0.15);
+            color: {ModernColors.SUCCESS};
+            border: 1px solid {ModernColors.SUCCESS};
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-weight: 500;
+        }}
+        
+        /* Warning Banner */
+        QLabel[objectName="WarningBanner"] {{
+            background-color: rgba(255, 152, 0, 0.15);
+            color: {ModernColors.WARNING};
+            border: 1px solid {ModernColors.WARNING};
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-weight: 500;
+        }}
+        
+        /* Primary Action Button */
+        QPushButton[objectName="PrimaryAction"] {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 {ModernColors.ACCENT_PRIMARY}, stop:1 {ModernColors.ACCENT_PRESSED});
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-weight: 700;
+            font-size: 14px;
+            min-height: 20px;
+        }}
+        
+        QPushButton[objectName="PrimaryAction"]:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 {ModernColors.ACCENT_HOVER}, stop:1 {ModernColors.ACCENT_PRIMARY});
+        }}
+        
+        QPushButton[objectName="PrimaryAction"]:pressed {{
+            background-color: {ModernColors.ACCENT_PRESSED};
+        }}
+        
+        QPushButton[objectName="PrimaryAction"]:disabled {{
+            background-color: {ModernColors.BORDER};
+            color: {ModernColors.TEXT_DISABLED};
+        }}
+        
+        /* Success Action Button */
+        QPushButton[objectName="SuccessAction"] {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #5cb85c, stop:1 #449d44);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-weight: 700;
+            font-size: 14px;
+            min-height: 20px;
+        }}
+        
+        QPushButton[objectName="SuccessAction"]:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #6fcf6f, stop:1 #5cb85c);
+        }}
+        
+        QPushButton[objectName="SuccessAction"]:disabled {{
+            background-color: {ModernColors.BORDER};
+            color: {ModernColors.TEXT_DISABLED};
+        }}
+        
+        /* Danger Action Button */
+        QPushButton[objectName="DangerAction"] {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #d9534f, stop:1 #c9302c);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-weight: 700;
+            font-size: 14px;
+            min-height: 20px;
+        }}
+        
+        QPushButton[objectName="DangerAction"]:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #e66b67, stop:1 #d9534f);
+        }}
+        
+        QPushButton[objectName="DangerAction"]:disabled {{
+            background-color: {ModernColors.BORDER};
+            color: {ModernColors.TEXT_DISABLED};
+        }}
+        
+        /* Section Title */
+        QLabel[objectName="SectionTitle"] {{
+            color: {ModernColors.TEXT_PRIMARY};
+            font-size: 16px;
+            font-weight: 700;
+            padding: 8px 0;
+            border-bottom: 2px solid {ModernColors.ACCENT_PRIMARY};
+            margin-bottom: 12px;
+        }}
+        
+        /* Metric Card */
+        QFrame[objectName="MetricCard"] {{
+            background-color: {ModernColors.CARD_BG};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 10px;
+            padding: 16px;
+        }}
+        
+        QFrame[objectName="MetricCard"]:hover {{
+            border-color: {ModernColors.ACCENT_PRIMARY};
+        }}
+        
+        /* Progress Section */
+        QFrame[objectName="ProgressSection"] {{
+            background-color: {ModernColors.CARD_BG};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 8px;
+            padding: 16px;
+        }}
+    """
+    
+    return base + irr_custom
+
+
+def style_matplotlib_figure(fig, ax=None):
+    """
+    Apply modern dark theme styling to matplotlib figures.
+    
+    Args:
+        fig: matplotlib Figure object
+        ax: Optional matplotlib Axes object (or list of axes)
+    """
+    # Set figure background
+    fig.patch.set_facecolor(ModernColors.CARD_BG)
+    
+    # Get all axes if not provided
+    if ax is None:
+        axes = fig.get_axes()
+    elif isinstance(ax, (list, tuple)):
+        axes = ax
+    else:
+        axes = [ax]
+    
+    # Style each axis
+    for axis in axes:
+        # Background
+        axis.set_facecolor(ModernColors.CARD_BG)
+        
+        # Spines (borders)
+        for spine in axis.spines.values():
+            spine.set_color(ModernColors.BORDER)
+            spine.set_linewidth(1)
+        
+        # Tick colors
+        axis.tick_params(colors=ModernColors.TEXT_SECONDARY, labelsize=9)
+        
+        # Grid
+        axis.grid(True, color=ModernColors.DIVIDER, linestyle='-', linewidth=0.5, alpha=0.5)
+        
+        # Labels
+        axis.xaxis.label.set_color(ModernColors.TEXT_PRIMARY)
+        axis.yaxis.label.set_color(ModernColors.TEXT_PRIMARY)
+        axis.title.set_color(ModernColors.TEXT_PRIMARY)
+        axis.title.set_fontsize(12)
+        axis.title.set_fontweight('bold')
+    
+    fig.tight_layout()
+
+
+# IRRWorker removed - logic moved to controller
+
+
+class IRRPanel(BaseAnalysisPanel):
+    """
+    Panel for Risk-Adjusted IRR Analysis.
+    """
+    # PanelManager metadata
+    PANEL_ID = "IRRPanel"
+    PANEL_NAME = "IRR Panel"
+    PANEL_CATEGORY = PanelCategory.OTHER
+    PANEL_DEFAULT_VISIBLE = False
+    PANEL_DEFAULT_DOCK_AREA = DockArea.RIGHT
+
+
+
+
+    
+    task_name = "irr"
+    
+    # Signals
+    schedule_visualization_requested = pyqtSignal(object)  # mining schedule payload
+    pit_visualization_requested = pyqtSignal(pd.DataFrame)  # ultimate pit result
+    
+    def __init__(self, parent=None):
+        super().__init__(parent=parent, panel_id="irr")
+        
+        # Use _block_model (private backing field) - block_model is a read-only @property in BaseAnalysisPanel
+        self._block_model: Optional[pd.DataFrame] = None
+        self.config: Dict = get_default_config()
+        self.results: Optional[Dict] = None
+        self.results_controller = IRRResultsController()
+        self._block_model_loaded: bool = False
+        
+        # Subscribe to block model updates from DataRegistry
+        try:
+            self.registry = self.get_registry()
+            self.registry.blockModelGenerated.connect(self._on_block_model_generated)
+            self.registry.blockModelLoaded.connect(self._on_block_model_loaded)
+            
+            # Load existing block model if available
+            existing_block_model = self.registry.get_block_model()
+            if existing_block_model:
+                self._on_block_model_loaded(existing_block_model)
+        except Exception as e:
+            logger.warning(f"Failed to connect to DataRegistry: {e}")
+            self.registry = None
+        
+        self._setup_ui()
+        
+        logger.info("Initialized IRR Analysis panel")
+    
+    @property
+
+
+    def refresh_theme(self):
+        """Update colors when theme changes."""
+        colors = get_theme_colors()
+        # Re-apply stylesheet with new theme colors
+        if hasattr(self, "setStyleSheet"):
+            self.setStyleSheet(self.styleSheet())
+        # Refresh child widgets
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "refresh_theme"):
+                child.refresh_theme()
+    def block_model(self) -> Optional[pd.DataFrame]:
+        """Read-only property to access the block model."""
+        return self._block_model
+    
+    def setup_ui(self):
+        """Override BaseAnalysisPanel.setup_ui() to prevent adding Stop/Close buttons."""
+        # Do nothing - we handle UI setup in _setup_ui() instead
+        pass
+    
+    def _setup_ui(self):
+        """Setup the UI layout with modern vertical navigation."""
+        # Apply modern stylesheet
+        self.setStyleSheet(get_irr_panel_stylesheet())
+        
+        # Clear main layout if it has widgets (defensive)
+        layout = self.main_layout
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Root layout: [Vertical Menu] [Content]
+        root = QHBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # 1. Left Section Menu
+        self.section_menu = self._create_section_menu()
+        root.addWidget(self.section_menu)
+
+        # 2. Main Content Area
+        content_container = QWidget()
+        content_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # Pages in QStackedWidget
+        self.pages = QStackedWidget()
+        
+        # Create tabs
+        input_tab = self._create_input_tab()
+        progress_tab = self._create_progress_tab()
+        self._setup_results_tab()
+        
+        self.pages.addWidget(input_tab)
+        self.pages.addWidget(progress_tab)
+        self.pages.addWidget(self.results_tab)
+        
+        content_layout.addWidget(self.pages, 1)
+
+        # Footer Bar (status only - Run button moved to workflow panel)
+        footer = self._create_footer_bar()
+        content_layout.addWidget(footer)
+
+        root.addWidget(content_container, 1)
+        layout.addLayout(root)
+
+        # Default selection
+        self._switch_page(0)
+
+    def _create_section_menu(self) -> QWidget:
+        """Create a simple professional left navigation panel."""
+        panel = QWidget()
+        panel.setFixedWidth(170)
+        panel.setStyleSheet(f"""
+            QWidget {{
+                background-color: #1a1a20;
+                border-right: 1px solid {ModernColors.BORDER};
+            }}
+        """)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 16, 12, 16)
+        layout.setSpacing(8)
+
+        nav_style = f"""
+            QPushButton {{
+                background-color: #25252d;
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 6px;
+                color: {ModernColors.TEXT_PRIMARY};
+                font-weight: 600;
+                text-align: left;
+                padding: 10px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: #2f2f38;
+                border-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+        """
+
+        self.input_section_btn = QPushButton("⚙  Input Parameters")
+        self.progress_section_btn = QPushButton("📈  Analysis Progress")
+        self.results_section_btn = QPushButton("📊  Results & Reports")
+
+        for btn in (self.input_section_btn, self.progress_section_btn, self.results_section_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(40)
+            btn.setStyleSheet(nav_style)
+            layout.addWidget(btn)
+
+        layout.addStretch()
+
+        # Connect navigation
+        self.input_section_btn.clicked.connect(lambda: self._switch_page(0))
+        self.progress_section_btn.clicked.connect(lambda: self._switch_page(1))
+        self.results_section_btn.clicked.connect(lambda: self._switch_page(2))
+
+        return panel
+    
+    def _create_workflow_step(self, number: str, title: str, icon: str, tooltip: str, is_active: bool = False) -> QPushButton:
+        """Create a professional workflow step button."""
+        btn = QPushButton()
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setMinimumHeight(44)
+        btn.setToolTip(tooltip)
+        
+        bg_color = ModernColors.ACCENT_PRIMARY if is_active else "#25252d"
+        text_color = "white" if is_active else ModernColors.TEXT_SECONDARY
+        
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {{bg_color}};
+                border: 1px solid {{'transparent' if is_active else ModernColors.BORDER}};
+                border-radius: 6px;
+                text-align: left;
+                padding: 8px 12px;
+                font-size: 12px;
+                color: {{colors.TEXT_PRIMARY}};
+            }}
+            QPushButton:hover {{
+                background-color: {{ModernColors.ACCENT_PRIMARY if is_active else '#2d2d35'}};
+                border-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+        """)
+        
+        # Create layout for button content
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(4, 0, 4, 0)
+        btn_layout.setSpacing(8)
+        
+        # Step number badge
+        number_label = QLabel(number)
+        number_label.setFixedSize(24, 24)
+        number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        number_label.setStyleSheet(f"""
+            background-color: {'white' if is_active else ModernColors.ELEVATED_BG};
+            color: {ModernColors.ACCENT_PRIMARY if is_active else ModernColors.TEXT_SECONDARY};
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 11px;
+        """)
+        
+        # Title
+        title_label = QLabel(f"{icon}  {title}")
+        title_label.setStyleSheet(f"""
+            color: {colors.TEXT_PRIMARY};
+            font-weight: 600;
+            font-size: 11px;
+        """)
+        
+        container = QWidget()
+        container_layout = QHBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(8)
+        container_layout.addWidget(number_label)
+        container_layout.addWidget(title_label)
+        container_layout.addStretch()
+        
+        btn_container_layout = QVBoxLayout(btn)
+        btn_container_layout.setContentsMargins(4, 4, 4, 4)
+        btn_container_layout.addWidget(container)
+        
+        return btn
+    
+    def _switch_page(self, index: int):
+        """Switch to a different page and update button states."""
+        self.pages.setCurrentIndex(index)
+        buttons = [self.input_section_btn, self.progress_section_btn, self.results_section_btn]
+        for i, btn in enumerate(buttons):
+            is_active = (i == index)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {{'#0e7aca' if is_active else '#25252d'}};
+                    border: 1px solid {{ModernColors.ACCENT_PRIMARY if is_active else ModernColors.BORDER}};
+                    border-radius: 6px;
+                    color: {{'white' if is_active else ModernColors.TEXT_PRIMARY}};
+                    font-weight: 600;
+                    text-align: left;
+                    padding: 10px 12px;
+                }}
+                QPushButton:hover {{
+                    background-color: {{'#0f8bdc' if is_active else '#2f2f38'}};
+                    border-color: {ModernColors.ACCENT_PRIMARY};
+                }}
+            """)
+
+    def _create_footer_bar(self) -> QFrame:
+        """Create the sticky footer status bar with Run/Cancel."""
+        bar = QFrame()
+        bar.setObjectName("FooterBar")
+        bar.setStyleSheet(f"""
+            QFrame#FooterBar {{
+                background-color: #16161c;
+                border-top: 1px solid #303038;
+            }}
+        """)
+        bar.setFixedHeight(56)
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(12)
+
+        # Status label (left)
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; font-weight: 500; font-size: 12px;")
+        layout.addWidget(self.status_label)
+        
+        layout.addStretch()
+
+        # Run button
+        self.run_btn = QPushButton("Run IRR Analysis")
+        self.run_btn.setMinimumWidth(140)
+        self.run_btn.setMinimumHeight(34)
+        self.run_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.SUCCESS};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.SUCCESS}cc; }}
+            QPushButton:disabled {{ background-color: #404040; color: #6d6d6d; }}
+        """)
+        self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.run_btn.setEnabled(False)
+        self.run_btn.clicked.connect(self.run_analysis)
+        layout.addWidget(self.run_btn)
+
+        # Cancel button (visible only while running)
+        self.cancel_btn = QPushButton("Cancel")
+        self.stop_button = self.cancel_btn  # Alias for BaseAnalysisPanel compatibility
+        self.cancel_btn.setMinimumWidth(100)
+        self.cancel_btn.setMinimumHeight(34)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.ERROR};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.ERROR}cc; }}
+        """)
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self._cancel_analysis)
+        self.cancel_btn.setVisible(False)
+        layout.addWidget(self.cancel_btn)
+
+        return bar
+    
+    def _add_styled_row(self, form_layout: QFormLayout, label_text: str, widget: QWidget, label_style: str):
+        """Add a styled row to a form layout."""
+        label = QLabel(label_text)
+        label.setStyleSheet(label_style)
+        form_layout.addRow(label, widget)
+    
+    def _update_status_card(self, success: bool, text: str):
+        """Update the block model status card styling."""
+        if hasattr(self, '_bm_status_card'):
+            if success:
+                self._bm_status_card.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {ModernColors.ELEVATED_BG};
+                        border: 1px solid {ModernColors.SUCCESS};
+                        border-left: 4px solid {ModernColors.SUCCESS};
+                        border-radius: 6px;
+                        padding: 12px;
+                    }}
+                """)
+                self.bm_status_label.setStyleSheet(f"color: {ModernColors.SUCCESS}; font-weight: 600; font-size: 12px; border: none;")
+            else:
+                self._bm_status_card.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {ModernColors.ELEVATED_BG};
+                        border: 1px solid {ModernColors.WARNING};
+                        border-left: 4px solid {ModernColors.WARNING};
+                        border-radius: 6px;
+                        padding: 12px;
+                    }}
+                """)
+                self.bm_status_label.setStyleSheet(f"color: {ModernColors.WARNING}; font-weight: 600; font-size: 12px; border: none;")
+        self.bm_status_label.setText(text)
+    
+    def _create_input_tab(self) -> QWidget:
+        """Create compact, modern input parameters tab."""
+        from PyQt6.QtWidgets import QScrollArea, QFrame
+        
+        # Scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        scroll.setStyleSheet(f"QScrollArea {{ background-color: {ModernColors.PANEL_BG}; border: none; }}")
+        
+        # Content widget - no width constraint, full panel width
+        widget = QWidget()
+        widget.setObjectName("InputTabContent")
+        widget.setStyleSheet(f"QWidget#InputTabContent {{ background-color: {ModernColors.PANEL_BG}; }}")
+        
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        
+        # Block Model Card
+        bm_card = self._create_compact_card("Block Model", ModernColors.ACCENT_PRIMARY)
+        bm_layout = QVBoxLayout()
+        bm_layout.setSpacing(12)
+        bm_layout.setContentsMargins(16, 16, 16, 16)
+        
+        # Status
+        status_card = QFrame()
+        status_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {ModernColors.ELEVATED_BG};
+                border: 1px solid {ModernColors.BORDER};
+                border-left: 4px solid {ModernColors.WARNING};
+                border-radius: 6px;
+            }}
+        """)
+        status_layout = QHBoxLayout(status_card)
+        status_layout.setContentsMargins(12, 10, 12, 10)
+        
+        self.bm_status_label = QLabel("No block model loaded")
+        self.bm_status_label.setStyleSheet(f"color: {ModernColors.WARNING}; font-weight: 600; font-size: 12px; border: none;")
+        self.bm_status_label.setWordWrap(True)
+        status_layout.addWidget(self.bm_status_label)
+        bm_layout.addWidget(status_card)
+        
+        # Load button
+        load_btn = QPushButton("Load Block Model from Viewer")
+        load_btn.setMinimumHeight(40)
+        load_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ModernColors.ACCENT_PRIMARY}, stop:1 #1a8cd8);
+                color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 700;
+            }}
+            QPushButton:hover {{ background: #1a8cd8; }}
+            QPushButton:pressed {{ background-color: {ModernColors.ACCENT_PRESSED}; }}
+        """)
+        load_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        load_btn.clicked.connect(self._load_block_model_from_viewer)
+        bm_layout.addWidget(load_btn)
+        
+        # Fields in 2-column grid
+        fields_grid = QHBoxLayout()
+        fields_grid.setSpacing(16)
+        
+        left_col = QFormLayout()
+        left_col.setSpacing(10)
+        left_col.setContentsMargins(0, 0, 0, 0)
+        
+        right_col = QFormLayout()
+        right_col.setSpacing(10)
+        right_col.setContentsMargins(0, 0, 0, 0)
+        
+        combo_style = f"""
+            QComboBox {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 6px;
+                padding: 8px 12px;
+                min-height: 20px;
+                font-size: 12px;
+            }}
+            QComboBox:hover {{ border-color: {ModernColors.ACCENT_PRIMARY}; }}
+            QComboBox::drop-down {{ border: none; width: 24px; }}
+            QComboBox::down-arrow {{
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid {ModernColors.TEXT_SECONDARY};
+                margin-right: 8px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                selection-background-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+        """
+        label_style = f"color: {ModernColors.TEXT_SECONDARY}; font-size: 11px; font-weight: 500;"
+        
+        self.grade_combo = QComboBox()
+        self.grade_combo.setStyleSheet(combo_style)
+        left_col.addRow(self._styled_label("Grade Field:", label_style), self.grade_combo)
+        
+        self.density_combo = QComboBox()
+        self.density_combo.setStyleSheet(combo_style)
+        left_col.addRow(self._styled_label("Density Field:", label_style), self.density_combo)
+        
+        self.dx_combo = QComboBox()
+        self.dx_combo.setStyleSheet(combo_style)
+        right_col.addRow(self._styled_label("Block DX:", label_style), self.dx_combo)
+        
+        self.dy_combo = QComboBox()
+        self.dy_combo.setStyleSheet(combo_style)
+        right_col.addRow(self._styled_label("Block DY:", label_style), self.dy_combo)
+        
+        self.dz_combo = QComboBox()
+        self.dz_combo.setStyleSheet(combo_style)
+        left_col.addRow(self._styled_label("Block DZ:", label_style), self.dz_combo)
+        
+        # Create stub classification widgets for compatibility
+        self.class_mode_combo = QComboBox()
+        self.class_column_combo = QComboBox()
+        self.check_measured = QCheckBox()
+        self.check_indicated = QCheckBox()
+        self.check_inferred = QCheckBox()
+        
+        fields_grid.addLayout(left_col, 1)
+        fields_grid.addLayout(right_col, 1)
+        bm_layout.addLayout(fields_grid)
+        
+        bm_card.layout().addLayout(bm_layout)
+        layout.addWidget(bm_card)
+        
+        # Scenario Generation Card
+        scenario_card = self._create_compact_card("Scenario Generation", ModernColors.SUCCESS)
+        scenario_layout = QHBoxLayout()
+        scenario_layout.setSpacing(16)
+        scenario_layout.setContentsMargins(16, 12, 16, 12)
+        
+        spin_style = f"""
+            QSpinBox, QDoubleSpinBox {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 6px;
+                padding: 8px 10px;
+                min-height: 20px;
+                font-size: 12px;
+            }}
+            QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {ModernColors.ACCENT_PRIMARY}; }}
+            QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {ModernColors.ACCENT_PRIMARY}; }}
+        """
+        
+        col1 = QFormLayout()
+        col1.setSpacing(10)
+        col1.setContentsMargins(0, 0, 0, 0)
+        
+        self.num_scenarios_spin = QSpinBox()
+        self.num_scenarios_spin.setStyleSheet(spin_style)
+        self.num_scenarios_spin.setRange(10, 10000)
+        self.num_scenarios_spin.setValue(self.config['scenario_generation']['num_scenarios'])
+        col1.addRow(self._styled_label("Scenarios:", label_style), self.num_scenarios_spin)
+        
+        self.num_periods_spin = QSpinBox()
+        self.num_periods_spin.setStyleSheet(spin_style)
+        self.num_periods_spin.setRange(1, 100)
+        self.num_periods_spin.setValue(self.config['scenario_generation']['num_periods'])
+        col1.addRow(self._styled_label("Periods:", label_style), self.num_periods_spin)
+        
+        col2 = QFormLayout()
+        col2.setSpacing(10)
+        col2.setContentsMargins(0, 0, 0, 0)
+        
+        self.price_init_spin = QDoubleSpinBox()
+        self.price_init_spin.setStyleSheet(spin_style)
+        self.price_init_spin.setRange(0.1, 10000)
+        self.price_init_spin.setValue(self.config['scenario_generation']['price'].get('initial', 60.0))
+        self.price_init_spin.setDecimals(2)
+        col2.addRow(self._styled_label("Initial Price:", label_style), self.price_init_spin)
+        
+        self.price_vol_spin = QDoubleSpinBox()
+        self.price_vol_spin.setStyleSheet(spin_style)
+        self.price_vol_spin.setRange(0.01, 1.0)
+        self.price_vol_spin.setValue(self.config['scenario_generation']['price']['volatility'])
+        self.price_vol_spin.setDecimals(3)
+        col2.addRow(self._styled_label("Volatility:", label_style), self.price_vol_spin)
+        
+        scenario_layout.addLayout(col1, 1)
+        scenario_layout.addLayout(col2, 1)
+        scenario_card.layout().addLayout(scenario_layout)
+        layout.addWidget(scenario_card)
+        
+        # Economic Parameters Card
+        econ_card = self._create_compact_card("Economic Parameters", ModernColors.WARNING)
+        econ_layout = QHBoxLayout()
+        econ_layout.setSpacing(16)
+        econ_layout.setContentsMargins(16, 12, 16, 12)
+        
+        ecol1 = QFormLayout()
+        ecol1.setSpacing(10)
+        ecol1.setContentsMargins(0, 0, 0, 0)
+        
+        self.mining_cost_spin = QDoubleSpinBox()
+        self.mining_cost_spin.setStyleSheet(spin_style)
+        self.mining_cost_spin.setRange(0.1, 1000)
+        self.mining_cost_spin.setValue(self.config['scenario_generation']['costs']['mining_cost_base'])
+        self.mining_cost_spin.setDecimals(2)
+        ecol1.addRow(self._styled_label("Mining ($/t):", label_style), self.mining_cost_spin)
+        
+        self.processing_cost_spin = QDoubleSpinBox()
+        self.processing_cost_spin.setStyleSheet(spin_style)
+        self.processing_cost_spin.setRange(0.1, 1000)
+        self.processing_cost_spin.setValue(self.config['scenario_generation']['costs']['processing_cost_base'])
+        self.processing_cost_spin.setDecimals(2)
+        ecol1.addRow(self._styled_label("Processing ($/t):", label_style), self.processing_cost_spin)
+        
+        ecol2 = QFormLayout()
+        ecol2.setSpacing(10)
+        ecol2.setContentsMargins(0, 0, 0, 0)
+        
+        self.recovery_spin = QDoubleSpinBox()
+        self.recovery_spin.setStyleSheet(spin_style)
+        self.recovery_spin.setRange(0.1, 0.99)
+        self.recovery_spin.setValue(self.config['scenario_generation']['recovery']['base'])
+        self.recovery_spin.setDecimals(3)
+        ecol2.addRow(self._styled_label("Recovery:", label_style), self.recovery_spin)
+        
+        self.selling_cost_spin = QDoubleSpinBox()
+        self.selling_cost_spin.setStyleSheet(spin_style)
+        self.selling_cost_spin.setRange(0.0, 100)
+        self.selling_cost_spin.setValue(self.config['economic_parameters'].get('selling_cost', 0.1))
+        self.selling_cost_spin.setDecimals(2)
+        ecol2.addRow(self._styled_label("Selling ($/unit):", label_style), self.selling_cost_spin)
+        
+        econ_layout.addLayout(ecol1, 1)
+        econ_layout.addLayout(ecol2, 1)
+        econ_card.layout().addLayout(econ_layout)
+        layout.addWidget(econ_card)
+        
+        # =====================================================================
+        # BY-PRODUCT ELEMENTS SECTION
+        # =====================================================================
+        byproduct_group = CollapsibleGroup("By-Product Elements (Optional)", collapsed=True)
+        byproduct_content = QVBoxLayout()
+        byproduct_content.setSpacing(10)
+        
+        info_label = QLabel("Add by-product elements (e.g., Cu, Ag) to include their revenue in IRR calculation.")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet(f"color: {ModernColors.TEXT_HINT}; font-style: italic; font-size: 11px;")
+        byproduct_content.addWidget(info_label)
+        
+        # Modern styled table
+        self.byproduct_table = QTableWidget()
+        self.byproduct_table.setColumnCount(4)
+        self.byproduct_table.setHorizontalHeaderLabels(["Grade Field", "Price ($/unit)", "Recovery", "Selling Cost"])
+        self.byproduct_table.verticalHeader().setVisible(False)
+        self.byproduct_table.setMaximumHeight(150)
+        self.byproduct_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {ModernColors.CARD_BG};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 6px;
+                gridline-color: {ModernColors.DIVIDER};
+            }}
+            QHeaderView::section {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                padding: 8px;
+                border: none;
+                font-weight: 600;
+            }}
+        """)
+        byproduct_content.addWidget(self.byproduct_table)
+        
+        # Modern styled buttons
+        byproduct_btn_layout = QHBoxLayout()
+        byproduct_btn_layout.setSpacing(10)
+        
+        add_byproduct_btn = QPushButton("+ Add")
+        add_byproduct_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.ACCENT_PRIMARY};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.ACCENT_HOVER}; }}
+        """)
+        add_byproduct_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_byproduct_btn.clicked.connect(self._add_byproduct_row)
+        byproduct_btn_layout.addWidget(add_byproduct_btn)
+        
+        remove_byproduct_btn = QPushButton("- Remove")
+        remove_byproduct_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.CARD_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.CARD_HOVER}; }}
+        """)
+        remove_byproduct_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove_byproduct_btn.clicked.connect(self._remove_byproduct_row)
+        byproduct_btn_layout.addWidget(remove_byproduct_btn)
+        
+        byproduct_btn_layout.addStretch()
+        byproduct_content.addLayout(byproduct_btn_layout)
+        
+        byproduct_group.add_layout(byproduct_content)
+        layout.addWidget(byproduct_group)
+        
+        # =====================================================================
+        # MINING OPERATIONS SECTION
+        # =====================================================================
+        mining_group = CollapsibleGroup("Mining Operations & Pit Design", collapsed=True)
+        mining_content = QVBoxLayout()
+        mining_content.setSpacing(10)
+        mining_form = QFormLayout()
+        mining_form.setSpacing(10)
+        
+        self.annual_rom_spin = QDoubleSpinBox()
+        self.annual_rom_spin.setStyleSheet(spin_style)
+        self.annual_rom_spin.setRange(100000, 100000000)
+        self.annual_rom_spin.setValue(self.config['optimization'].get('annual_rom', 5000000))
+        self.annual_rom_spin.setDecimals(0)
+        self.annual_rom_spin.setSingleStep(100000)
+        self._add_styled_row(mining_form, "Annual ROM (t/yr):", self.annual_rom_spin, label_style)
+        
+        self.min_bottom_width_spin = QDoubleSpinBox()
+        self.min_bottom_width_spin.setStyleSheet(spin_style)
+        self.min_bottom_width_spin.setRange(5, 200)
+        self.min_bottom_width_spin.setValue(self.config['optimization'].get('min_bottom_width', 30))
+        self.min_bottom_width_spin.setDecimals(1)
+        self._add_styled_row(mining_form, "Min Bottom Width (m):", self.min_bottom_width_spin, label_style)
+        
+        # Slope angles section header
+        slope_label = QLabel("Pit Slope Angles:")
+        slope_label.setStyleSheet(f"color: {ModernColors.TEXT_PRIMARY}; font-weight: 600; font-size: 12px; margin-top: 8px;")
+        mining_content.addLayout(mining_form)
+        mining_content.addWidget(slope_label)
+        
+        slope_form = QFormLayout()
+        slope_form.setSpacing(8)
+        
+        self.slope_ore_spin = QDoubleSpinBox()
+        self.slope_ore_spin.setStyleSheet(spin_style)
+        self.slope_ore_spin.setRange(30, 75)
+        self.slope_ore_spin.setValue(self.config['optimization'].get('slope_angles', {}).get('ore', 55))
+        self.slope_ore_spin.setDecimals(1)
+        self.slope_ore_spin.setSuffix("°")
+        self._add_styled_row(slope_form, "Ore:", self.slope_ore_spin, label_style)
+        
+        self.slope_soil_spin = QDoubleSpinBox()
+        self.slope_soil_spin.setStyleSheet(spin_style)
+        self.slope_soil_spin.setRange(15, 45)
+        self.slope_soil_spin.setValue(self.config['optimization'].get('slope_angles', {}).get('soil', 25))
+        self.slope_soil_spin.setDecimals(1)
+        self.slope_soil_spin.setSuffix("°")
+        self._add_styled_row(slope_form, "Soil:", self.slope_soil_spin, label_style)
+        
+        self.slope_weathered_spin = QDoubleSpinBox()
+        self.slope_weathered_spin.setStyleSheet(spin_style)
+        self.slope_weathered_spin.setRange(30, 60)
+        self.slope_weathered_spin.setValue(self.config['optimization'].get('slope_angles', {}).get('weathered', 45))
+        self.slope_weathered_spin.setDecimals(1)
+        self.slope_weathered_spin.setSuffix("°")
+        self._add_styled_row(slope_form, "Weathered:", self.slope_weathered_spin, label_style)
+        
+        self.slope_fresh_spin = QDoubleSpinBox()
+        self.slope_fresh_spin.setStyleSheet(spin_style)
+        self.slope_fresh_spin.setRange(40, 75)
+        self.slope_fresh_spin.setValue(self.config['optimization'].get('slope_angles', {}).get('fresh', 55))
+        self.slope_fresh_spin.setDecimals(1)
+        self.slope_fresh_spin.setSuffix("°")
+        self._add_styled_row(slope_form, "Fresh Rock:", self.slope_fresh_spin, label_style)
+        
+        mining_content.addLayout(slope_form)
+        
+        # Pit phases section
+        phase_label = QLabel("Pit Phase Scheduling:")
+        phase_label.setStyleSheet(f"color: {ModernColors.TEXT_PRIMARY}; font-weight: 600; font-size: 12px; margin-top: 8px;")
+        mining_content.addWidget(phase_label)
+        
+        checkbox_style = f"""
+            QCheckBox {{ color: {ModernColors.TEXT_PRIMARY}; spacing: 8px; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border: 2px solid {ModernColors.BORDER}; border-radius: 4px; }}
+            QCheckBox::indicator:checked {{ background-color: {ModernColors.ACCENT_PRIMARY}; border-color: {ModernColors.ACCENT_PRIMARY}; }}
+        """
+        
+        self.enable_phases_check = QCheckBox("Enable Multi-Phase Mining")
+        self.enable_phases_check.setStyleSheet(checkbox_style)
+        self.enable_phases_check.setChecked(self.config['optimization'].get('enable_phases', False))
+        self.enable_phases_check.stateChanged.connect(self._toggle_phase_controls)
+        mining_content.addWidget(self.enable_phases_check)
+        
+        phase_form = QFormLayout()
+        phase_form.setSpacing(8)
+        
+        self.num_phases_spin = QSpinBox()
+        self.num_phases_spin.setStyleSheet(spin_style)
+        self.num_phases_spin.setRange(2, 10)
+        self.num_phases_spin.setValue(self.config['optimization'].get('num_phases', 3))
+        self.num_phases_spin.setEnabled(self.enable_phases_check.isChecked())
+        self._add_styled_row(phase_form, "Number of Phases:", self.num_phases_spin, label_style)
+        
+        self.phase_gap_spin = QDoubleSpinBox()
+        self.phase_gap_spin.setStyleSheet(spin_style)
+        self.phase_gap_spin.setRange(10, 100)
+        self.phase_gap_spin.setValue(self.config['optimization'].get('phase_gap', 30))
+        self.phase_gap_spin.setDecimals(1)
+        self.phase_gap_spin.setSuffix(" m")
+        self.phase_gap_spin.setEnabled(self.enable_phases_check.isChecked())
+        self._add_styled_row(phase_form, "Min Phase Gap:", self.phase_gap_spin, label_style)
+        
+        mining_content.addLayout(phase_form)
+        mining_group.add_layout(mining_content)
+        layout.addWidget(mining_group)
+        
+        # =====================================================================
+        # QUICK PRESETS SECTION
+        # =====================================================================
+        preset_card = QFrame()
+        preset_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {ModernColors.CARD_BG};
+                border: 1px solid {ModernColors.ACCENT_PRIMARY};
+                border-left: 4px solid {ModernColors.ACCENT_PRIMARY};
+                border-radius: 8px;
+                padding: 12px;
+            }}
+        """)
+        preset_card_layout = QHBoxLayout(preset_card)
+        preset_card_layout.setContentsMargins(16, 12, 16, 12)
+        preset_card_layout.setSpacing(16)
+        
+        preset_icon = QLabel("⚡")
+        preset_icon.setStyleSheet(f"font-size: 20px; border: none;")
+        preset_card_layout.addWidget(preset_icon)
+        
+        preset_label = QLabel("Analysis Speed:")
+        preset_label.setStyleSheet(f"color: {ModernColors.TEXT_PRIMARY}; font-weight: 600; font-size: 12px; border: none;")
+        preset_card_layout.addWidget(preset_label)
+        
+        self.preset_combo = QComboBox()
+        self.preset_combo.setStyleSheet(combo_style)
+        self.preset_combo.addItems(["Fast (2-3 min)", "Balanced (5-10 min)", "Accurate (15-30 min)"])
+        self.preset_combo.setCurrentIndex(1)
+        self.preset_combo.currentIndexChanged.connect(self._apply_preset)
+        self.preset_combo.setMinimumWidth(180)
+        preset_card_layout.addWidget(self.preset_combo)
+        
+        preset_card_layout.addStretch()
+        layout.addWidget(preset_card)
+        
+        # IRR Parameters Card
+        irr_card = self._create_compact_card("IRR Search Parameters", ModernColors.ACCENT_SECONDARY)
+        irr_layout = QHBoxLayout()
+        irr_layout.setSpacing(16)
+        irr_layout.setContentsMargins(16, 12, 16, 12)
+        
+        icol1 = QFormLayout()
+        icol1.setSpacing(10)
+        icol1.setContentsMargins(0, 0, 0, 0)
+        
+        self.alpha_spin = QDoubleSpinBox()
+        self.alpha_spin.setStyleSheet(spin_style)
+        self.alpha_spin.setRange(0.5, 0.99)
+        self.alpha_spin.setValue(self.config['irr_search']['alpha'])
+        self.alpha_spin.setDecimals(2)
+        icol1.addRow(self._styled_label("Confidence (α):", label_style), self.alpha_spin)
+        
+        icol2 = QFormLayout()
+        icol2.setSpacing(10)
+        icol2.setContentsMargins(0, 0, 0, 0)
+        
+        self.production_capacity_spin = QDoubleSpinBox()
+        self.production_capacity_spin.setStyleSheet(spin_style)
+        self.production_capacity_spin.setRange(1000, 100000000)
+        self.production_capacity_spin.setValue(self.config['optimization']['production_capacity'])
+        self.production_capacity_spin.setDecimals(0)
+        icol2.addRow(self._styled_label("Capacity (t):", label_style), self.production_capacity_spin)
+        
+        irr_layout.addLayout(icol1, 1)
+        irr_layout.addLayout(icol2, 1)
+        irr_card.layout().addLayout(irr_layout)
+        layout.addWidget(irr_card)
+        
+        # Action Buttons Section - Modern Styled
+        config_card = QFrame()
+        config_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {ModernColors.CARD_BG};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        config_layout = QHBoxLayout(config_card)
+        config_layout.setContentsMargins(16, 12, 16, 12)
+        config_layout.setSpacing(12)
+        
+        self.ultimate_pit_btn = QPushButton("Ultimate Pit (LG)")
+        self.ultimate_pit_btn.setMinimumHeight(36)
+        self.ultimate_pit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ultimate_pit_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.ACCENT_PRIMARY};
+                color: white; border: none; border-radius: 6px;
+                font-weight: 700; font-size: 13px; padding: 8px 20px;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.ACCENT_HOVER}; }}
+            QPushButton:disabled {{ background-color: #404040; color: #6d6d6d; }}
+        """)
+        self.ultimate_pit_btn.setEnabled(False)
+        self.ultimate_pit_btn.clicked.connect(self._calculate_ultimate_pit)
+        config_layout.addWidget(self.ultimate_pit_btn)
+        
+        config_layout.addStretch()
+        
+        btn_style_secondary = f"""
+            QPushButton {{
+                background-color: {ModernColors.ELEVATED_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER};
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 12px;
+                padding: 8px 16px;
+            }}
+            QPushButton:hover {{
+                background-color: {ModernColors.CARD_HOVER};
+                border-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+        """
+        
+        save_config_btn = QPushButton("Save Config")
+        save_config_btn.setStyleSheet(btn_style_secondary)
+        save_config_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_config_btn.clicked.connect(self._save_configuration)
+        config_layout.addWidget(save_config_btn)
+        
+        load_config_btn = QPushButton("Load Config")
+        load_config_btn.setStyleSheet(btn_style_secondary)
+        load_config_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        load_config_btn.clicked.connect(self._load_configuration)
+        config_layout.addWidget(load_config_btn)
+        
+        layout.addWidget(config_card)
+        layout.addStretch()
+        
+        scroll.setWidget(widget)
+        return scroll
+    
+    def _create_compact_card(self, title: str, color: str) -> QFrame:
+        """Create a compact card with colored left border."""
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: #1a1a20;
+                border: 1px solid #303038;
+                border-left: 4px solid {color};
+                border-radius: 5px;
+            }}
+        """)
+        card_layout = QVBoxLayout(card)
+        card_layout.setSpacing(0)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Header
+        header = QLabel(title.upper())
+        header.setStyleSheet(f"color: {color}; font-size: 10pt; font-weight: bold; padding: 8px 12px; letter-spacing: 1px; background: transparent; border: none;")
+        card_layout.addWidget(header)
+        
+        return card
+    
+    def _styled_label(self, text: str, style: str) -> QLabel:
+        """Create a styled label."""
+        label = QLabel(text)
+        label.setStyleSheet(style)
+        return label
+
+    def _create_progress_tab(self) -> QWidget:
+        """Create the progress monitoring tab with modern styling."""
+        from PyQt6.QtWidgets import QFrame
+        
+        widget = QWidget()
+        widget.setObjectName("PanelContent")
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(16)
+        layout.setContentsMargins(12, 12, 12, 12)
+        
+        # Modern status header card
+        status_card = QFrame()
+        status_card.setObjectName("StatusCard")
+        status_card_layout = QHBoxLayout(status_card)
+        status_card_layout.setContentsMargins(16, 12, 16, 12)
+        
+        # Status indicator with icon
+        self.progress_status_label = QLabel("🟢 Status: Ready")
+        self.progress_status_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.progress_status_label.setStyleSheet(f"color: {ModernColors.TEXT_PRIMARY};")
+        status_card_layout.addWidget(self.progress_status_label)
+        
+        status_card_layout.addStretch()
+        
+        # Timer display with modern styling
+        timer_frame = QFrame()
+        timer_layout = QHBoxLayout(timer_frame)
+        timer_layout.setContentsMargins(0, 0, 0, 0)
+        timer_layout.setSpacing(20)
+        
+        self.timer_label = QLabel("⏱️ Elapsed: 00:00:00")
+        self.timer_label.setFont(QFont("Segoe UI Semibold", 11))
+        self.timer_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY};")
+        timer_layout.addWidget(self.timer_label)
+        
+        self.eta_label = QLabel("🎯 ETA: --:--:--")
+        self.eta_label.setFont(QFont("Segoe UI Semibold", 11))
+        self.eta_label.setStyleSheet(f"color: {ModernColors.ACCENT_SECONDARY};")
+        timer_layout.addWidget(self.eta_label)
+        
+        status_card_layout.addWidget(timer_frame)
+        layout.addWidget(status_card)
+        
+        # Modern progress section
+        progress_group = QGroupBox("📊 Overall Progress")
+        progress_group_layout = QVBoxLayout(progress_group)
+        progress_group_layout.setSpacing(12)
+        
+        # Enhanced progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p% - Iteration %v/%m")
+        self.progress_bar.setMinimumHeight(24)
+        progress_group_layout.addWidget(self.progress_bar)
+        
+        # Current iteration info with modern styling
+        self.iteration_label = QLabel("🔄 Current: Idle")
+        self.iteration_label.setFont(QFont("Segoe UI", 10))
+        self.iteration_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; padding: 4px 0;")
+        progress_group_layout.addWidget(self.iteration_label)
+        
+        layout.addWidget(progress_group)
+        
+        # Modern progress log section
+        log_group = QGroupBox("📝 Detailed Log")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(12, 16, 12, 12)
+        
+        self.progress_log = QTextEdit()
+        self.progress_log.setReadOnly(True)
+        self.progress_log.setFont(QFont("Consolas", 10))
+        self.progress_log.setPlaceholderText("Analysis log will appear here...")
+        self.progress_log.setMinimumHeight(200)
+        log_layout.addWidget(self.progress_log)
+        
+        layout.addWidget(log_group, stretch=1)
+        
+        # Timer for updating elapsed time
+        from PyQt6.QtCore import QTimer
+        self.elapsed_timer = QTimer()
+        self.elapsed_timer.timeout.connect(self._update_timer)
+        self.start_time = None
+        
+        return widget
+    
+    def _setup_results_tab(self):
+        """Create a professional multi-tab Results Explorer with modern styling."""
+        from PyQt6.QtWidgets import QFrame
+        
+        self.results_tab = QWidget()
+        self.results_tab.setObjectName("PanelContent")
+        results_layout = QVBoxLayout(self.results_tab)
+        results_layout.setSpacing(12)
+        results_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Sub-tabs container with modern styling
+        self.results_tabs = QTabWidget()
+        self.results_tabs.setDocumentMode(True)
+        results_layout.addWidget(self.results_tabs)
+
+        # ---- Summary tab ----
+        self.summary_tab = QWidget()
+        s_layout = QVBoxLayout(self.summary_tab)
+        s_layout.setSpacing(12)
+        s_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Modern summary table
+        self.summary_table = QTableWidget()
+        self.summary_table.setColumnCount(2)
+        self.summary_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.summary_table.horizontalHeader().setStretchLastSection(True)
+        self.summary_table.setAlternatingRowColors(True)
+        self.summary_table.setShowGrid(False)
+        self.summary_table.verticalHeader().setVisible(False)
+        s_layout.addWidget(self.summary_table)
+
+        s_bottom = QHBoxLayout()
+        s_bottom.setSpacing(12)
+
+        # Modern interpretation summary group
+        summary_group = QGroupBox("💡 Interpretation Summary")
+        summary_group_layout = QVBoxLayout(summary_group)
+        summary_group_layout.setContentsMargins(12, 16, 12, 12)
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        self.summary_text.setFont(QFont("Segoe UI", 10))
+        self.summary_text.setPlaceholderText("Run analysis to generate interpretation summary...")
+        summary_group_layout.addWidget(self.summary_text)
+        s_bottom.addWidget(summary_group, 2)
+
+        # Modern cashflow profile group
+        cf_group = QGroupBox("📈 Cashflow Profile")
+        cf_group_layout = QVBoxLayout(cf_group)
+        cf_group_layout.setContentsMargins(12, 16, 12, 12)
+        self.cf_figure = Figure(figsize=(4, 3), facecolor='#252525')
+        self.cf_canvas = FigureCanvas(self.cf_figure)
+        self.cf_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        cf_group_layout.addWidget(self.cf_canvas)
+        s_bottom.addWidget(cf_group, 3)
+
+        s_layout.addLayout(s_bottom)
+        self.results_tabs.addTab(self.summary_tab, "📊 Summary")
+
+        # Maintain backward compatibility for popout routines
+        self.results_text = self.summary_text
+        self.stats_table = self.summary_table
+
+        # ---- NPV Distribution tab ----
+        self.dist_tab = QWidget()
+        d_layout = QVBoxLayout(self.dist_tab)
+        d_layout.setSpacing(12)
+        d_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Modern chart with dark theme
+        self.dist_figure = Figure(figsize=(4, 3), facecolor='#252525')
+        self.dist_canvas = FigureCanvas(self.dist_figure)
+        self.dist_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        d_layout.addWidget(self.dist_canvas)
+
+        d_bottom = QHBoxLayout()
+        d_bottom.setSpacing(12)
+        self.dist_stats_label = QLabel()
+        self.dist_stats_label.setWordWrap(True)
+        self.dist_stats_label.setFont(QFont("Segoe UI", 10))
+        self.dist_stats_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; padding: 8px;")
+        d_bottom.addWidget(self.dist_stats_label, 3)
+
+        self.export_dist_btn = QPushButton("📤 Export NPV Distribution CSV...")
+        self.export_dist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_dist_btn.clicked.connect(self._export_npv_distribution_csv)
+        d_bottom.addWidget(self.export_dist_btn, 1)
+
+        d_layout.addLayout(d_bottom)
+        self.results_tabs.addTab(self.dist_tab, "📉 NPV Distribution")
+
+        # ---- Phase Analysis tab ----
+        self.phase_tab = QWidget()
+        p_layout = QVBoxLayout(self.phase_tab)
+        p_layout.setSpacing(12)
+        p_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Modern phase summary table
+        self.phase_summary_table = QTableWidget()
+        self.phase_summary_table.setColumnCount(6)
+        self.phase_summary_table.setHorizontalHeaderLabels([
+            "Phase", "Ore (t)", "Waste (t)", "Total (t)", "Strip Ratio", "Avg Grade"
+        ])
+        self.phase_summary_table.horizontalHeader().setStretchLastSection(True)
+        self.phase_summary_table.setAlternatingRowColors(True)
+        self.phase_summary_table.setShowGrid(False)
+        self.phase_summary_table.verticalHeader().setVisible(False)
+        p_layout.addWidget(self.phase_summary_table)
+
+        # Modern controls layout
+        phase_controls_layout = QHBoxLayout()
+        phase_controls_layout.setSpacing(12)
+        color_label = QLabel("🎨 Color by:")
+        color_label.setFont(QFont("Segoe UI", 10))
+        phase_controls_layout.addWidget(color_label)
+        self.schedule_color_mode = QComboBox()
+        self.schedule_color_mode.addItems(["Period", "Phase", "Destination", "Value"])
+        self.schedule_color_mode.setMinimumWidth(120)
+        phase_controls_layout.addWidget(self.schedule_color_mode)
+
+        self.apply_color_mode_btn = QPushButton("🔄 Update 3D Colouring")
+        self.apply_color_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_color_mode_btn.clicked.connect(self._emit_color_mode_update)
+        phase_controls_layout.addWidget(self.apply_color_mode_btn)
+        phase_controls_layout.addStretch(1)
+        p_layout.addLayout(phase_controls_layout)
+
+        phase_btn_layout = QHBoxLayout()
+        phase_btn_layout.addStretch(1)
+        self.view_schedule_3d_btn = QPushButton("👁️ View Schedule in 3D")
+        self.view_schedule_3d_btn.setObjectName("PrimaryAction")
+        self.view_schedule_3d_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_schedule_3d_btn.clicked.connect(self._emit_schedule_for_3d)
+        phase_btn_layout.addWidget(self.view_schedule_3d_btn)
+        p_layout.addLayout(phase_btn_layout)
+
+        self.results_tabs.addTab(self.phase_tab, "📅 Phase Analysis")
+
+        # ---- Economic Analysis tab ----
+        self.econ_tab = QWidget()
+        e_layout = QVBoxLayout(self.econ_tab)
+        e_layout.setSpacing(12)
+        e_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.econ_summary_label = QLabel()
+        self.econ_summary_label.setWordWrap(True)
+        self.econ_summary_label.setFont(QFont("Segoe UI", 11))
+        self.econ_summary_label.setStyleSheet(f"""
+            color: {ModernColors.TEXT_PRIMARY};
+            background-color: {ModernColors.CARD_BG};
+            border: 1px solid {ModernColors.BORDER};
+            border-radius: 8px;
+            padding: 16px;
+        """)
+        e_layout.addWidget(self.econ_summary_label)
+        e_layout.addStretch()
+
+        self.results_tabs.addTab(self.econ_tab, "💰 Economic Analysis")
+
+        # ---- Convergence & Diagnostics tab ----
+        self.conv_tab = QWidget()
+        c_layout = QVBoxLayout(self.conv_tab)
+        c_layout.setSpacing(12)
+        c_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Modern convergence chart
+        self.conv_figure = Figure(figsize=(4, 3), facecolor='#252525')
+        self.conv_canvas = FigureCanvas(self.conv_figure)
+        self.conv_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        c_layout.addWidget(self.conv_canvas)
+
+        self.conv_label = QLabel()
+        self.conv_label.setWordWrap(True)
+        self.conv_label.setFont(QFont("Segoe UI", 10))
+        self.conv_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; padding: 8px;")
+        c_layout.addWidget(self.conv_label)
+
+        self.results_tabs.addTab(self.conv_tab, "🔬 Convergence & Diagnostics")
+
+        # ---- Export tab ----
+        self.export_tab = QWidget()
+        x_layout = QVBoxLayout(self.export_tab)
+        x_layout.setSpacing(12)
+        x_layout.setContentsMargins(16, 16, 16, 16)
+
+        # Export section header
+        export_header = QLabel("📤 Export Options")
+        export_header.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        export_header.setStyleSheet(f"color: {ModernColors.TEXT_PRIMARY}; padding-bottom: 8px;")
+        x_layout.addWidget(export_header)
+
+        # Modern export buttons
+        self.export_excel_btn = QPushButton("📊 Export Full IRR Report (Excel)...")
+        self.export_excel_btn.setObjectName("PrimaryAction")
+        self.export_excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_excel_btn.clicked.connect(self._export_irr_report_excel)
+        x_layout.addWidget(self.export_excel_btn)
+        
+        self.export_json_btn = QPushButton("📋 Export IRR Result Snapshot (JSON)...")
+        self.export_json_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_json_btn.clicked.connect(self._export_irr_snapshot_json)
+        x_layout.addWidget(self.export_json_btn)
+        
+        # Save as Scenario button (STEP 31)
+        self.save_scenario_btn = QPushButton("💾 Save as Planning Scenario...")
+        self.save_scenario_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_scenario_btn.clicked.connect(self._on_save_as_scenario)
+        x_layout.addWidget(self.save_scenario_btn)
+
+        # Separator
+        x_layout.addSpacing(16)
+        
+        # 3D View section header
+        view_header = QLabel("👁️ Visualization")
+        view_header.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        view_header.setStyleSheet(f"color: {ModernColors.TEXT_PRIMARY}; padding-bottom: 8px;")
+        x_layout.addWidget(view_header)
+
+        self.view_optimal_pit_btn = QPushButton("🎯 View Optimal IRR Pit in 3D")
+        self.view_optimal_pit_btn.setObjectName("SuccessAction")
+        self.view_optimal_pit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_optimal_pit_btn.clicked.connect(self._emit_optimal_pit_for_3d)
+        x_layout.addWidget(self.view_optimal_pit_btn)
+        
+        x_layout.addStretch()
+
+        self.results_tabs.addTab(self.export_tab, "📤 Export & Reporting")
+
+    
+    def _create_summary_tab(self) -> QWidget:
+        """Create summary and statistics tab."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Executive summary with metrics and narrative
+        summary_group = QGroupBox("Executive Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        
+        self.summary_table = QTableWidget()
+        self.summary_table.setColumnCount(2)
+        self.summary_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.summary_table.horizontalHeader().setStretchLastSection(True)
+        summary_layout.addWidget(self.summary_table)
+        
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        self.summary_text.setFont(QFont("Calibri", 11))
+        self.summary_text.setPlaceholderText(
+            "Run the IRR analysis to generate a narrative summary."
+        )
+        summary_layout.addWidget(self.summary_text)
+        
+        layout.addWidget(summary_group)
+        
+        # Quick NPV snapshot chart
+        chart_group = QGroupBox("NPV Snapshot")
+        chart_layout = QVBoxLayout(chart_group)
+        
+        self.summary_figure = Figure(figsize=(6, 3))
+        self.summary_canvas = FigureCanvas(self.summary_figure)
+        self.summary_hist_axes = self.summary_figure.add_subplot(111)
+        self.summary_hist_axes.set_facecolor("#f9f9f9")
+        self.summary_hist_axes.set_title("NPV Distribution (Millions)")
+        self.summary_hist_axes.set_xlabel("NPV ($M)")
+        self.summary_hist_axes.set_ylabel("Frequency")
+        chart_layout.addWidget(self.summary_canvas)
+        
+        layout.addWidget(chart_group)
+        
+        layout.addStretch()
+        
+        # Backward compatibility: legacy pop-out code references these attributes
+        self.results_text = self.summary_text
+        self.stats_table = self.summary_table
+        self._clear_summary_histogram()
+        
+        return widget
+    
+    def _create_phase_analysis_tab(self) -> QWidget:
+        """Create pit phase analysis tab."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Phase summary table
+        phase_group = QGroupBox("Pit Phase Summary")
+        phase_layout = QVBoxLayout(phase_group)
+        
+        self.phase_table = QTableWidget()
+        self.phase_table.setColumnCount(8)
+        self.phase_table.setHorizontalHeaderLabels([
+            "Phase", "Tonnes (Mt)", "Ore (Mt)", "Waste (Mt)", 
+            "Strip Ratio", "Avg Grade (g/t)", "NPV ($M)", "IRR (%)"
+        ])
+        self.phase_table.horizontalHeader().setStretchLastSection(True)
+        phase_layout.addWidget(self.phase_table)
+        
+        # Export table button
+        export_phase_table_btn = QPushButton("Export Table to CSV")
+        export_phase_table_btn.clicked.connect(lambda: self._export_table(self.phase_table, "phase_summary.csv"))
+        phase_layout.addWidget(export_phase_table_btn)
+        
+        layout.addWidget(phase_group)
+        
+        # Phase charts control
+        charts_group = QGroupBox("Pit Phase Charts")
+        charts_layout = QVBoxLayout(charts_group)
+        
+        # Chart selection
+        select_layout = QHBoxLayout()
+        select_layout.addWidget(QLabel("Select Charts to Plot:"))
+        
+        self.phase_chart_ore_waste = QCheckBox("Ore/Waste")
+        self.phase_chart_ore_waste.setChecked(True)
+        select_layout.addWidget(self.phase_chart_ore_waste)
+        
+        self.phase_chart_strip = QCheckBox("Strip Ratio")
+        self.phase_chart_strip.setChecked(True)
+        select_layout.addWidget(self.phase_chart_strip)
+        
+        self.phase_chart_grade = QCheckBox("Grade")
+        self.phase_chart_grade.setChecked(True)
+        select_layout.addWidget(self.phase_chart_grade)
+        
+        self.phase_chart_value = QCheckBox("Economic Value")
+        self.phase_chart_value.setChecked(True)
+        select_layout.addWidget(self.phase_chart_value)
+        
+        plot_phase_btn = QPushButton("Plot Selected Charts")
+        plot_phase_btn.clicked.connect(self._plot_phase_charts_selective)
+        select_layout.addWidget(plot_phase_btn)
+        
+        export_phase_chart_btn = QPushButton("Export Chart")
+        export_phase_chart_btn.clicked.connect(lambda: self._export_chart(self.phase_figure, "phase_charts.png"))
+        select_layout.addWidget(export_phase_chart_btn)
+        
+        select_layout.addStretch()
+        charts_layout.addLayout(select_layout)
+        
+        # Create matplotlib figure for phase charts
+        self.phase_figure = Figure(figsize=(10, 8))
+        self.phase_canvas = FigureCanvas(self.phase_figure)
+        charts_layout.addWidget(self.phase_canvas)
+        
+        layout.addWidget(charts_group)
+        
+        return widget
+    
+    def _create_economic_analysis_tab(self) -> QWidget:
+        """Create economic analysis tab."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Cumulative IRR table
+        cum_group = QGroupBox("Cumulative IRR by Phase")
+        cum_layout = QVBoxLayout(cum_group)
+        
+        self.cumulative_irr_table = QTableWidget()
+        self.cumulative_irr_table.setColumnCount(5)
+        self.cumulative_irr_table.setHorizontalHeaderLabels([
+            "Up to Phase", "Cumulative Tonnes (Mt)", "Cumulative NPV ($M)", 
+            "Cumulative IRR (%)", "Marginal NPV ($M)"
+        ])
+        self.cumulative_irr_table.horizontalHeader().setStretchLastSection(True)
+        cum_layout.addWidget(self.cumulative_irr_table)
+        
+        # Export table button
+        export_econ_table_btn = QPushButton("Export Table to CSV")
+        export_econ_table_btn.clicked.connect(lambda: self._export_table(self.cumulative_irr_table, "economic_analysis.csv"))
+        cum_layout.addWidget(export_econ_table_btn)
+        
+        layout.addWidget(cum_group)
+        
+        # Economic charts control
+        econ_group = QGroupBox("Economic Value Charts")
+        econ_layout = QVBoxLayout(econ_group)
+        
+        # Chart controls
+        control_layout = QHBoxLayout()
+        plot_econ_btn = QPushButton("Plot Chart")
+        plot_econ_btn.clicked.connect(self._plot_economic_charts)
+        control_layout.addWidget(plot_econ_btn)
+        
+        export_econ_chart_btn = QPushButton("Export Chart")
+        export_econ_chart_btn.clicked.connect(lambda: self._export_chart(self.economic_figure, "economic_charts.png"))
+        control_layout.addWidget(export_econ_chart_btn)
+        control_layout.addStretch()
+        
+        econ_layout.addLayout(control_layout)
+        
+        self.economic_figure = Figure(figsize=(10, 8))
+        self.economic_canvas = FigureCanvas(self.economic_figure)
+        econ_layout.addWidget(self.economic_canvas)
+        
+        layout.addWidget(econ_group)
+        
+        return widget
+    
+    def _create_sensitivity_analysis_tab(self) -> QWidget:
+        """Create sensitivity analysis tab (Phase 3)."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Phase 3: Full sensitivity option
+        options_group = QGroupBox("⚙️ Sensitivity Analysis Options")
+        options_layout = QHBoxLayout(options_group)
+        
+        self.enable_full_sensitivity = QCheckBox("Enable Full Re-calculation (Phase 3)")
+        self.enable_full_sensitivity.setToolTip(
+            "When checked, re-runs the complete IRR analysis for each parameter variation.\n"
+            "More accurate but significantly slower (5-10x longer runtime).\n"
+            "When unchecked, uses quick approximations (Phase 2)."
+        )
+        self.enable_full_sensitivity.setChecked(False)  # Default to fast mode
+        options_layout.addWidget(self.enable_full_sensitivity)
+        
+        options_layout.addStretch()
+        
+        # Info label
+        self.sensitivity_info_label = QLabel("📊 Using quick approximations (Phase 2)")
+        self.sensitivity_info_label.setStyleSheet("color: #4CAF50; font-size: 9pt;")
+        options_layout.addWidget(self.sensitivity_info_label)
+        
+        self.enable_full_sensitivity.toggled.connect(
+            lambda checked: self.sensitivity_info_label.setText(
+                "⚡ Full re-calculation enabled (Phase 3 - slower)" if checked 
+                else "📊 Using quick approximations (Phase 2)"
+            )
+        )
+        
+        layout.addWidget(options_group)
+        
+        # Sensitivity parameters
+        sens_group = QGroupBox("IRR Sensitivity to Key Parameters")
+        sens_layout = QVBoxLayout(sens_group)
+        
+        self.sensitivity_table = QTableWidget()
+        self.sensitivity_table.setColumnCount(3)
+        self.sensitivity_table.setHorizontalHeaderLabels([
+            "Parameter", "Change (%)", "IRR Impact (%)"
+        ])
+        self.sensitivity_table.horizontalHeader().setStretchLastSection(True)
+        sens_layout.addWidget(self.sensitivity_table)
+        
+        layout.addWidget(sens_group)
+        
+        # Sensitivity charts
+        chart_group = QGroupBox("Sensitivity Charts")
+        chart_layout = QVBoxLayout(chart_group)
+        
+        self.sensitivity_figure = Figure(figsize=(10, 8))
+        self.sensitivity_canvas = FigureCanvas(self.sensitivity_figure)
+        chart_layout.addWidget(self.sensitivity_canvas)
+        
+        layout.addWidget(chart_group)
+        
+        return widget
+    
+    def _create_npv_distribution_tab(self) -> QWidget:
+        """Create NPV distribution tab."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # NPV percentiles
+        dist_group = QGroupBox("NPV Distribution Statistics")
+        dist_layout = QVBoxLayout(dist_group)
+        
+        self.npv_table = QTableWidget()
+        self.npv_table.setColumnCount(2)
+        self.npv_table.setHorizontalHeaderLabels(["Percentile", "NPV ($M)"])
+        self.npv_table.horizontalHeader().setStretchLastSection(True)
+        dist_layout.addWidget(self.npv_table)
+        
+        # Export table button
+        export_npv_table_btn = QPushButton("Export Table to CSV")
+        export_npv_table_btn.clicked.connect(lambda: self._export_table(self.npv_table, "npv_distribution.csv"))
+        dist_layout.addWidget(export_npv_table_btn)
+        
+        layout.addWidget(dist_group)
+        
+        # NPV distribution chart control
+        chart_group = QGroupBox("NPV Distribution Chart")
+        chart_layout = QVBoxLayout(chart_group)
+        
+        # Chart controls
+        control_layout = QHBoxLayout()
+        plot_npv_btn = QPushButton("Plot Chart")
+        plot_npv_btn.clicked.connect(self._plot_npv_distribution)
+        control_layout.addWidget(plot_npv_btn)
+        
+        export_npv_chart_btn = QPushButton("Export Chart")
+        export_npv_chart_btn.clicked.connect(lambda: self._export_chart(self.npv_figure, "npv_distribution.png"))
+        control_layout.addWidget(export_npv_chart_btn)
+        control_layout.addStretch()
+        
+        chart_layout.addLayout(control_layout)
+        
+        self.npv_figure = Figure(figsize=(10, 6))
+        self.npv_canvas = FigureCanvas(self.npv_figure)
+        chart_layout.addWidget(self.npv_canvas)
+        
+        layout.addWidget(chart_group)
+        
+        return widget
+    
+    def _create_optimal_pit_tab(self) -> QWidget:
+        """Create optimal pit determination tab (Final Results)."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Header
+        header_group = QGroupBox("🎯 DETERMINATION OF THE OPTIMAL PIT BASED ON INTERNAL RATE OF RETURN")
+        header_layout = QVBoxLayout(header_group)
+        
+        self.optimal_pit_summary = QTextEdit()
+        self.optimal_pit_summary.setReadOnly(True)
+        self.optimal_pit_summary.setMaximumHeight(150)
+        self.optimal_pit_summary.setFont(QFont("Consolas", 10))
+        header_layout.addWidget(self.optimal_pit_summary)
+        
+        layout.addWidget(header_group)
+        
+        # Optimal Pit Metrics Table
+        metrics_group = QGroupBox("📊 Optimal Pit Metrics & Economics")
+        metrics_layout = QVBoxLayout(metrics_group)
+        
+        self.optimal_pit_table = QTableWidget()
+        self.optimal_pit_table.setColumnCount(2)
+        self.optimal_pit_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.optimal_pit_table.horizontalHeader().setStretchLastSection(True)
+        self.optimal_pit_table.setMaximumHeight(400)
+        metrics_layout.addWidget(self.optimal_pit_table)
+        
+        layout.addWidget(metrics_group)
+        
+        # Revenue Factor Analysis
+        rev_group = QGroupBox("💰 Revenue Factor Sensitivity")
+        rev_layout = QVBoxLayout(rev_group)
+        
+        self.revenue_factor_table = QTableWidget()
+        self.revenue_factor_table.setColumnCount(6)
+        self.revenue_factor_table.setHorizontalHeaderLabels([
+            "Revenue Factor", "Blocks", "Tonnes (Mt)", "NPV ($M)", "IRR (%)", "Recommended"
+        ])
+        self.revenue_factor_table.horizontalHeader().setStretchLastSection(True)
+        self.revenue_factor_table.setMaximumHeight(200)
+        rev_layout.addWidget(self.revenue_factor_table)
+        
+        layout.addWidget(rev_group)
+        
+        # Final Recommendation
+        recommendation_group = QGroupBox("✅ FINAL RECOMMENDATION")
+        recommendation_layout = QVBoxLayout(recommendation_group)
+        
+        self.optimal_pit_recommendation = QTextEdit()
+        self.optimal_pit_recommendation.setReadOnly(True)
+        self.optimal_pit_recommendation.setMaximumHeight(200)
+        self.optimal_pit_recommendation.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        self.optimal_pit_recommendation.setStyleSheet(f"color: #4CAF50; background-color: {ModernColors.PANEL_BG};")
+        recommendation_layout.addWidget(self.optimal_pit_recommendation)
+        
+        layout.addWidget(recommendation_group)
+        
+        # Visualization Chart
+        chart_group = QGroupBox("📈 IRR vs. Pit Size Analysis")
+        chart_layout = QVBoxLayout(chart_group)
+        
+        self.optimal_pit_figure = Figure(figsize=(12, 6))
+        self.optimal_pit_canvas = FigureCanvas(self.optimal_pit_figure)
+        chart_layout.addWidget(self.optimal_pit_canvas)
+        
+        layout.addWidget(chart_group)
+        
+        return widget
+    
+    def _create_advanced_analytics_tab(self) -> QWidget:
+        """Create advanced analytics tab with convergence, cash flows, and 3D visualization."""
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Section 1: IRR Convergence Plot
+        convergence_group = QGroupBox("📈 IRR Convergence Analysis")
+        convergence_layout = QVBoxLayout(convergence_group)
+        
+        convergence_info = QLabel(
+            "Shows how the bisection algorithm converges to the optimal IRR_α value over iterations."
+        )
+        convergence_info.setWordWrap(True)
+        convergence_layout.addWidget(convergence_info)
+        
+        # Chart controls
+        conv_control_layout = QHBoxLayout()
+        plot_conv_btn = QPushButton("Plot Convergence")
+        plot_conv_btn.clicked.connect(self._plot_convergence)
+        conv_control_layout.addWidget(plot_conv_btn)
+        
+        export_conv_btn = QPushButton("Export Chart")
+        export_conv_btn.clicked.connect(lambda: self._export_chart(self.convergence_figure, "irr_convergence.png"))
+        conv_control_layout.addWidget(export_conv_btn)
+        conv_control_layout.addStretch()
+        
+        convergence_layout.addLayout(conv_control_layout)
+        
+        self.convergence_figure = Figure(figsize=(12, 6))
+        self.convergence_canvas = FigureCanvas(self.convergence_figure)
+        convergence_layout.addWidget(self.convergence_canvas)
+        
+        layout.addWidget(convergence_group)
+        
+        # Section 2: Scenario Distribution Histogram
+        scenario_group = QGroupBox("📊 Scenario NPV Distribution")
+        scenario_layout = QVBoxLayout(scenario_group)
+        
+        scenario_info = QLabel(
+            "Distribution of NPV values across all scenarios at the optimal discount rate."
+        )
+        scenario_info.setWordWrap(True)
+        scenario_layout.addWidget(scenario_info)
+        
+        # Chart controls
+        scenario_control_layout = QHBoxLayout()
+        plot_scenario_btn = QPushButton("Plot Distribution")
+        plot_scenario_btn.clicked.connect(self._plot_scenario_distribution)
+        scenario_control_layout.addWidget(plot_scenario_btn)
+        
+        export_scenario_btn = QPushButton("Export Chart")
+        export_scenario_btn.clicked.connect(lambda: self._export_chart(self.scenario_figure, "scenario_distribution.png"))
+        scenario_control_layout.addWidget(export_scenario_btn)
+        scenario_control_layout.addStretch()
+        
+        scenario_layout.addLayout(scenario_control_layout)
+        
+        self.scenario_figure = Figure(figsize=(12, 6))
+        self.scenario_canvas = FigureCanvas(self.scenario_figure)
+        scenario_layout.addWidget(self.scenario_canvas)
+        
+        layout.addWidget(scenario_group)
+        
+        # Section 3: Yearly Discounted Cash Flow Chart
+        cashflow_group = QGroupBox("💵 Yearly Discounted Cash Flow")
+        cashflow_layout = QVBoxLayout(cashflow_group)
+        
+        cashflow_info = QLabel(
+            "Period-by-period cash flows showing revenue, costs, and net cashflow discounted to present value."
+        )
+        cashflow_info.setWordWrap(True)
+        cashflow_layout.addWidget(cashflow_info)
+        
+        # Chart controls
+        cashflow_control_layout = QHBoxLayout()
+        plot_cashflow_btn = QPushButton("Plot Cash Flows")
+        plot_cashflow_btn.clicked.connect(self._plot_cashflow)
+        cashflow_control_layout.addWidget(plot_cashflow_btn)
+        
+        export_cashflow_btn = QPushButton("Export Chart")
+        export_cashflow_btn.clicked.connect(lambda: self._export_chart(self.cashflow_figure, "cashflow_analysis.png"))
+        cashflow_control_layout.addWidget(export_cashflow_btn)
+        cashflow_control_layout.addStretch()
+        
+        cashflow_layout.addLayout(cashflow_control_layout)
+        
+        self.cashflow_figure = Figure(figsize=(12, 8))
+        self.cashflow_canvas = FigureCanvas(self.cashflow_figure)
+        cashflow_layout.addWidget(self.cashflow_canvas)
+        
+        layout.addWidget(cashflow_group)
+        
+        # Section 4: 3D Visualization
+        viz_group = QGroupBox("🎨 3D Block Model Visualization")
+        viz_layout = QVBoxLayout(viz_group)
+        
+        viz_info = QLabel(
+            "Interactive 3D visualization of the pit shell and mining schedule with full property controls."
+        )
+        viz_info.setWordWrap(True)
+        viz_layout.addWidget(viz_info)
+        
+        # 3D visualization removed due to GPU freeze issues
+        # viz_btn_layout = QHBoxLayout()
+        # open_3d_btn = QPushButton("🚀 Open 3D Viewer Window")
+        # open_3d_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
+        # open_3d_btn.clicked.connect(self._visualize_schedule)
+        # viz_btn_layout.addWidget(open_3d_btn)
+        # viz_btn_layout.addStretch()
+        # 
+        # viz_layout.addLayout(viz_btn_layout)
+        
+        layout.addWidget(viz_group)
+        
+        layout.addStretch()
+        return widget
+    
+    def _on_block_model_generated(self, block_model):
+        """
+        Automatically receive block model when it's generated.
+        
+        Args:
+            block_model: BlockModel instance or DataFrame from DataRegistry
+        """
+        try:
+            # Convert BlockModel to DataFrame if needed
+            if hasattr(block_model, 'to_dataframe'):
+                block_df = block_model.to_dataframe()
+            elif isinstance(block_model, pd.DataFrame):
+                block_df = block_model
+            else:
+                logger.warning(f"Unexpected block model type: {type(block_model)}")
+                return
+            
+            # Set block model using existing method
+            self.set_block_model(block_df)
+            logger.info(f"IRR Panel auto-received block model: {len(block_df)} blocks")
+            self._update_status_card(True, f"Block model loaded: {len(block_df):,} blocks (auto-loaded)")
+        except Exception as e:
+            logger.error(f"Error processing block model in IRR Panel: {e}", exc_info=True)
+    
+    def _on_block_model_loaded(self, block_model):
+        """
+        Automatically receive block model when it's loaded.
+        
+        Args:
+            block_model: BlockModel instance or DataFrame from DataRegistry
+        """
+        # Use same handler as generated
+        self._on_block_model_generated(block_model)
+    
+    def set_block_model(self, block_model: pd.DataFrame):
+        """
+        Set the block model for analysis.
+        
+        Args:
+            block_model: Block model DataFrame with columns ['BLOCK_ID', 'TONNAGE', 'GRADE', ...]
+        """
+        # Add BLOCK_ID if not present
+        if 'BLOCK_ID' not in block_model.columns:
+            block_model = block_model.copy()
+            block_model['BLOCK_ID'] = range(len(block_model))
+        
+        self._block_model = block_model  # Use private backing field (property contract)
+        
+        # Get all numeric columns for field selection
+        numeric_cols = block_model.select_dtypes(include=[np.number]).columns.tolist()
+        all_cols = block_model.columns.tolist()
+        
+        # Populate field combo boxes
+        self.grade_combo.clear()
+        self.density_combo.clear()
+        self.dx_combo.clear()
+        self.dy_combo.clear()
+        self.dz_combo.clear()
+        self.class_column_combo.clear()
+        
+        # Add "Auto-calculate" option for density
+        self.grade_combo.addItems(numeric_cols)
+        self.density_combo.addItem("(Auto-calculate: 2.7 t/m³)")
+        self.density_combo.addItems(numeric_cols)
+        self.dx_combo.addItems(numeric_cols)
+        self.dy_combo.addItems(numeric_cols)
+        self.dz_combo.addItems(numeric_cols)
+        
+        # Populate classification column combo (all columns - can be text or numeric)
+        self.class_column_combo.addItem("(None - No Classification)")
+        self.class_column_combo.addItems(all_cols)
+        
+        # Auto-detect common field names
+        # Grade (look for Au, Cu, etc.)
+        grade_patterns = ['AU', 'CU', 'GRADE', 'FE', 'ZN', 'PB']
+        for pattern in grade_patterns:
+            matches = [col for col in numeric_cols if pattern.upper() in col.upper() and 'DENSITY' not in col.upper()]
+            if matches:
+                self.grade_combo.setCurrentText(matches[0])
+                break
+        
+        # Classification column auto-detection
+        class_patterns = ['CLASS', 'CLASSIFICATION', 'CATEGORY', 'RESOURCE_CLASS', 'JORC']
+        for pattern in class_patterns:
+            matches = [col for col in all_cols if pattern.upper() in col.upper()]
+            if matches:
+                idx = self.class_column_combo.findText(matches[0])
+                if idx >= 0:
+                    self.class_column_combo.setCurrentIndex(idx)
+                    # Update block count after setting classification column
+                    self._update_class_block_count()
+                break
+        
+        # Density
+        density_patterns = ['DENSITY', 'DENS', 'SG']
+        for pattern in density_patterns:
+            matches = [col for col in numeric_cols if pattern.upper() in col.upper()]
+            if matches:
+                self.density_combo.setCurrentText(matches[0])
+                break
+        
+        # Block dimensions
+        dx_patterns = ['DX', 'XINC', 'XSIZE']
+        for pattern in dx_patterns:
+            matches = [col for col in numeric_cols if pattern.upper() in col.upper()]
+            if matches:
+                self.dx_combo.setCurrentText(matches[0])
+                break
+        
+        dy_patterns = ['DY', 'YINC', 'YSIZE']
+        for pattern in dy_patterns:
+            matches = [col for col in numeric_cols if pattern.upper() in col.upper()]
+            if matches:
+                self.dy_combo.setCurrentText(matches[0])
+                break
+        
+        dz_patterns = ['DZ', 'ZINC', 'ZSIZE']
+        for pattern in dz_patterns:
+            matches = [col for col in numeric_cols if pattern.upper() in col.upper()]
+            if matches:
+                self.dz_combo.setCurrentText(matches[0])
+                break
+        
+        self._update_status_card(True, f"Loaded: {len(block_model):,} blocks, {len(numeric_cols)} numeric fields")
+        self.run_btn.setEnabled(True)
+        self.ultimate_pit_btn.setEnabled(True)
+        self._block_model_loaded = True
+        
+        logger.info(f"Set block model with {len(block_model)} blocks, auto-detected fields")
+    
+    def _load_block_model_from_viewer(self):
+        """Load block model from the main viewer (if available)."""
+        # This method is a placeholder - the actual connection is made by main_window
+        # The main_window will reconnect this button's clicked signal
+        pass
+    
+    def _prepare_block_model(self) -> pd.DataFrame:
+        """
+        Prepare block model with standardized column names.
+        
+        Returns:
+            Prepared block model DataFrame
+        """
+        if self.block_model is None:
+            raise ValueError("No block model loaded")
+        
+        # Get field selections
+        grade_field = self.grade_combo.currentText()
+        density_field = self.density_combo.currentText()
+        dx_field = self.dx_combo.currentText()
+        dy_field = self.dy_combo.currentText()
+        dz_field = self.dz_combo.currentText()
+        
+        if not grade_field or not dx_field or not dy_field or not dz_field:
+            raise ValueError("Missing required field selections")
+        
+        # Create a copy with standardized names
+        prepared = self.block_model.copy()
+        
+        # Ensure coordinate columns exist (calculate centroids from origin + dimension/2)
+        # Pattern 1: If XMORIG exists, calculate XC from origin
+        if 'XMORIG' in prepared.columns:
+            prepared['XC'] = prepared['XMORIG'] + prepared[dx_field] / 2
+        # Pattern 2: Otherwise, look for existing center coordinate columns
+        elif 'XC' not in prepared.columns:
+            # Try common center coordinate column names
+            x_patterns = ['X', 'XCENTRE', 'X_CENTRE', 'X_CENTER', 'XCOORD', 'X_COORD']
+            for pattern in x_patterns:
+                if pattern in prepared.columns:
+                    prepared['XC'] = prepared[pattern]
+                    logger.info(f"Using existing column '{pattern}' as XC")
+                    break
+        
+        # Same for Y coordinate
+        if 'YMORIG' in prepared.columns:
+            prepared['YC'] = prepared['YMORIG'] + prepared[dy_field] / 2
+        elif 'YC' not in prepared.columns:
+            y_patterns = ['Y', 'YCENTRE', 'Y_CENTRE', 'Y_CENTER', 'YCOORD', 'Y_COORD']
+            for pattern in y_patterns:
+                if pattern in prepared.columns:
+                    prepared['YC'] = prepared[pattern]
+                    logger.info(f"Using existing column '{pattern}' as YC")
+                    break
+        
+        # Same for Z coordinate
+        if 'ZMORIG' in prepared.columns:
+            prepared['ZC'] = prepared['ZMORIG'] + prepared[dz_field] / 2
+            logger.info(f"Calculated ZC: min={prepared['ZC'].min():.2f}, max={prepared['ZC'].max():.2f}, range={prepared['ZC'].max()-prepared['ZC'].min():.2f}m")
+        elif 'ZC' not in prepared.columns:
+            z_patterns = ['Z', 'ZCENTRE', 'Z_CENTRE', 'Z_CENTER', 'ZCOORD', 'Z_COORD']
+            for pattern in z_patterns:
+                if pattern in prepared.columns:
+                    prepared['ZC'] = prepared[pattern]
+                    logger.info(f"Using existing column '{pattern}' as ZC")
+                    break
+        
+        # Verify that we have all required coordinate columns
+        missing_coords = []
+        if 'XC' not in prepared.columns:
+            missing_coords.append('XC (X coordinate)')
+        if 'YC' not in prepared.columns:
+            missing_coords.append('YC (Y coordinate)')
+        if 'ZC' not in prepared.columns:
+            missing_coords.append('ZC (Z coordinate)')
+        
+        if missing_coords:
+            raise ValueError(
+                f"Block model is missing coordinate columns: {', '.join(missing_coords)}. "
+                f"Available columns: {', '.join(prepared.columns.tolist())}"
+            )
+        
+        # Rename user-selected fields to standard names
+        prepared['GRADE'] = prepared[grade_field]
+        prepared['DX'] = prepared[dx_field]
+        prepared['DY'] = prepared[dy_field]
+        prepared['DZ'] = prepared[dz_field]
+        prepared['XINC'] = prepared[dx_field]
+        prepared['YINC'] = prepared[dy_field]
+        prepared['ZINC'] = prepared[dz_field]
+        
+        # Calculate volume and tonnage
+        prepared['VOLUME'] = prepared['DX'] * prepared['DY'] * prepared['DZ']
+        
+        # Handle density - auto-calculate or use field
+        if density_field.startswith("(Auto-calculate"):
+            prepared['DENSITY'] = 2.7  # Default rock density (t/m³)
+            logger.info("Using default density: 2.7 t/m³ for tonnage calculation")
+        else:
+            prepared['DENSITY'] = prepared[density_field]
+            logger.info(f"Using density field '{density_field}' for tonnage calculation")
+        
+        # Calculate TONNAGE = VOLUME × DENSITY
+        prepared['TONNAGE'] = prepared['VOLUME'] * prepared['DENSITY']
+        total_tonnage_mt = prepared['TONNAGE'].sum() / 1e6
+        logger.info(f"[OK] Calculated tonnage: {total_tonnage_mt:.2f} Mt total, {prepared['TONNAGE'].mean():.2f} t/block average")
+        
+        # Ensure BLOCK_ID exists
+        if 'BLOCK_ID' not in prepared.columns:
+            prepared['BLOCK_ID'] = range(len(prepared))
+        
+        return prepared
+    
+    def _validate_analysis_inputs(self) -> List[str]:
+        """Validate configuration and analysis prerequisites before running IRR."""
+        errors: List[str] = []
+        
+        scenario_cfg = self.config.get('scenario_generation', {})
+        irr_cfg = self.config.get('irr_search', {})
+        opt_cfg = self.config.get('optimization', {})
+        
+        num_scenarios = int(scenario_cfg.get('num_scenarios', 0) or 0)
+        if num_scenarios <= 0:
+            errors.append("Number of scenarios must be greater than 0.")
+        
+        num_periods = int(scenario_cfg.get('num_periods', 0) or 0)
+        if num_periods <= 0:
+            errors.append("Number of periods must be greater than 0.")
+        
+        r_low = float(irr_cfg.get('r_low', 0.0) or 0.0)
+        r_high = float(irr_cfg.get('r_high', 0.0) or 0.0)
+        if r_low <= 0 or r_high <= 0:
+            errors.append("Discount rate bounds must be greater than 0.")
+        if r_low >= r_high:
+            errors.append("Lower discount rate bound must be less than the upper bound.")
+        
+        mining_capacity = float(opt_cfg.get('production_capacity', 0.0) or 0.0)
+        if mining_capacity <= 0:
+            errors.append("Mining capacity must be greater than 0.")
+        
+        if not self._block_model_loaded or self.block_model is None or self.block_model.empty:
+            errors.append("No block model assigned to IRR analysis.")
+        
+        return errors
+    
+    # ------------------------------------------------------------------
+    # BaseAnalysisPanel overrides
+    # ------------------------------------------------------------------
+    
+    def gather_parameters(self) -> Dict[str, Any]:
+        """Collect all parameters from the UI and build IRRConfig."""
+        if self.block_model is None:
+            raise ValueError("Please load a block model first.")
+        
+        # Persist latest UI selections into config
+        self._update_config_from_ui()
+        
+        # Prepare block model
+        prepared_model = self._prepare_block_model()
+        
+        if prepared_model.empty:
+            raise ValueError("Prepared block model contains no blocks.")
+        
+        # Build IRRConfig
+        irr_config = IRRConfig(
+            block_model=prepared_model,
+            scenario_config=self.config['scenario_generation'],
+            economic_params=self.config['economic_parameters'],
+            irr_search=self.config['irr_search'],
+            num_periods=self.config['optimization']['num_periods'],
+            production_capacity=self.config['optimization']['production_capacity'],
+            tolerance=self.config['irr_search']['tolerance'],
+            max_iterations=self.config['irr_search']['max_iterations'],
+            parallel=self.config['irr_search']['parallel']
+        )
+        
+        # Clear previous results
+        self.progress_log.clear()
+        self.results_text.clear()
+        self.npv_table.setRowCount(0)
+        
+        # Log field mapping
+        self.progress_log.append("Field Mapping:\n")
+        self.progress_log.append(f"  Grade: {self.grade_combo.currentText()}\n")
+        self.progress_log.append(f"  Density: {self.density_combo.currentText()}\n")
+        self.progress_log.append(f"  Block Dimensions: {self.dx_combo.currentText()} × {self.dy_combo.currentText()} × {self.dz_combo.currentText()}\n")
+        self.progress_log.append(f"  Total Blocks: {len(prepared_model):,}\n\n")
+        self.progress_log.append("Starting IRR analysis...\n")
+        
+        # Switch to progress tab
+        self.tabs.setCurrentIndex(1)
+        
+        # Check for nested shells from Ultimate Pit calculation
+        # If available, enable dynamic pit selection for price scenarios
+        nested_shells = None
+        if hasattr(self, 'pit_result') and self.pit_result is not None:
+            if 'shells' in self.pit_result:
+                nested_shells = self.pit_result.get('shells')
+                self.progress_log.append("✓ Dynamic Pit Selection ENABLED: Nested shells available\n")
+                self.progress_log.append(f"  Using pre-computed shells for price-responsive pit boundaries\n\n")
+                logger.info("Dynamic pit selection enabled with nested shells from Ultimate Pit calculation")
+            else:
+                self.progress_log.append("⚠ Dynamic Pit Selection DISABLED: No nested shells available\n")
+                self.progress_log.append("  Run 'Ultimate Pit (LG)' first to enable price-responsive pit sizing\n\n")
+                logger.info("No nested shells available - using fixed pit for all scenarios")
+        else:
+            self.progress_log.append("⚠ Dynamic Pit Selection DISABLED: No pit result available\n")
+            self.progress_log.append("  Run 'Ultimate Pit (LG)' first to enable price-responsive pit sizing\n\n")
+        
+        # Get classification filter settings
+        classification_filter = self._get_classification_filter()
+        classification_column = self._get_classification_column()
+        
+        # Log classification filter status
+        if classification_filter:
+            self.progress_log.append(f"✓ Resource Classification Filter ENABLED\n")
+            self.progress_log.append(f"  Column: {classification_column}\n")
+            self.progress_log.append(f"  Including: {', '.join(classification_filter)}\n\n")
+            logger.info(f"Classification filter enabled: {classification_filter}")
+        else:
+            self.progress_log.append("⚠ Classification Filter: All blocks (including Inferred)\n")
+            self.progress_log.append("  Results may not be suitable for JORC/SAMREC reporting\n\n")
+            logger.info("No classification filter - all blocks included")
+        
+        # Return config dict for controller (controller will convert to IRRConfig)
+        return {
+            "block_model": prepared_model,
+            "scenario_config": self.config['scenario_generation'],
+            "economic_params": self.config['economic_parameters'],
+            "irr_search": self.config['irr_search'],
+            "num_periods": self.config['optimization']['num_periods'],
+            "production_capacity": self.config['optimization']['production_capacity'],
+            "tolerance": self.config['irr_search']['tolerance'],
+            "max_iterations": self.config['irr_search']['max_iterations'],
+            "parallel": self.config['irr_search']['parallel'],
+            # New: Pass nested shells for dynamic pit selection (if available)
+            "nested_shells": nested_shells,
+            # New: Classification filter for JORC/SAMREC compliance
+            "classification_filter": classification_filter,
+            "classification_column": classification_column
+        }
+    
+    def validate_inputs(self) -> bool:
+        """
+        Validate collected parameters.
+        
+        MP-005 FIX: Added comprehensive validation including density and tonnage checks.
+        """
+        if not super().validate_inputs():
+            return False
+        
+        if self.block_model is None:
+            self.show_error("No Block Model", "Please load a block model first.")
+            return False
+        
+        # Persist UI selections
+        self._update_config_from_ui()
+        
+        # Validate config
+        validation_errors = self._validate_analysis_inputs()
+        if validation_errors:
+            self.show_error("Invalid Inputs", "\n".join(f"• {err}" for err in validation_errors))
+            return False
+        
+        # MP-005 FIX: Check for density and tonnage fields
+        columns = list(self.block_model.columns)
+        
+        # Check for density
+        density_cols = ['DENSITY', 'density', 'DENS', 'dens', 'RHO', 'rho', 'SG', 'sg']
+        has_density = any(col in columns for col in density_cols)
+        if not has_density:
+            response = QMessageBox.warning(
+                self, "Missing Density Field",
+                "Block model does not have a DENSITY field.\n\n"
+                "IRR/NPV calculations require density for accurate tonnage and revenue calculations.\n\n"
+                "Results may use assumed default density (2.7 t/m³) which could be incorrect.\n\n"
+                "Continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return False
+            logger.warning("IRR analysis proceeding without density field - results may be inaccurate")
+        
+        # Check for tonnage
+        tonnage_cols = ['TONNAGE', 'tonnage', 'TONNES', 'tonnes', 'T', 't']
+        has_tonnage = any(col in columns for col in tonnage_cols)
+        if not has_tonnage and not has_density:
+            response = QMessageBox.warning(
+                self, "Missing Tonnage Data",
+                "Block model has neither TONNAGE nor DENSITY field.\n\n"
+                "IRR analysis requires accurate tonnage for revenue/cost calculations.\n\n"
+                "Results will be unreliable.\n\n"
+                "Continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return False
+            logger.warning("IRR analysis proceeding without tonnage/density - results unreliable")
+        
+        try:
+            from ..irr_engine.config_loader import validate_config
+            validate_config(self.config)
+        except ValueError as e:
+            self.show_error("Invalid Configuration", str(e))
+            return False
+        
+        return True
+    
+    def on_results(self, payload: Dict[str, Any]) -> None:
+        """Process and display IRR analysis results."""
+        irr_result = payload.get("irr_result")
+        if irr_result is None:
+            # Fallback to raw results dict
+            results = payload.get("results") or payload
+        else:
+            # Convert IRRResult to dict for compatibility
+            results = {
+                'irr_alpha': irr_result.irr_alpha,
+                'alpha_target': irr_result.alpha_target,
+                'satisfaction_rate': irr_result.satisfaction_rate,
+                'num_scenarios': irr_result.num_scenarios,
+                'iterations': irr_result.iterations,
+                'npv_distribution': irr_result.npv_distribution,
+                'mean_npv': irr_result.mean_npv,
+                'std_npv': irr_result.std_npv,
+                'min_npv': irr_result.min_npv,
+                'max_npv': irr_result.max_npv,
+                'best_schedule': irr_result.best_schedule,
+                'best_cashflows': irr_result.best_cashflows,
+                'economic_breakdown': irr_result.economic_breakdown,
+                'convergence_history': irr_result.convergence_history,
+                'best_npv_details': irr_result.best_npv_details
+            }
+        
+        self.results = results
+        
+        try:
+            metadata = self._build_result_metadata()
+            self.results_controller.update_results(results, metadata=metadata)
+        except Exception as exc:
+            logger.error(f"Failed to normalize IRR results: {exc}", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Results Warning",
+                "IRR results were generated, but normalization failed. "
+                "Some summary views may be unavailable. See logs for details.",
+            )
+        
+        # Display results
+        self._display_results(results)
+        
+        # Switch to results tab/page and update footer
+        self.pages.setCurrentWidget(self.results_tab)
+        self.section_menu.setCurrentRow(2)
+        
+        self.status_label.setText("Analysis Complete")
+        self.status_label.setStyleSheet(f"color: {ModernColors.SUCCESS}; font-weight: 600;")
+        self.run_btn.setEnabled(True)
+        self.cancel_btn.setVisible(False)
+        
+        self._switch_page(2)  # Auto-navigate to Results page
+        
+        self.progress_log.append("\n=== Analysis Complete ===\n")
+        
+        # Publish results to DataRegistry
+        try:
+            if self.registry:
+                self.registry.register_irr_results(results, source_panel="IRRPanel")
+                logger.info("Published IRR results to DataRegistry")
+        except Exception as e:
+            logger.warning(f"Failed to publish IRR results to DataRegistry: {e}")
+        logger.info("IRR analysis completed successfully")
+    
+    def _cancel_analysis(self):
+        """Cancel the running analysis and update footer."""
+        # Call base stop logic (Step 11 pipeline)
+        if hasattr(self, '_on_stop_clicked'):
+            self._on_stop_clicked()
+        
+        # Update footer UI state
+        self.status_label.setText("Analysis Cancelled")
+        self.status_label.setStyleSheet(f"color: {ModernColors.WARNING}; font-weight: 600;")
+        self.run_btn.setEnabled(True)
+        self.cancel_btn.setVisible(False)
+    
+    def run_analysis(self):
+        """Trigger IRR analysis with UI state updates."""
+        # Update footer UI state
+        self.status_label.setText("Running analysis...")
+        self.status_label.setStyleSheet(f"color: {ModernColors.ACCENT_PRIMARY}; font-weight: 600;")
+        self.run_btn.setEnabled(False)
+        self.cancel_btn.setVisible(True)
+        self._switch_page(1)  # Auto-navigate to Progress page
+        
+        # Start timer
+        from datetime import datetime
+        self.start_time = datetime.now()
+        if hasattr(self, 'elapsed_timer'):
+            self.elapsed_timer.start(1000)
+            
+        # Call base implementation
+        super().run_analysis()
+
+    def _on_progress_updated(self, iteration: int, r_trial: float, satisfaction_rate: float):
+        """Handle progress updates (legacy - kept for compatibility if needed)."""
+        # Progress is now handled by BaseAnalysisPanel, but we can update UI elements if they exist
+        if hasattr(self, 'progress_bar'):
+            max_iterations = self.config['irr_search']['max_iterations']
+            self.progress_bar.setMaximum(max_iterations)
+            self.progress_bar.setValue(iteration)
+        
+        if hasattr(self, 'iteration_label'):
+            max_iterations = self.config['irr_search']['max_iterations']
+            self.iteration_label.setText(
+                f"Current: Iteration {iteration}/{max_iterations} | "
+                f"Discount Rate: {r_trial:.2%} | "
+                f"Scenarios Satisfied: {satisfaction_rate:.1%}"
+            )
+        
+        if hasattr(self, 'progress_log'):
+            log_msg = f"Iteration {iteration}/{max_iterations}: r={r_trial:.4f}, Satisfaction={satisfaction_rate:.2%}\n"
+            self.progress_log.append(log_msg)
+            self.progress_log.verticalScrollBar().setValue(self.progress_log.verticalScrollBar().maximum())
+    
+    def _toggle_phase_controls(self):
+        """Enable/disable phase controls based on checkbox."""
+        enabled = self.enable_phases_check.isChecked()
+        self.num_phases_spin.setEnabled(enabled)
+        self.phase_gap_spin.setEnabled(enabled)
+    
+    def _add_byproduct_row(self):
+        """Add a new row to the by-product table."""
+        row = self.byproduct_table.rowCount()
+        self.byproduct_table.insertRow(row)
+        
+        # Create combo box for grade field selection
+        grade_combo = QComboBox()
+        if self.block_model is not None:
+            numeric_cols = self.block_model.select_dtypes(include=[np.number]).columns.tolist()
+            grade_combo.addItems(numeric_cols)
+        self.byproduct_table.setCellWidget(row, 0, grade_combo)
+        
+        # Price spinbox
+        price_spin = QDoubleSpinBox()
+        price_spin.setRange(0.0, 10000.0)
+        price_spin.setValue(0.008)  # Default Cu price
+        price_spin.setDecimals(4)
+        self.byproduct_table.setCellWidget(row, 1, price_spin)
+        
+        # Recovery spinbox
+        recovery_spin = QDoubleSpinBox()
+        recovery_spin.setRange(0.0, 1.0)
+        recovery_spin.setValue(0.80)
+        recovery_spin.setDecimals(3)
+        self.byproduct_table.setCellWidget(row, 2, recovery_spin)
+        
+        # Selling cost spinbox
+        selling_spin = QDoubleSpinBox()
+        selling_spin.setRange(0.0, 100.0)
+        selling_spin.setValue(0.0)
+        selling_spin.setDecimals(4)
+        self.byproduct_table.setCellWidget(row, 3, selling_spin)
+        
+        logger.info(f"Added by-product row {row}")
+    
+    def _remove_byproduct_row(self):
+        """Remove selected row from by-product table."""
+        current_row = self.byproduct_table.currentRow()
+        if current_row >= 0:
+            self.byproduct_table.removeRow(current_row)
+            logger.info(f"Removed by-product row {current_row}")
+        else:
+            QMessageBox.warning(self, "No Selection", "Please select a row to remove.")
+    
+    # =========================================================================
+    # Resource Classification Filter Methods
+    # =========================================================================
+    
+    def _on_classification_mode_changed(self, index: int):
+        """Handle classification mode combo box change."""
+        mode_text = self.class_mode_combo.currentText()
+        
+        # Show/hide custom selection checkboxes
+        is_custom = "Custom" in mode_text
+        self.custom_class_widget.setVisible(is_custom)
+        
+        # Show warning for non-compliant selections
+        if "All Blocks" in mode_text:
+            self.class_warning_label.setText(
+                "⚠️ Warning: Including Inferred resources. Results may not be suitable for "
+                "JORC/SAMREC public reporting."
+            )
+            self.class_warning_label.setVisible(True)
+        elif is_custom and self.check_inferred.isChecked():
+            self.class_warning_label.setText(
+                "⚠️ Warning: Inferred resources selected. Results may not be suitable for "
+                "JORC/SAMREC public reporting."
+            )
+            self.class_warning_label.setVisible(True)
+        else:
+            self.class_warning_label.setVisible(False)
+        
+        # Update block count
+        self._update_class_block_count()
+        
+        logger.info(f"Classification mode changed to: {mode_text}")
+    
+    def _update_class_block_count(self):
+        """Update the block count label based on classification filter."""
+        if self._block_model is None:
+            self.class_block_count_label.setText("Blocks: -- / --")
+            return
+        
+        total_blocks = len(self._block_model)
+        filtered_blocks = total_blocks
+        
+        # Get classification column
+        class_col = self.class_column_combo.currentText()
+        if class_col and class_col != "(None - No Classification)" and class_col in self._block_model.columns:
+            # Get filter
+            classification_filter = self._get_classification_filter()
+            
+            if classification_filter:
+                mask = self._block_model[class_col].isin(classification_filter)
+                filtered_blocks = mask.sum()
+        
+        # Update label
+        if filtered_blocks == total_blocks:
+            self.class_block_count_label.setText(f"Blocks: {total_blocks:,} (all)")
+            self.class_block_count_label.setStyleSheet("color: #888; font-style: italic;")
+        else:
+            pct = 100 * filtered_blocks / total_blocks if total_blocks > 0 else 0
+            self.class_block_count_label.setText(
+                f"Blocks: {filtered_blocks:,} / {total_blocks:,} ({pct:.1f}% selected)"
+            )
+            self.class_block_count_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+    
+    def _get_classification_filter(self):
+        """
+        Get the list of classifications to include based on current UI settings.
+        
+        Returns:
+            List of classification strings to include, or None for no filtering
+        """
+        mode_text = self.class_mode_combo.currentText()
+        
+        if "All Blocks" in mode_text:
+            return None  # No filtering
+        elif "Measured + Indicated" in mode_text:
+            return ['Measured', 'Indicated']
+        elif "Measured Only" in mode_text:
+            return ['Measured']
+        elif "Custom" in mode_text:
+            classifications = []
+            if self.check_measured.isChecked():
+                classifications.append('Measured')
+            if self.check_indicated.isChecked():
+                classifications.append('Indicated')
+            if self.check_inferred.isChecked():
+                classifications.append('Inferred')
+            return classifications if classifications else None
+        
+        return None  # Default: no filtering
+    
+    def _get_classification_column(self):
+        """Get the selected classification column name, or None if not set."""
+        class_col = self.class_column_combo.currentText()
+        if class_col and class_col != "(None - No Classification)":
+            return class_col
+        return None
+    
+    def _get_byproduct_configs(self):
+        """
+        Get by-product configurations from the table.
+        
+        Returns:
+            List of by-product configuration dictionaries
+        """
+        byproducts = []
+        
+        for row in range(self.byproduct_table.rowCount()):
+            grade_combo = self.byproduct_table.cellWidget(row, 0)
+            price_spin = self.byproduct_table.cellWidget(row, 1)
+            recovery_spin = self.byproduct_table.cellWidget(row, 2)
+            selling_spin = self.byproduct_table.cellWidget(row, 3)
+            
+            if grade_combo and price_spin and recovery_spin and selling_spin:
+                grade_field = grade_combo.currentText()
+                if grade_field:  # Only add if a field is selected
+                    byproducts.append({
+                        'grade_field': grade_field,
+                        'price': price_spin.value(),
+                        'recovery': recovery_spin.value(),
+                        'selling_cost': selling_spin.value()
+                    })
+        
+        return byproducts
+    
+    def _apply_preset(self):
+        """Apply preset configuration based on selected speed."""
+        preset = self.preset_combo.currentIndex()
+        
+        if preset == 0:  # Fast
+            self.num_scenarios_spin.setValue(30)
+            self.num_periods_spin.setValue(10)
+            self.alpha_spin.setValue(0.75)
+            self.parallel_check.setChecked(True)
+            self.progress_log.append("Applied FAST preset: 30 scenarios, 10 periods\n")
+        elif preset == 1:  # Balanced
+            self.num_scenarios_spin.setValue(50)
+            self.num_periods_spin.setValue(15)
+            self.alpha_spin.setValue(0.80)
+            self.parallel_check.setChecked(True)
+            self.progress_log.append("Applied BALANCED preset: 50 scenarios, 15 periods\n")
+        else:  # Accurate
+            self.num_scenarios_spin.setValue(100)
+            self.num_periods_spin.setValue(20)
+            self.alpha_spin.setValue(0.85)
+            self.parallel_check.setChecked(True)
+            self.progress_log.append("Applied ACCURATE preset: 100 scenarios, 20 periods\n")
+    
+    def _update_timer(self):
+        """Update the elapsed time display."""
+        if self.start_time:
+            from datetime import datetime
+            elapsed = (datetime.now() - self.start_time).total_seconds()
+            hours, remainder = divmod(int(elapsed), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            self.timer_label.setText(f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}")
+    
+    def _on_analysis_error(self, error_msg: str):
+        """Handle analysis error emitted from worker."""
+        self._on_analysis_failed("IRR Analysis Failed", error_msg)
+    
+    def _on_analysis_failed(self, title: str, message: str):
+        """Common failure handler for worker errors."""
+        self.run_btn.setEnabled(True)
+        self.cancel_btn.setVisible(False)
+        
+        try:
+            if hasattr(self, 'elapsed_timer'):
+                self.elapsed_timer.stop()
+        except Exception:
+            pass
+        
+        self.status_label.setText("Status: Failed ✗")
+        self.status_label.setStyleSheet("color: red;")
+        self.eta_label.setText("ETA: Failed")
+        self.iteration_label.setText("Analysis failed!")
+        
+        self.progress_log.append(f"\n=== Error ===\n{message}\n")
+        logger.error(f"{title}: {message}")
+        
+        QMessageBox.critical(self, title, message)
+    
+    def _display_results(self, results: Dict):
+        """Populate all Results sub-tabs from the latest analysis."""
+        if not self.results_controller.has_results():
+            return
+
+        rc = self.results_controller
+
+        rows = rc.summary_rows()
+        self.summary_table.setRowCount(len(rows))
+        for i, (label, value) in enumerate(rows):
+            self.summary_table.setItem(i, 0, QTableWidgetItem(label))
+            self.summary_table.setItem(i, 1, QTableWidgetItem(value))
+        self.summary_table.resizeColumnsToContents()
+
+        self.summary_text.setPlainText(rc.narrative_summary())
+
+        self._update_cashflow_plot(rc)
+        self._update_npv_distribution_plot(rc)
+        self._update_economic_summary(rc)
+        self._update_convergence_plot(rc)
+        self._update_phase_summary(rc)
+    
+    def _update_cashflow_plot(self, rc: IRRResultsController):
+        """Render cashflow bar + cumulative line chart."""
+        cf_series = rc.cashflow_series()
+        self.cf_figure.clear()
+
+        if cf_series is None or cf_series.empty:
+            self.cf_canvas.draw()
+            return
+
+        ax = self.cf_figure.add_subplot(111)
+        ax.clear()
+
+        periods = cf_series.index
+        cashflows = cf_series.values
+        cumulative = cashflows.cumsum()
+
+        ax.bar(periods, cashflows, label="Cashflow")
+        ax.set_xlabel("Period")
+        ax.set_ylabel("Cashflow")
+
+        ax2 = ax.twinx()
+        ax2.plot(periods, cumulative, linestyle="-", marker="o", label="Cumulative CF")
+        ax2.set_ylabel("Cumulative Cashflow")
+
+        ax.grid(True, linestyle=":", linewidth=0.5)
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc="best")
+
+        self.cf_canvas.draw()
+
+    def _update_npv_distribution_plot(self, rc: IRRResultsController):
+        """Render NPV histogram and show key risk metrics."""
+        self.dist_figure.clear()
+        hist, edges = rc.npv_histogram(bins=40)
+
+        if hist.size == 0 or edges.size == 0:
+            self.dist_canvas.draw()
+            self.dist_stats_label.setText("No NPV distribution available.")
+            return
+
+        ax = self.dist_figure.add_subplot(111)
+        ax.clear()
+
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        widths = np.diff(edges)
+
+        ax.bar(centers, hist, width=widths, align="center", alpha=0.7, color="#1f77b4")
+        ax.set_xlabel("NPV")
+        ax.set_ylabel("Frequency")
+        ax.grid(True, linestyle=":", linewidth=0.5)
+
+        quantiles = rc.npv_quantiles([0.05, 0.1, 0.5, 0.9])
+        var_95, es_95 = rc.npv_var_es(alpha=0.95)
+
+        for pct, label in [(0.05, "P5"), (0.5, "P50"), (0.9, "P90")]:
+            value = quantiles.get(pct)
+            if value is not None and not np.isnan(value):
+                ax.axvline(value, linestyle="--", linewidth=1.0, color="#d62728")
+                ax.text(
+                    value,
+                    ax.get_ylim()[1] * 0.95,
+                    label,
+                    rotation=90,
+                    verticalalignment="top",
+                    color="#d62728",
+                )
+
+        self.dist_canvas.draw()
+
+        stats_lines = [
+            f"P5 NPV:  {quantiles.get(0.05, float('nan')):,.0f}",
+            f"P10 NPV: {quantiles.get(0.10, float('nan')):,.0f}",
+            f"P50 NPV: {quantiles.get(0.50, float('nan')):,.0f}",
+            f"P90 NPV: {quantiles.get(0.90, float('nan')):,.0f}",
+            "",
+            f"NPV@Risk (95% VaR): {var_95:,.0f}",
+            f"Expected Shortfall (95% ES): {es_95:,.0f}",
+        ]
+        self.dist_stats_label.setText("\n".join(stats_lines))
+
+    def _export_npv_distribution_csv(self):
+        """Export the raw NPV distribution to CSV."""
+        if not self.results_controller.has_results():
+            QMessageBox.warning(self, "Export NPV Distribution", "No results to export.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export NPV Distribution CSV", "", "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+
+        # Step 10: Use DataBridge + ExportHelpers
+        from ..utils.data_bridge import irr_result_to_dataframe
+        from ..utils.export_helpers import export_dataframe_to_csv
+        
+        npvs = self.results_controller.result.npv_distribution
+        df = pd.DataFrame({"NPV": npvs})
+        export_dataframe_to_csv(df, path)
+    
+    def _update_economic_summary(self, rc: IRRResultsController):
+        """Display headline economic breakdown text."""
+        breakdown = rc.economic_breakdown()
+        if not breakdown:
+            self.econ_summary_label.setText("No economic breakdown available.")
+            return
+
+        def _fmt(key: str) -> str:
+            return f"{breakdown.get(key, 0.0):,.0f}"
+
+        lines = [
+            f"Total Revenue:        {_fmt('Revenue')}",
+            f"  Primary Revenue:    {_fmt('Primary Revenue')}",
+            f"  By-product Revenue: {_fmt('By-product Revenue')}",
+            f"Operating Cost:       {_fmt('Operating Cost')}",
+            f"Capital Cost:         {_fmt('Capital Cost')}",
+        ]
+        self.econ_summary_label.setText("\n".join(lines))
+
+    def _update_phase_summary(self, rc: IRRResultsController):
+        """Populate basic phase-level tonnage/grade summary."""
+        schedule = rc.best_schedule()
+        if schedule is None or schedule.empty:
+            self.phase_summary_table.setRowCount(0)
+            return
+        
+        column_map = {col.lower(): col for col in schedule.columns}
+        phase_col = column_map.get('phase')
+        ore_col = (
+            column_map.get('ore_tonnes')
+            or column_map.get('ore_tons')
+            or column_map.get('ore')
+        )
+        waste_col = (
+            column_map.get('waste_tonnes')
+            or column_map.get('waste_tons')
+            or column_map.get('waste')
+        )
+        grade_col = column_map.get('grade') or column_map.get('avg_grade')
+
+        if not all([phase_col, ore_col, waste_col, grade_col]):
+            self.phase_summary_table.setRowCount(0)
+            return
+        
+        df = schedule[[phase_col, ore_col, waste_col, grade_col]].copy()
+        df.columns = ['phase', 'ore', 'waste', 'grade']
+        agg = (
+            df.groupby('phase')
+            .agg({
+                'ore': 'sum',
+                'waste': 'sum',
+                'grade': 'mean'
+            })
+            .reset_index()
+        )
+
+        self.phase_summary_table.setRowCount(len(agg))
+        for i, row in agg.iterrows():
+            ore = float(row['ore'])
+            waste = float(row['waste'])
+            total = ore + waste
+            strip_ratio = (waste / ore) if ore > 0 else 0.0
+            values = [
+                str(row['phase']),
+                f"{ore:,.0f}",
+                f"{waste:,.0f}",
+                f"{total:,.0f}",
+                f"{strip_ratio:,.2f}",
+                f"{float(row['grade']):,.3f}",
+            ]
+            for j, val in enumerate(values):
+                self.phase_summary_table.setItem(i, j, QTableWidgetItem(val))
+
+        self.phase_summary_table.resizeColumnsToContents()
+
+    def _update_convergence_plot(self, rc: IRRResultsController):
+        """Plot convergence history curves."""
+        curves = rc.convergence_curves()
+        self.conv_figure.clear()
+
+        if not curves:
+            self.conv_canvas.draw()
+            self.conv_label.setText("No convergence history available.")
+            return
+
+        ax = self.conv_figure.add_subplot(111)
+        ax.clear()
+
+        iterations = curves.get("iterations")
+        if iterations is None:
+            any_key = next(iter(curves))
+            length = len(curves[any_key])
+            iterations = np.arange(1, length + 1)
+
+        for key, label in [
+            ("r_values", "Trial discount rate"),
+            ("satisfaction_rates", "Satisfaction rate"),
+            ("mean_npvs", "Mean NPV"),
+        ]:
+            series = curves.get(key)
+            if series is not None and len(series) == len(iterations):
+                ax.plot(iterations, series, label=label)
+
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Value")
+        ax.grid(True, linestyle=":", linewidth=0.5)
+        ax.legend(loc="best")
+
+        self.conv_canvas.draw()
+        self.conv_label.setText(
+            "Convergence history shows how the IRR_α search tightened the discount rate "
+            "and stabilised satisfaction rate / mean NPV over successive iterations."
+        )
+
+    def _export_irr_report_excel(self):
+        """Export a full multi-sheet Excel workbook summarising the IRR analysis."""
+        if not self.results_controller.has_results():
+            QMessageBox.warning(self, "Export IRR Report", "No IRR results available.")
+            return
+        if not OPENPYXL_AVAILABLE:
+            QMessageBox.warning(
+                self,
+                "Export IRR Report",
+                "Excel export requires the 'openpyxl' package. Please install it and try again.",
+            )
+            return
+
+        from PyQt6.QtWidgets import QFileDialog
+        import pandas as pd
+        from openpyxl import Workbook
+        from openpyxl.utils.dataframe import dataframe_to_rows
+        from openpyxl.styles import Font, Alignment
+
+        rc = self.results_controller
+        r = rc.result
+
+        # Select output file
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export IRR Report (Excel)",
+            "",
+            "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+
+        if not path.lower().endswith(".xlsx"):
+            path = f"{path}.xlsx"
+
+        # Start workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+
+        # ------------------------------------------------------------------
+        # SHEET 1 — EXECUTIVE SUMMARY
+        # ------------------------------------------------------------------
+        ws["A1"] = "IRR Analysis Executive Summary"
+        ws["A1"].font = Font(size=14, bold=True)
+
+        irr_percent = r.irr_alpha * 100.0
+        satisfaction_percent = r.satisfaction_rate * 100.0
+
+        summary_rows = [
+            ("Risk-adjusted IRR (IRR_α)", f"{irr_percent:.2f}%"),
+            ("Confidence Level (α)", f"{r.alpha_target:.0%}"),
+            ("Satisfaction Rate P(NPV≥0)", f"{satisfaction_percent:.1f}%"),
+            ("Mean NPV", f"{r.mean_npv:,.0f}"),
+            ("NPV Std Dev", f"{r.std_npv:,.0f}"),
+            ("Min NPV", f"{r.min_npv:,.0f}"),
+            ("Max NPV", f"{r.max_npv:,.0f}"),
+            ("Scenarios", r.num_scenarios),
+            ("Bisection Iterations", r.iterations),
+        ]
+
+        # Add percentile and risk metrics
+        quantiles = rc.npv_quantiles([0.05, 0.1, 0.5, 0.9])
+        var_95, es_95 = rc.npv_var_es(alpha=0.95)
+
+        summary_rows += [
+            ("P5 NPV", f"{quantiles.get(0.05, float('nan')):,.0f}"),
+            ("P10 NPV", f"{quantiles.get(0.10, float('nan')):,.0f}"),
+            ("P50 NPV", f"{quantiles.get(0.50, float('nan')):,.0f}"),
+            ("P90 NPV", f"{quantiles.get(0.90, float('nan')):,.0f}"),
+            ("VaR 95% (NPV@Risk)", f"{var_95:,.0f}"),
+            ("Expected Shortfall 95%", f"{es_95:,.0f}"),
+        ]
+
+        row_start = 3
+        for i, (label, value) in enumerate(summary_rows):
+            ws[f"A{row_start+i}"] = label
+            ws[f"B{row_start+i}"] = value
+            ws[f"A{row_start+i}"].font = Font(bold=False)
+            ws[f"B{row_start+i}"].alignment = Alignment(horizontal="right")
+
+        # ------------------------------------------------------------------
+        # SHEET 2 — NPV DISTRIBUTION
+        # ------------------------------------------------------------------
+        ws2 = wb.create_sheet("NPV Distribution")
+        npvs = pd.DataFrame({"NPV": r.npv_distribution})
+
+        ws2["A1"] = "NPV Values per Scenario"
+        ws2["A1"].font = Font(size=12, bold=True)
+
+        for row in dataframe_to_rows(npvs, index=False, header=True):
+            ws2.append(row)
+
+        # ------------------------------------------------------------------
+        # SHEET 3 — CASHFLOWS
+        # ------------------------------------------------------------------
+        ws3 = wb.create_sheet("Cashflow")
+        cf = rc.cashflow_series()
+        if cf is not None and not cf.empty:
+            df_cf = pd.DataFrame(
+                {
+                    "Period": cf.index,
+                    "Cashflow": cf.values,
+                    "Cumulative CF": cf.cumsum(),
+                }
+            )
+
+            ws3["A1"] = "Cashflow Table"
+            ws3["A1"].font = Font(size=12, bold=True)
+
+            for row in dataframe_to_rows(df_cf, index=False, header=True):
+                ws3.append(row)
+
+        # ------------------------------------------------------------------
+        # SHEET 4 — ECONOMIC BREAKDOWN
+        # ------------------------------------------------------------------
+        ws4 = wb.create_sheet("Economics")
+        econ = rc.economic_breakdown()
+
+        ws4["A1"] = "Economic Breakdown"
+        ws4["A1"].font = Font(size=12, bold=True)
+
+        row_idx = 3
+        for key, value in econ.items():
+            ws4[f"A{row_idx}"] = key
+            ws4[f"B{row_idx}"] = f"{value:,.0f}"
+            ws4[f"B{row_idx}"].alignment = Alignment(horizontal="right")
+            row_idx += 1
+
+        # ------------------------------------------------------------------
+        # SHEET 5 — PHASE SUMMARY
+        # ------------------------------------------------------------------
+        ws5 = wb.create_sheet("Phase Summary")
+        schedule = rc.best_schedule()
+        if schedule is not None and not schedule.empty:
+            ws5["A1"] = "Best Schedule Table"
+            ws5["A1"].font = Font(size=12, bold=True)
+
+            for row in dataframe_to_rows(schedule, index=False, header=True):
+                ws5.append(row)
+
+        # ------------------------------------------------------------------
+        # SHEET 6 — CONVERGENCE
+        # ------------------------------------------------------------------
+        ws6 = wb.create_sheet("Convergence")
+        curves = rc.convergence_curves()
+        if curves:
+            ws6["A1"] = "Convergence Curves"
+            ws6["A1"].font = Font(size=12, bold=True)
+
+            df_conv = pd.DataFrame(curves)
+            for row in dataframe_to_rows(df_conv, index=False, header=True):
+                ws6.append(row)
+
+        # ------------------------------------------------------------------
+        # SHEET 7 — METADATA / CONFIG
+        # ------------------------------------------------------------------
+        ws7 = wb.create_sheet("Metadata")
+        ws7["A1"] = "Run Metadata"
+        ws7["A1"].font = Font(size=12, bold=True)
+
+        meta = r.metadata or {}
+        row_meta = 3
+        for key, value in meta.items():
+            ws7[f"A{row_meta}"] = key
+            ws7[f"B{row_meta}"] = str(value)
+            row_meta += 1
+
+        # ------------------------------------------------------------------
+        # SAVE FILE
+        # ------------------------------------------------------------------
+        wb.save(path)
+
+        QMessageBox.information(
+            self,
+            "Export Complete",
+            f"Excel IRR report successfully saved to:\n{path}"
+        )
+
+    def _export_irr_snapshot_json(self):
+        """Export raw results and metadata to JSON."""
+        if not self.results_controller.has_results():
+            QMessageBox.warning(self, "Export IRR Snapshot", "No results to export.")
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export IRR Snapshot (JSON)", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+
+        snapshot = {
+            "results": self.results_controller.raw_results,
+            "metadata": self.results_controller.result.metadata if self.results_controller.result else {},
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh, indent=2)
+    
+    def _on_save_as_scenario(self):
+        """Save current IRR configuration as planning scenario (STEP 31)."""
+        from datetime import datetime
+        
+        if not self.controller:
+            QMessageBox.warning(self, "No Controller", "Controller not available.")
+            return
+        
+        # Build context from current panel state
+        context = {
+            "name": f"irr_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "version": "draft",
+            "description": "IRR analysis scenario",
+            "model_name": "default",  # Would get from controller
+            "value_mode": "base",
+            "value_field": "block_value",
+            "pit_config": {
+                "enabled": True,
+                "annual_rom": self.annual_rom_spin.value() if hasattr(self, 'annual_rom_spin') else None,
+            } if hasattr(self, 'annual_rom_spin') else None,
+        }
+        
+        try:
+            scenario = self.controller.create_scenario_from_context(context)
+            QMessageBox.information(self, "Scenario Saved", f"Scenario '{scenario.id.name}' saved successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Failed to save scenario:\n{e}")
+
+    def _clear_summary_histogram(self):
+        """Legacy stub maintained for backward compatibility."""
+        pass
+
+    def _emit_schedule_for_3d(self):
+        """Emit best schedule DataFrame for 3D visualization."""
+        if not self.results_controller.has_results():
+            QMessageBox.warning(self, "3D Schedule", "No IRR results available.")
+            return
+
+        df = self.results_controller.best_schedule()
+        if df is None or df.empty:
+            QMessageBox.warning(self, "3D Schedule", "Best schedule is empty.")
+            return
+
+        mode = getattr(self, "schedule_color_mode", None)
+        mode_text = mode.currentText() if mode is not None else "Period"
+        self.schedule_visualization_requested.emit((df, mode_text))
+
+    def _emit_color_mode_update(self):
+        """Emit schedule payload to refresh 3D colouring."""
+        if not self.results_controller.has_results():
+            return
+
+        df = self.results_controller.best_schedule()
+        if df is None or df.empty:
+            return
+
+        mode = getattr(self, "schedule_color_mode", None)
+        mode_text = mode.currentText() if mode is not None else "Period"
+        self.schedule_visualization_requested.emit((df, mode_text))
+
+    def _emit_optimal_pit_for_3d(self):
+        """Emit optimal pit block DataFrame for 3D visualization."""
+        if not self.results_controller.has_results():
+            QMessageBox.warning(self, "3D Pit", "No IRR results available.")
+            return
+
+        df = self.results_controller.optimal_pit_blocks()
+        if df is None or df.empty:
+            QMessageBox.warning(self, "3D Pit", "Optimal pit block set is not available.")
+            return
+
+        self.pit_visualization_requested.emit(df)
+
+    def _build_result_metadata(self) -> Dict[str, Any]:
+        """Assemble metadata accompanying each IRR result for traceability."""
+        metadata: Dict[str, Any] = {}
+        
+        if self.config:
+            metadata["alpha_target"] = self.config.get("irr_search", {}).get("alpha")
+            config_snapshot = self._config_snapshot()
+            if config_snapshot is not None:
+                metadata["config_snapshot"] = config_snapshot
+        
+        block_model_hash = getattr(self, "block_model_hash", None)
+        if block_model_hash:
+            metadata["block_model_hash"] = block_model_hash
+        
+        metadata["software_version"] = self._software_version()
+        return metadata
+    
+    def _config_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return a JSON-serializable copy of the active IRR configuration."""
+        if not self.config:
+            return None
+        
+        try:
+            return json.loads(json.dumps(self.config))
+        except TypeError as exc:
+            logger.debug(f"Config snapshot serialization failed: {exc}")
+            return None
+    
+    @staticmethod
+    def _software_version() -> str:
+        """Best-effort lookup of the running software version."""
+        try:
+            from importlib.metadata import version
+            return version("block-model-viewer")
+        except Exception:
+            return "development"
+    
+    def _populate_npv_distribution(self, results: Dict):
+        """Populate NPV distribution tab with table and histogram (Phase 1)."""
+        if results.get('npv_distribution') is None:
+            return
+        
+        npvs = results['npv_distribution'] / 1e6  # Convert to millions
+        
+        # NPV percentiles table
+        percentiles = [0, 5, 10, 25, 50, 75, 90, 95, 99, 100]
+        self.npv_table.setRowCount(len(percentiles))
+        
+        for i, p in enumerate(percentiles):
+            value = np.percentile(npvs, p)
+            self.npv_table.setItem(i, 0, QTableWidgetItem(f"P{p}"))
+            self.npv_table.setItem(i, 1, QTableWidgetItem(f"${value:,.2f}M"))
+        
+        self.npv_table.resizeColumnsToContents()
+        
+        # NPV distribution histogram - Phase 1
+        import matplotlib.pyplot as plt
+        self.npv_figure.clear()
+        
+        # Create 2x1 subplots
+        ax1 = self.npv_figure.add_subplot(2, 1, 1)
+        ax2 = self.npv_figure.add_subplot(2, 1, 2)
+        
+        # Histogram
+        ax1.hist(npvs, bins=30, color='steelblue', edgecolor='black', alpha=0.7)
+        ax1.axvline(0, color='red', linestyle='--', linewidth=2, label='Break-even')
+        ax1.axvline(np.median(npvs), color='green', linestyle='--', linewidth=2, label=f'Median: ${np.median(npvs):.1f}M')
+        ax1.set_xlabel('NPV ($M)')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title(f'NPV Distribution across {len(npvs)} Scenarios')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Cumulative distribution function (CDF)
+        sorted_npvs = np.sort(npvs)
+        cumulative = np.arange(1, len(sorted_npvs) + 1) / len(sorted_npvs) * 100
+        
+        ax2.plot(sorted_npvs, cumulative, color='darkblue', linewidth=2)
+        ax2.axvline(0, color='red', linestyle='--', linewidth=2, label='Break-even')
+        ax2.axhline(50, color='gray', linestyle=':', alpha=0.5)
+        ax2.set_xlabel('NPV ($M)')
+        ax2.set_ylabel('Cumulative Probability (%)')
+        ax2.set_title('Cumulative Distribution Function')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        self.npv_figure.tight_layout()
+        self.npv_canvas.draw()
+    
+    def _populate_optimal_pit_determination(self, results: Dict):
+        """Populate optimal pit determination tab (Final Results)."""
+        import matplotlib.pyplot as plt
+        
+        base_irr = results['irr_alpha']
+        base_npv = results['mean_npv']
+        
+        # Summary header
+        summary = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║          DETERMINATION OF THE OPTIMAL PIT BASED ON INTERNAL RATE OF RETURN   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Project Analysis Summary:
+• Risk-Adjusted IRR (IRR_α): {base_irr*100:.2f}%
+• Expected NPV: ${base_npv/1e6:,.2f} Million
+• Confidence Level: {results['alpha_target']*100:.0f}%
+• Satisfaction Rate: {results['satisfaction_rate']*100:.2f}%
+"""
+        self.optimal_pit_summary.setPlainText(summary)
+        
+        # Optimal Pit Metrics Table
+        pit_metrics = []
+        
+        if hasattr(self, 'pit_result') and self.pit_result:
+            pit_df = self.pit_result['ultimate_pit']
+            pit_blocks = pit_df[pit_df['IN_PIT'] == 1]
+            
+            total_blocks = len(pit_blocks)
+            total_tonnage = pit_blocks['TONNAGE'].sum() if 'TONNAGE' in pit_blocks.columns else 0
+            avg_grade = pit_blocks['GRADE'].mean() if 'GRADE' in pit_blocks.columns else 0
+            total_value = pit_blocks['VALUE'].sum()
+            
+            # Calculate strip ratio
+            ore_blocks = pit_blocks[pit_blocks['GRADE'] >= 0.3] if 'GRADE' in pit_blocks.columns else pit_blocks
+            waste_blocks = total_blocks - len(ore_blocks)
+            strip_ratio = waste_blocks / len(ore_blocks) if len(ore_blocks) > 0 else 0
+            
+            pit_metrics = [
+                ("Ultimate Pit Status", "✅ CALCULATED"),
+                ("", ""),
+                ("📦 Pit Geometry", ""),
+                ("  Total Blocks", f"{total_blocks:,}"),
+                ("  Ore Blocks", f"{len(ore_blocks):,}"),
+                ("  Waste Blocks", f"{waste_blocks:,}"),
+                ("", ""),
+                ("⚖️ Tonnage Metrics", ""),
+                ("  Total Tonnage", f"{total_tonnage/1e6:,.2f} Mt"),
+                ("  Ore Tonnage", f"{ore_blocks['TONNAGE'].sum()/1e6:,.2f} Mt" if 'TONNAGE' in ore_blocks.columns else "N/A"),
+                ("  Strip Ratio", f"{strip_ratio:.2f}:1"),
+                ("", ""),
+                ("💎 Grade Metrics", ""),
+                ("  Average Grade", f"{avg_grade:.2f} g/t"),
+                ("  Contained Metal", f"{(total_tonnage * avg_grade / 1e6):,.0f} kg" if total_tonnage > 0 else "N/A"),
+                ("", ""),
+                ("💰 Economic Metrics", ""),
+                ("  Total Pit Value", f"${total_value/1e6:,.2f}M"),
+                ("  Risk-Adjusted IRR", f"{base_irr*100:.2f}%"),
+                ("  Expected NPV", f"${base_npv/1e6:,.2f}M"),
+                ("  NPV per Tonne", f"${base_npv/total_tonnage:.2f}/t" if total_tonnage > 0 else "N/A"),
+            ]
+        else:
+            pit_metrics = [
+                ("Ultimate Pit Status", "⚠️ NOT YET CALCULATED"),
+                ("", ""),
+                ("Action Required", "Click 'Calculate Ultimate Pit (LG)' button"),
+                ("", ""),
+                ("Current Analysis", ""),
+                ("  Risk-Adjusted IRR", f"{base_irr*100:.2f}%"),
+                ("  Expected NPV", f"${base_npv/1e6:,.2f}M"),
+                ("  Scenarios Analyzed", f"{results['num_scenarios']}"),
+            ]
+        
+        self.optimal_pit_table.setRowCount(len(pit_metrics))
+        for i, (metric, value) in enumerate(pit_metrics):
+            metric_item = QTableWidgetItem(metric)
+            value_item = QTableWidgetItem(value)
+            
+            # Bold formatting for section headers
+            if not value or metric.startswith("📦") or metric.startswith("⚖️") or metric.startswith("💎") or metric.startswith("💰"):
+                metric_item.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            
+            self.optimal_pit_table.setItem(i, 0, metric_item)
+            self.optimal_pit_table.setItem(i, 1, value_item)
+        
+        self.optimal_pit_table.resizeColumnsToContents()
+        
+        # Revenue Factor Analysis (simplified for now)
+        self.revenue_factor_table.setRowCount(1)
+        self.revenue_factor_table.setItem(0, 0, QTableWidgetItem("N/A"))
+        self.revenue_factor_table.setItem(0, 1, QTableWidgetItem("Calculate Ultimate Pit first"))
+        
+        # Final Recommendation
+        if hasattr(self, 'pit_result') and self.pit_result:
+            pit_df = self.pit_result['ultimate_pit']
+            pit_blocks = pit_df[pit_df['IN_PIT'] == 1]
+            total_tonnage = pit_blocks['TONNAGE'].sum() if 'TONNAGE' in pit_blocks.columns else 0
+            total_value = pit_blocks['VALUE'].sum()
+            ore_blocks = pit_blocks[pit_blocks['GRADE'] >= 0.3] if 'GRADE' in pit_blocks.columns else pit_blocks
+            waste_blocks = len(pit_blocks) - len(ore_blocks)
+            strip_ratio = waste_blocks / len(ore_blocks) if len(ore_blocks) > 0 else 0
+            
+            recommendation = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           ✅ FINAL RECOMMENDATION                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Based on the comprehensive IRR analysis and ultimate pit determination:
+
+🎯 OPTIMAL PIT CONFIGURATION:
+   • Total Blocks: {len(pit_blocks):,}
+   • Total Tonnage: {total_tonnage/1e6:,.2f} Million Tonnes
+   • Average Grade: {pit_blocks['GRADE'].mean():.2f} g/t
+   • Strip Ratio: {strip_ratio:.2f}:1
+
+💰 ECONOMIC VIABILITY:
+   • Risk-Adjusted IRR: {base_irr*100:.2f}%
+   • Expected NPV: ${base_npv/1e6:,.2f} Million
+   • Total Pit Value: ${total_value/1e6:,.2f} Million
+   • Probability of Success: {results['satisfaction_rate']*100:.2f}%
+
+✅ RECOMMENDATION: {'PROCEED WITH MINING' if base_irr > 0.10 else 'REVIEW ECONOMICS'}
+   Status: {'Highly Economical' if base_irr > 0.15 else 'Economically Viable' if base_irr > 0.10 else 'Marginal'}
+   Risk Level: {'Low Risk' if results['satisfaction_rate'] > 0.90 else 'Moderate Risk' if results['satisfaction_rate'] > 0.80 else 'High Risk'}
+
+📋 NEXT STEPS:
+   1. Review pit phase sequencing for optimal extraction order
+   2. Conduct detailed sensitivity analysis on key parameters
+   3. Develop detailed mine schedule with annual production targets
+   4. Prepare feasibility study documentation
+   5. Engage with regulatory authorities for permitting
+"""
+        else:
+            recommendation = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           ⚠️ PRELIMINARY ANALYSIS                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+IRR Analysis Complete - Ultimate Pit Pending
+
+💰 CURRENT IRR RESULTS:
+   • Risk-Adjusted IRR: {base_irr*100:.2f}%
+   • Expected NPV: ${base_npv/1e6:,.2f} Million
+   • Confidence Level: {results['alpha_target']*100:.0f}%
+   • Satisfaction Rate: {results['satisfaction_rate']*100:.2f}%
+
+📋 TO COMPLETE OPTIMAL PIT DETERMINATION:
+   1. Click "Calculate Ultimate Pit (LG)" button in Input tab
+   2. Wait for pit optimization to complete (~30-60 seconds)
+   3. Return to this tab to view final recommendations
+"""
+        
+        self.optimal_pit_recommendation.setPlainText(recommendation)
+        
+        # Placeholder chart
+        self.optimal_pit_figure.clear()
+        ax = self.optimal_pit_figure.add_subplot(1, 1, 1)
+        ax.text(0.5, 0.5, '📊 IRR vs Pit Size Analysis\n(Available after Phase 3)',
+               ha='center', va='center', fontsize=14, color='steelblue')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+        self.optimal_pit_figure.tight_layout()
+        self.optimal_pit_canvas.draw()
+    
+    def _populate_phase_analysis_from_schedule(self, irr_results: Dict):
+        """Populate pit phase analysis tab from IRR schedule (PHASE column)."""
+        schedule = irr_results.get('best_schedule')
+        if schedule is None or 'PHASE' not in schedule.columns:
+            logger.warning("No PHASE data in schedule, cannot populate phase analysis")
+            return
+        
+        # Get mined blocks only
+        mined_blocks = schedule[schedule.get('MINED', 1) == 1].copy()
+        
+        if len(mined_blocks) == 0:
+            logger.warning("No mined blocks in schedule")
+            return
+        
+        # Get unique phases
+        phases = sorted(mined_blocks['PHASE'].unique())
+        phases = [p for p in phases if p > 0]  # Exclude 0 (unmined)
+        
+        if len(phases) == 0:
+            logger.warning("No phases found in schedule")
+            return
+        
+        logger.info(f"Populating phase analysis for {len(phases)} phases from IRR schedule")
+        
+        # Determine grade field name (from UI or fallback to common names)
+        grade_field = self.grade_combo.currentText() if hasattr(self, 'grade_combo') and self.grade_combo.currentText() else None
+        if not grade_field or grade_field not in mined_blocks.columns:
+            # Try common grade field names
+            for possible_grade in ['GRADE', 'Au', 'Cu', 'grade', 'au']:
+                if possible_grade in mined_blocks.columns:
+                    grade_field = possible_grade
+                    break
+        
+        if not grade_field or grade_field not in mined_blocks.columns:
+            logger.error(f"No grade field found in schedule for phase analysis. Available columns: {list(mined_blocks.columns)}")
+            # Still populate table but without grade-based ore/waste split
+            grade_field = None
+        else:
+            logger.info(f"Using grade field: {grade_field} for phase analysis")
+        
+        # Populate phase table
+        self.phase_table.setRowCount(len(phases))
+        
+        # Determine cutoff grade (use 0.3 g/t default)
+        cutoff_grade = 0.3
+        
+        for i, phase_id in enumerate(phases):
+            phase_blocks = mined_blocks[mined_blocks['PHASE'] == phase_id]
+            
+            # Calculate metrics
+            total_tonnes = phase_blocks['TONNAGE'].sum() / 1e6  # Mt
+            
+            if grade_field:
+                ore_blocks = phase_blocks[phase_blocks[grade_field] >= cutoff_grade]
+                ore_tonnes = ore_blocks['TONNAGE'].sum() / 1e6  # Mt
+                waste_tonnes = total_tonnes - ore_tonnes
+                strip_ratio = waste_tonnes / ore_tonnes if ore_tonnes > 0 else 0
+                avg_grade = ore_blocks[grade_field].mean() if len(ore_blocks) > 0 else 0
+            else:
+                # No grade field - treat all as ore
+                ore_tonnes = total_tonnes
+                waste_tonnes = 0
+                strip_ratio = 0
+                avg_grade = 0
+            
+            # Calculate NPV contribution for this phase
+            if 'VALUE' in phase_blocks.columns:
+                npv = phase_blocks['VALUE'].sum() / 1e6  # $M
+            else:
+                npv = 0
+            
+            # Populate row
+            self.phase_table.setItem(i, 0, QTableWidgetItem(f"{int(phase_id)}"))
+            self.phase_table.setItem(i, 1, QTableWidgetItem(f"{total_tonnes:.2f}"))
+            self.phase_table.setItem(i, 2, QTableWidgetItem(f"{ore_tonnes:.2f}"))
+            self.phase_table.setItem(i, 3, QTableWidgetItem(f"{waste_tonnes:.2f}"))
+            self.phase_table.setItem(i, 4, QTableWidgetItem(f"{strip_ratio:.2f}"))
+            self.phase_table.setItem(i, 5, QTableWidgetItem(f"{avg_grade:.2f}"))
+            self.phase_table.setItem(i, 6, QTableWidgetItem(f"${npv:.1f}M"))
+            self.phase_table.setItem(i, 7, QTableWidgetItem(f"{irr_results['irr_alpha']*100:.1f}%"))
+        
+        self.phase_table.resizeColumnsToContents()
+        
+        # Create phase charts
+        self._plot_phase_charts_from_schedule(phases, mined_blocks)
+    
+    def _populate_phase_analysis(self, pit_result: Dict, irr_results: Dict):
+        """Populate pit phase analysis tab (Phase 1 - Basic)."""
+        if 'shells' not in pit_result:
+            return
+        
+        shells_df = pit_result['shells']
+        
+        # Count phases
+        if 'SHELL_ID' not in shells_df.columns:
+            return
+        
+        phases = sorted(shells_df['SHELL_ID'].unique())
+        phases = [p for p in phases if p > 0]  # Exclude 0 (outside pit)
+        
+        if len(phases) == 0:
+            return
+        
+        # Populate phase table
+        self.phase_table.setRowCount(len(phases))
+        
+        for i, phase_id in enumerate(phases):
+            phase_blocks = shells_df[shells_df['SHELL_ID'] == phase_id]
+            
+            # Calculate metrics
+            total_tonnes = phase_blocks['TONNAGE'].sum() / 1e6  # Mt
+            ore_blocks = phase_blocks[phase_blocks['GRADE'] >= 0.3]  # Cutoff 0.3 g/t
+            ore_tonnes = ore_blocks['TONNAGE'].sum() / 1e6  # Mt
+            waste_tonnes = total_tonnes - ore_tonnes
+            strip_ratio = waste_tonnes / ore_tonnes if ore_tonnes > 0 else 0
+            avg_grade = ore_blocks['GRADE'].mean() if len(ore_blocks) > 0 else 0
+            npv = phase_blocks['VALUE'].sum() / 1e6  # $M
+            
+            # Populate row
+            self.phase_table.setItem(i, 0, QTableWidgetItem(f"{int(phase_id)}"))
+            self.phase_table.setItem(i, 1, QTableWidgetItem(f"{total_tonnes:.2f}"))
+            self.phase_table.setItem(i, 2, QTableWidgetItem(f"{ore_tonnes:.2f}"))
+            self.phase_table.setItem(i, 3, QTableWidgetItem(f"{waste_tonnes:.2f}"))
+            self.phase_table.setItem(i, 4, QTableWidgetItem(f"{strip_ratio:.2f}"))
+            self.phase_table.setItem(i, 5, QTableWidgetItem(f"{avg_grade:.2f}"))
+            self.phase_table.setItem(i, 6, QTableWidgetItem(f"${npv:.1f}M"))
+            self.phase_table.setItem(i, 7, QTableWidgetItem(f"{irr_results['irr_alpha']*100:.1f}%"))
+        
+        self.phase_table.resizeColumnsToContents()
+        
+        # Create phase charts - Phase 1
+        self._plot_phase_charts_basic(phases, shells_df)
+    
+    def _plot_phase_charts_from_schedule(self, phases, schedule_df):
+        """Create phase analysis charts from IRR schedule (PHASE column)."""
+        import matplotlib.pyplot as plt
+        
+        self.phase_figure.clear()
+        
+        # Create 2x2 subplots
+        axes = self.phase_figure.subplots(2, 2)
+        
+        # Determine grade field name (from UI or fallback to common names)
+        grade_field = self.grade_combo.currentText() if hasattr(self, 'grade_combo') and self.grade_combo.currentText() else None
+        if not grade_field or grade_field not in schedule_df.columns:
+            # Try common grade field names
+            for possible_grade in ['GRADE', 'Au', 'Cu', 'grade', 'au']:
+                if possible_grade in schedule_df.columns:
+                    grade_field = possible_grade
+                    break
+        
+        if not grade_field or grade_field not in schedule_df.columns:
+            logger.error(f"No grade field found for phase charts. Available columns: {list(schedule_df.columns)}")
+            grade_field = None
+        
+        # Prepare data
+        phase_data = []
+        cutoff_grade = 0.3
+        
+        for phase_id in phases:
+            phase_blocks = schedule_df[schedule_df['PHASE'] == phase_id]
+            
+            if grade_field:
+                ore_blocks = phase_blocks[phase_blocks[grade_field] >= cutoff_grade]
+                ore_tonnes = ore_blocks['TONNAGE'].sum() / 1e6
+                waste_tonnes = (phase_blocks['TONNAGE'].sum() - ore_blocks['TONNAGE'].sum()) / 1e6
+                avg_grade = ore_blocks[grade_field].mean() if len(ore_blocks) > 0 else 0
+            else:
+                # No grade field - treat all as ore
+                ore_tonnes = phase_blocks['TONNAGE'].sum() / 1e6
+                waste_tonnes = 0
+                avg_grade = 0
+            
+            phase_data.append({
+                'phase': int(phase_id),
+                'total': phase_blocks['TONNAGE'].sum() / 1e6,
+                'ore': ore_tonnes,
+                'waste': waste_tonnes,
+                'grade': avg_grade,
+                'value': phase_blocks['VALUE'].sum() / 1e6 if 'VALUE' in phase_blocks.columns else 0
+            })
+        
+        phase_nums = [d['phase'] for d in phase_data]
+        
+        # Chart 1: Stacked bar - Ore vs Waste
+        ax1 = axes[0, 0]
+        ore_tonnes = [d['ore'] for d in phase_data]
+        waste_tonnes = [d['waste'] for d in phase_data]
+        
+        ax1.bar(phase_nums, ore_tonnes, label='Ore', color='#2E7D32', edgecolor='black')
+        ax1.bar(phase_nums, waste_tonnes, bottom=ore_tonnes, label='Waste', color='#757575', edgecolor='black')
+        ax1.set_xlabel('Phase')
+        ax1.set_ylabel('Tonnes (Mt)')
+        ax1.set_title('Ore and Waste by Phase')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Chart 2: Strip Ratio
+        ax2 = axes[0, 1]
+        strip_ratios = [d['waste'] / d['ore'] if d['ore'] > 0 else 0 for d in phase_data]
+        ax2.plot(phase_nums, strip_ratios, marker='o', linewidth=2, markersize=8, color='#D32F2F')
+        ax2.set_xlabel('Phase')
+        ax2.set_ylabel('Strip Ratio (Waste:Ore)')
+        ax2.set_title('Strip Ratio Trend')
+        ax2.grid(True, alpha=0.3)
+        
+        # Chart 3: Average Grade
+        ax3 = axes[1, 0]
+        grades = [d['grade'] for d in phase_data]
+        ax3.bar(phase_nums, grades, color='#F57C00', edgecolor='black')
+        ax3.set_xlabel('Phase')
+        ax3.set_ylabel('Grade (g/t)')
+        ax3.set_title('Average Grade by Phase')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # Chart 4: Pit Value
+        ax4 = axes[1, 1]
+        values = [d['value'] for d in phase_data]
+        ax4.bar(phase_nums, values, color='#1976D2', edgecolor='black')
+        ax4.set_xlabel('Phase')
+        ax4.set_ylabel('Value ($M)')
+        ax4.set_title('Economic Value by Phase')
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        self.phase_figure.tight_layout()
+        self.phase_canvas.draw()
+    
+    def _plot_phase_charts_basic(self, phases, shells_df):
+        """Create basic phase analysis charts (Phase 1)."""
+        import matplotlib.pyplot as plt
+        
+        self.phase_figure.clear()
+        
+        # Create 2x2 subplots
+        axes = self.phase_figure.subplots(2, 2)
+        
+        # Prepare data
+        phase_data = []
+        for phase_id in phases:
+            phase_blocks = shells_df[shells_df['SHELL_ID'] == phase_id]
+            ore_blocks = phase_blocks[phase_blocks['GRADE'] >= 0.3]
+            
+            phase_data.append({
+                'phase': int(phase_id),
+                'total': phase_blocks['TONNAGE'].sum() / 1e6,
+                'ore': ore_blocks['TONNAGE'].sum() / 1e6,
+                'waste': (phase_blocks['TONNAGE'].sum() - ore_blocks['TONNAGE'].sum()) / 1e6,
+                'grade': ore_blocks['GRADE'].mean() if len(ore_blocks) > 0 else 0,
+                'value': phase_blocks['VALUE'].sum() / 1e6
+            })
+        
+        phase_nums = [d['phase'] for d in phase_data]
+        
+        # Chart 1: Stacked bar - Ore vs Waste
+        ax1 = axes[0, 0]
+        ore_tonnes = [d['ore'] for d in phase_data]
+        waste_tonnes = [d['waste'] for d in phase_data]
+        
+        ax1.bar(phase_nums, ore_tonnes, label='Ore', color='#2E7D32', edgecolor='black')
+        ax1.bar(phase_nums, waste_tonnes, bottom=ore_tonnes, label='Waste', color='#757575', edgecolor='black')
+        ax1.set_xlabel('Phase')
+        ax1.set_ylabel('Tonnes (Mt)')
+        ax1.set_title('Ore and Waste by Phase')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Chart 2: Strip Ratio
+        ax2 = axes[0, 1]
+        strip_ratios = [d['waste'] / d['ore'] if d['ore'] > 0 else 0 for d in phase_data]
+        ax2.plot(phase_nums, strip_ratios, marker='o', linewidth=2, markersize=8, color='#D32F2F')
+        ax2.set_xlabel('Phase')
+        ax2.set_ylabel('Strip Ratio (Waste:Ore)')
+        ax2.set_title('Strip Ratio Trend')
+        ax2.grid(True, alpha=0.3)
+        
+        # Chart 3: Average Grade
+        ax3 = axes[1, 0]
+        grades = [d['grade'] for d in phase_data]
+        ax3.bar(phase_nums, grades, color='#F57C00', edgecolor='black')
+        ax3.set_xlabel('Phase')
+        ax3.set_ylabel('Grade (g/t)')
+        ax3.set_title('Average Grade by Phase')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # Chart 4: Pit Value
+        ax4 = axes[1, 1]
+        values = [d['value'] for d in phase_data]
+        ax4.bar(phase_nums, values, color='#1976D2', edgecolor='black')
+        ax4.set_xlabel('Phase')
+        ax4.set_ylabel('Value ($M)')
+        ax4.set_title('Economic Value by Phase')
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        self.phase_figure.tight_layout()
+        self.phase_canvas.draw()
+    
+    def _populate_economic_analysis(self, results: Dict):
+        """Populate economic analysis tab (Phase 1 - Basic cumulative IRR)."""
+        # Cumulative IRR table - simplified for Phase 1
+        # This will be enhanced in Phase 2 with actual period-by-period analysis
+        
+        if results.get('best_schedule') is None:
+            return
+        
+        schedule = results['best_schedule']
+        mined_blocks = schedule[schedule['MINED'] == 1]
+        
+        if len(mined_blocks) == 0:
+            return
+        
+        # Group by period
+        if 'PERIOD' not in mined_blocks.columns:
+            return
+        
+        periods = sorted(mined_blocks['PERIOD'].unique())
+        
+        self.cumulative_irr_table.setRowCount(len(periods))
+        
+        cumulative_tonnes = 0
+        cumulative_npv = 0
+        
+        for i, period in enumerate(periods):
+            period_blocks = mined_blocks[mined_blocks['PERIOD'] == period]
+            
+            period_tonnes = period_blocks['TONNAGE'].sum() if 'TONNAGE' in period_blocks.columns else len(period_blocks) * 1000
+            cumulative_tonnes += period_tonnes
+            
+            # Simplified NPV calculation (Phase 1)
+            period_value = period_blocks['VALUE'].sum() if 'VALUE' in period_blocks.columns else 0
+            cumulative_npv += period_value
+            
+            marginal_npv = period_value / 1e6
+            
+            self.cumulative_irr_table.setItem(i, 0, QTableWidgetItem(f"Phase {i+1}"))
+            self.cumulative_irr_table.setItem(i, 1, QTableWidgetItem(f"{cumulative_tonnes/1e6:.2f}"))
+            self.cumulative_irr_table.setItem(i, 2, QTableWidgetItem(f"${cumulative_npv/1e6:.1f}M"))
+            self.cumulative_irr_table.setItem(i, 3, QTableWidgetItem(f"{results['irr_alpha']*100:.2f}%"))
+            self.cumulative_irr_table.setItem(i, 4, QTableWidgetItem(f"${marginal_npv:.1f}M"))
+        
+        self.cumulative_irr_table.resizeColumnsToContents()
+        
+        # Create basic economic charts - Phase 1
+        self._plot_economic_charts_basic(periods, mined_blocks, results)
+    
+    def _plot_economic_charts_basic(self, periods, mined_blocks, results):
+        """Create basic economic analysis charts (Phase 1)."""
+        import matplotlib.pyplot as plt
+        
+        self.economic_figure.clear()
+        
+        # Create 2x2 subplots
+        axes = self.economic_figure.subplots(2, 2)
+        
+        # Prepare cumulative data
+        cumulative_tonnes = []
+        cumulative_npv = []
+        marginal_npv = []
+        cum_t = 0
+        cum_npv = 0
+        
+        for period in periods:
+            period_blocks = mined_blocks[mined_blocks['PERIOD'] == period]
+            period_tonnes = period_blocks['TONNAGE'].sum() if 'TONNAGE' in period_blocks.columns else len(period_blocks) * 1000
+            period_value = period_blocks['VALUE'].sum() if 'VALUE' in period_blocks.columns else 0
+            
+            cum_t += period_tonnes / 1e6  # Mt
+            cum_npv += period_value / 1e6  # $M
+            
+            cumulative_tonnes.append(cum_t)
+            cumulative_npv.append(cum_npv)
+            marginal_npv.append(period_value / 1e6)
+        
+        phase_nums = list(range(1, len(periods) + 1))
+        
+        # Chart 1: Cumulative NPV
+        ax1 = axes[0, 0]
+        ax1.plot(phase_nums, cumulative_npv, marker='o', linewidth=2, markersize=8, color='#1976D2')
+        ax1.fill_between(phase_nums, 0, cumulative_npv, alpha=0.3, color='#1976D2')
+        ax1.set_xlabel('Phase')
+        ax1.set_ylabel('Cumulative NPV ($M)')
+        ax1.set_title('Cumulative NPV by Phase')
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(0, color='red', linestyle='--', linewidth=1)
+        
+        # Chart 2: Marginal NPV per Phase
+        ax2 = axes[0, 1]
+        colors = ['#2E7D32' if npv > 0 else '#D32F2F' for npv in marginal_npv]
+        ax2.bar(phase_nums, marginal_npv, color=colors, edgecolor='black')
+        ax2.set_xlabel('Phase')
+        ax2.set_ylabel('Marginal NPV ($M)')
+        ax2.set_title('NPV Contribution by Phase')
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.axhline(0, color='black', linestyle='-', linewidth=0.5)
+        
+        # Chart 3: Cumulative Tonnes
+        ax3 = axes[1, 0]
+        ax3.plot(phase_nums, cumulative_tonnes, marker='s', linewidth=2, markersize=8, color='#F57C00')
+        ax3.fill_between(phase_nums, 0, cumulative_tonnes, alpha=0.3, color='#F57C00')
+        ax3.set_xlabel('Phase')
+        ax3.set_ylabel('Cumulative Tonnes (Mt)')
+        ax3.set_title('Cumulative Material Movement')
+        ax3.grid(True, alpha=0.3)
+        
+        # Chart 4: IRR Trend (simplified - same IRR for all phases in Phase 1)
+        ax4 = axes[1, 1]
+        irr_values = [results['irr_alpha'] * 100] * len(phase_nums)
+        ax4.plot(phase_nums, irr_values, marker='D', linewidth=2, markersize=8, color='#7B1FA2')
+        ax4.set_xlabel('Phase')
+        ax4.set_ylabel('Cumulative IRR (%)')
+        ax4.set_title('IRR Trend (Risk-Adjusted)')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim([0, max(irr_values) * 1.2])
+        
+        self.economic_figure.tight_layout()
+        self.economic_canvas.draw()
+    
+    def _populate_sensitivity_analysis(self, results: Dict):
+        """Populate sensitivity analysis tab (Phase 3 - Full Re-calculation)."""
+        base_irr = results['irr_alpha']
+        
+        # Check if we should do full sensitivity (Phase 3) or quick (Phase 2)
+        do_full_sensitivity = self.enable_full_sensitivity.isChecked() if hasattr(self, 'enable_full_sensitivity') else False
+        
+        if do_full_sensitivity and hasattr(self, 'block_model') and self.block_model is not None:
+            # Phase 3: Full sensitivity - re-run IRR for each parameter
+            sensitivity_data = self._run_full_sensitivity_analysis()
+        else:
+            # Phase 2: Quick approximation
+            sensitivity_data = self._run_quick_sensitivity_analysis(base_irr)
+        
+        # Sort by range (most sensitive first)
+        sensitivity_data.sort(key=lambda x: abs(x['range']), reverse=True)
+        
+        # Populate table
+        self.sensitivity_table.setRowCount(len(sensitivity_data) * 2)
+        
+        row = 0
+        for data in sensitivity_data:
+            # Positive variation
+            self.sensitivity_table.setItem(row, 0, QTableWidgetItem(data['parameter']))
+            self.sensitivity_table.setItem(row, 1, QTableWidgetItem(f"+{data['variation']:.0f}%"))
+            self.sensitivity_table.setItem(row, 2, QTableWidgetItem(f"{data['positive_impact']:.2f}%"))
+            row += 1
+            
+            # Negative variation
+            self.sensitivity_table.setItem(row, 0, QTableWidgetItem(data['parameter']))
+            self.sensitivity_table.setItem(row, 1, QTableWidgetItem(f"-{data['variation']:.0f}%"))
+            self.sensitivity_table.setItem(row, 2, QTableWidgetItem(f"{data['negative_impact']:.2f}%"))
+            row += 1
+        
+        self.sensitivity_table.resizeColumnsToContents()
+        
+        # Create sensitivity charts - Phase 2
+        self._plot_sensitivity_charts(sensitivity_data, base_irr)
+    
+    def _plot_sensitivity_charts(self, sensitivity_data, base_irr):
+        """Create sensitivity analysis charts (Phase 2)."""
+        import matplotlib.pyplot as plt
+        
+        self.sensitivity_figure.clear()
+        
+        # Create 2x1 subplots
+        ax1 = self.sensitivity_figure.add_subplot(2, 1, 1)
+        ax2 = self.sensitivity_figure.add_subplot(2, 1, 2)
+        
+        # Chart 1: Tornado Diagram
+        params = [d['parameter'] for d in sensitivity_data]
+        y_pos = range(len(params))
+        
+        # Calculate deviations from base
+        low_values = [(d['negative_impact'] - base_irr * 100) for d in sensitivity_data]
+        high_values = [(d['positive_impact'] - base_irr * 100) for d in sensitivity_data]
+        
+        # Create horizontal bars
+        ax1.barh(y_pos, low_values, left=base_irr * 100, color='#D32F2F', alpha=0.7, label='Decrease')
+        ax1.barh(y_pos, high_values, left=base_irr * 100, color='#2E7D32', alpha=0.7, label='Increase')
+        
+        ax1.set_yticks(y_pos)
+        ax1.set_yticklabels(params)
+        ax1.axvline(base_irr * 100, color='black', linestyle='--', linewidth=2, label=f'Base: {base_irr*100:.1f}%')
+        ax1.set_xlabel('IRR (%)')
+        ax1.set_title('Tornado Diagram - IRR Sensitivity to Key Parameters')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3, axis='x')
+        
+        # Chart 2: Spider Plot (simplified)
+        variations = [-20, -10, 0, 10, 20]  # Percentage variations
+        
+        for data in sensitivity_data:
+            param = data['parameter']
+            neg_impact = data['negative_impact']
+            pos_impact = data['positive_impact']
+            
+            # Linear interpolation for intermediate points
+            irr_values = [
+                neg_impact * 1.1,  # -20%
+                neg_impact + (base_irr * 100 - neg_impact) * 0.5,  # -10%
+                base_irr * 100,  # 0%
+                base_irr * 100 + (pos_impact - base_irr * 100) * 0.5,  # +10%
+                pos_impact * 0.9,  # +20%
+            ]
+            
+            ax2.plot(variations, irr_values, marker='o', linewidth=2, label=param, alpha=0.7)
+        
+        ax2.axhline(base_irr * 100, color='black', linestyle='--', linewidth=1, alpha=0.5)
+        ax2.set_xlabel('Parameter Change (%)')
+        ax2.set_ylabel('IRR (%)')
+        ax2.set_title('Spider Plot - IRR Response to Parameter Changes')
+        ax2.legend(loc='best', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        
+        self.sensitivity_figure.tight_layout()
+        self.sensitivity_canvas.draw()
+    
+    def _run_quick_sensitivity_analysis(self, base_irr: float) -> list:
+        """Quick sensitivity analysis using approximations (Phase 2)."""
+        # Define parameters to test
+        parameters = [
+            ('Metal Price', 0.20),
+            ('Mining Cost', 0.20),
+            ('Processing Cost', 0.20),
+            ('Recovery Rate', 0.10),
+            ('Discount Rate', 0.05),
+        ]
+        
+        sensitivity_data = []
+        
+        for param_name, variation in parameters:
+            # Simplified sensitivity calculation
+            if 'Price' in param_name:
+                # Revenue impact
+                positive_impact = base_irr * (1 + variation * 2)
+                negative_impact = base_irr * (1 - variation * 2)
+            elif 'Cost' in param_name:
+                # Cost impact (inverse)
+                positive_impact = base_irr * (1 - variation * 0.8)
+                negative_impact = base_irr * (1 + variation * 0.8)
+            elif 'Recovery' in param_name:
+                # Recovery impact
+                positive_impact = base_irr * (1 + variation * 1.5)
+                negative_impact = base_irr * (1 - variation * 1.5)
+            else:
+                # Discount rate impact
+                positive_impact = base_irr * (1 + variation * 1.2)
+                negative_impact = base_irr * (1 - variation * 1.2)
+            
+            sensitivity_data.append({
+                'parameter': param_name,
+                'variation': variation * 100,
+                'positive_impact': positive_impact * 100,
+                'negative_impact': negative_impact * 100,
+                'range': (positive_impact - negative_impact) * 100
+            })
+        
+        return sensitivity_data
+    
+    def _run_full_sensitivity_analysis(self) -> list:
+        """Full sensitivity analysis - re-runs IRR for each parameter (Phase 3)."""
+        from block_model_viewer.irr_engine.irr_bisection import find_irr_alpha
+        
+        # Get base config
+        base_config = self.config.copy()
+        base_irr = self.results['irr_alpha'] if self.results else 0.10
+        
+        # Define parameters and their config paths
+        param_specs = [
+            ('Metal Price', ['price', 'initial'], 0.20),
+            ('Mining Cost', ['costs', 'mining_cost'], 0.20),
+            ('Processing Cost', ['costs', 'processing_cost'], 0.20),
+            ('Recovery Rate', ['price', 'recovery'], 0.10),
+            ('Discount Rate (Base)', ['optimization', 'discount_min'], 0.02),
+        ]
+        
+        sensitivity_data = []
+        
+        # Progress indication
+        logger.info("Starting full sensitivity analysis (Phase 3)")
+        
+        for param_name, config_path, variation in param_specs:
+            try:
+                # Get base value
+                val = base_config
+                for key in config_path:
+                    val = val[key]
+                base_value = float(val)
+                
+                # Test positive variation
+                test_config_pos = self._modify_config(base_config, config_path, base_value * (1 + variation))
+                prepared_model = self._prepare_block_model()
+                
+                try:
+                    results_pos = find_irr_alpha(
+                        prepared_model,
+                        test_config_pos,
+                        self.config['optimization']
+                    )
+                    positive_impact = results_pos.get('irr_alpha', base_irr)
+                except Exception as e:
+                    logger.warning(f"Failed to calculate IRR for +{variation*100}% {param_name}: {e}")
+                    positive_impact = base_irr * (1 + variation)  # Fallback
+                
+                # Test negative variation
+                test_config_neg = self._modify_config(base_config, config_path, base_value * (1 - variation))
+                
+                try:
+                    results_neg = find_irr_alpha(
+                        prepared_model,
+                        test_config_neg,
+                        self.config['optimization']
+                    )
+                    negative_impact = results_neg.get('irr_alpha', base_irr)
+                except Exception as e:
+                    logger.warning(f"Failed to calculate IRR for -{variation*100}% {param_name}: {e}")
+                    negative_impact = base_irr * (1 - variation)  # Fallback
+                
+                sensitivity_data.append({
+                    'parameter': param_name,
+                    'variation': variation * 100,
+                    'positive_impact': positive_impact * 100,
+                    'negative_impact': negative_impact * 100,
+                    'range': (positive_impact - negative_impact) * 100
+                })
+                
+                logger.info(f"  {param_name}: {negative_impact*100:.2f}% to {positive_impact*100:.2f}%")
+                
+            except Exception as e:
+                logger.error(f"Error in sensitivity analysis for {param_name}: {e}")
+                continue
+        
+        logger.info("Completed full sensitivity analysis")
+        return sensitivity_data
+    
+    def _modify_config(self, config: Dict, path: list, value: float) -> Dict:
+        """Create a modified copy of config with a specific value changed."""
+        import copy
+        new_config = copy.deepcopy(config)
+        
+        # Navigate to the target
+        target = new_config
+        for key in path[:-1]:
+            target = target[key]
+        
+        # Set the value
+        target[path[-1]] = value
+        
+        return new_config
+    
+    def _popout_summary(self):
+        """Open Summary & Statistics in a separate window."""
+        if self.results is None:
+            QMessageBox.warning(self, "No Results", "Please run the IRR analysis first.")
+            return
+            
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("IRR Analysis - Summary & Statistics")
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Clone the summary text
+        summary_text = QTextEdit()
+        summary_text.setReadOnly(True)
+        summary_text.setFont(QFont("Courier New", 10))
+        summary_text.setText(self.results_text.toPlainText())
+        layout.addWidget(summary_text)
+        
+        # Clone the statistics table
+        stats_table = QTableWidget()
+        stats_table.setRowCount(self.stats_table.rowCount())
+        stats_table.setColumnCount(self.stats_table.columnCount())
+        stats_table.setHorizontalHeaderLabels([self.stats_table.horizontalHeaderItem(i).text() 
+                                                for i in range(self.stats_table.columnCount())])
+        
+        for row in range(self.stats_table.rowCount()):
+            for col in range(self.stats_table.columnCount()):
+                item = self.stats_table.item(row, col)
+                if item:
+                    stats_table.setItem(row, col, QTableWidgetItem(item.text()))
+        
+        layout.addWidget(stats_table)
+        
+        # Close button
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.close)
+        layout.addWidget(buttons)
+        
+        # Make dialog non-modal so it stays open alongside main window
+        dialog.setModal(False)
+        dialog.show()
+    
+    def _popout_phases(self):
+        """Open Pit Phase Analysis in a separate window."""
+        if self.results is None:
+            QMessageBox.warning(self, "No Results", "Please run the IRR analysis first.")
+            return
+            
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("IRR Analysis - Pit Phase Analysis")
+        dialog.resize(1200, 800)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Clone the phase table
+        phase_table = QTableWidget()
+        phase_table.setRowCount(self.phase_table.rowCount())
+        phase_table.setColumnCount(self.phase_table.columnCount())
+        phase_table.setHorizontalHeaderLabels([self.phase_table.horizontalHeaderItem(i).text() 
+                                                for i in range(self.phase_table.columnCount())])
+        
+        for row in range(self.phase_table.rowCount()):
+            for col in range(self.phase_table.columnCount()):
+                item = self.phase_table.item(row, col)
+                if item:
+                    phase_table.setItem(row, col, QTableWidgetItem(item.text()))
+        
+        layout.addWidget(phase_table)
+        
+        # Clone the phase chart
+        from matplotlib.figure import Figure
+        canvas = FigureCanvas(self.phase_figure)
+        layout.addWidget(canvas)
+        
+        # Close button
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.close)
+        layout.addWidget(buttons)
+        
+        # Make dialog non-modal so it stays open alongside main window
+        dialog.setModal(False)
+        dialog.show()
+    
+    def _popout_economic(self):
+        """Open Economic Analysis in a separate window."""
+        if self.results is None:
+            QMessageBox.warning(self, "No Results", "Please run the IRR analysis first.")
+            return
+            
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("IRR Analysis - Economic Analysis")
+        dialog.resize(1000, 700)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Clone the cumulative IRR table
+        irr_table = QTableWidget()
+        irr_table.setRowCount(self.cumulative_irr_table.rowCount())
+        irr_table.setColumnCount(self.cumulative_irr_table.columnCount())
+        irr_table.setHorizontalHeaderLabels([self.cumulative_irr_table.horizontalHeaderItem(i).text() 
+                                              for i in range(self.cumulative_irr_table.columnCount())])
+        
+        for row in range(self.cumulative_irr_table.rowCount()):
+            for col in range(self.cumulative_irr_table.columnCount()):
+                item = self.cumulative_irr_table.item(row, col)
+                if item:
+                    irr_table.setItem(row, col, QTableWidgetItem(item.text()))
+        
+        layout.addWidget(irr_table)
+        
+        # Clone the economic chart
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        canvas = FigureCanvas(self.economic_figure)
+        layout.addWidget(canvas)
+        
+        # Close button
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.close)
+        layout.addWidget(buttons)
+        
+        # Make dialog non-modal so it stays open alongside main window
+        dialog.setModal(False)
+        dialog.show()
+    
+    def _popout_npv(self):
+        """Open NPV Distribution in a separate window."""
+        if self.results is None:
+            QMessageBox.warning(self, "No Results", "Please run the IRR analysis first.")
+            return
+            
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("IRR Analysis - NPV Distribution")
+        dialog.resize(1000, 700)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Clone the NPV distribution chart
+        canvas = FigureCanvas(self.npv_figure)
+        layout.addWidget(canvas)
+        
+        # Close button
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.close)
+        layout.addWidget(buttons)
+        
+        # Make dialog non-modal so it stays open alongside main window
+        dialog.setModal(False)
+        dialog.show()
+    
+    def _popout_optimal_pit(self):
+        """Open Optimal Pit Determination in a separate window."""
+        if self.results is None:
+            QMessageBox.warning(self, "No Results", "Please run the IRR analysis first.")
+            return
+            
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("IRR Analysis - Optimal Pit Determination")
+        dialog.resize(1000, 700)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Clone the optimal pit chart
+        canvas = FigureCanvas(self.optimal_pit_figure)
+        layout.addWidget(canvas)
+        
+        # Close button
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.close)
+        layout.addWidget(buttons)
+        
+        # Make dialog non-modal so it stays open alongside main window
+        dialog.setModal(False)
+        dialog.show()
+    
+    def _export_table(self, table: QTableWidget, default_filename: str):
+        """Export a table to CSV (Step 10: uses ExportHelpers)."""
+        if table.rowCount() == 0:
+            QMessageBox.warning(self, "No Data", "The table is empty. Please run the analysis first.")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Table",
+            default_filename,
+            "CSV Files (*.csv)"
+        )
+        
+        if file_path:
+            try:
+                # Step 10: Convert table to DataFrame, then use ExportHelpers
+                import pandas as pd
+                from ..utils.export_helpers import export_dataframe_to_csv
+                
+                # Collect table data into DataFrame
+                headers = []
+                for col in range(table.columnCount()):
+                    header_item = table.horizontalHeaderItem(col)
+                    headers.append(header_item.text() if header_item else f"Column {col+1}")
+                
+                data = []
+                for row in range(table.rowCount()):
+                    row_data = []
+                    for col in range(table.columnCount()):
+                        item = table.item(row, col)
+                        row_data.append(item.text() if item else "")
+                    data.append(row_data)
+                
+                df = pd.DataFrame(data, columns=headers)
+                export_dataframe_to_csv(df, file_path)
+                
+                QMessageBox.information(self, "Export Complete", f"Table exported to:\n{file_path}")
+                logger.info(f"Exported table to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export table:\n{str(e)}")
+                logger.error(f"Table export failed: {e}", exc_info=True)
+    
+    def _export_chart(self, figure, default_filename: str):
+        """Export a matplotlib figure to image file."""
+        if figure.get_axes():  # Check if figure has any plots
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Chart",
+                default_filename,
+                "PNG Images (*.png);;PDF Files (*.pdf);;SVG Files (*.svg)"
+            )
+            
+            if file_path:
+                try:
+                    figure.savefig(file_path, dpi=300, bbox_inches='tight')
+                    QMessageBox.information(self, "Export Complete", f"Chart exported to:\n{file_path}")
+                    logger.info(f"Exported chart to {file_path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Export Error", f"Failed to export chart:\n{str(e)}")
+                    logger.error(f"Chart export failed: {e}")
+        else:
+            QMessageBox.warning(self, "No Chart", "Please plot the chart first.")
+    
+    def _plot_phase_charts_selective(self):
+        """Plot selected phase charts based on checkboxes."""
+        if self.results is None or 'best_schedule' not in self.results:
+            QMessageBox.warning(self, "No Data", "Please run the IRR analysis first.")
+            return
+        
+        schedule = self.results.get('best_schedule')
+        if schedule is None or 'PHASE' not in schedule.columns:
+            QMessageBox.warning(self, "No Phase Data", "Phase data not available in results.")
+            return
+        
+        # Get mined blocks only
+        mined_blocks = schedule[schedule.get('MINED', 1) == 1].copy()
+        
+        if len(mined_blocks) == 0:
+            QMessageBox.warning(self, "No Data", "No mined blocks in schedule.")
+            return
+        
+        # Get unique phases
+        phases = sorted(mined_blocks['PHASE'].unique())
+        phases = [p for p in phases if p > 0]
+        
+        if len(phases) == 0:
+            QMessageBox.warning(self, "No Phases", "No phases found in schedule.")
+            return
+        
+        # Count selected charts
+        selected = [
+            self.phase_chart_ore_waste.isChecked(),
+            self.phase_chart_strip.isChecked(),
+            self.phase_chart_grade.isChecked(),
+            self.phase_chart_value.isChecked()
+        ]
+        
+        num_selected = sum(selected)
+        if num_selected == 0:
+            QMessageBox.warning(self, "No Selection", "Please select at least one chart to plot.")
+            return
+        
+        # Clear figure and create subplots
+        self.phase_figure.clear()
+        
+        # Determine subplot layout
+        if num_selected == 1:
+            rows, cols = 1, 1
+        elif num_selected == 2:
+            rows, cols = 1, 2
+        elif num_selected == 3:
+            rows, cols = 2, 2
+        else:
+            rows, cols = 2, 2
+        
+        axes = self.phase_figure.subplots(rows, cols)
+        if num_selected == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten() if num_selected > 2 else [axes[0], axes[1]]
+        
+        # Prepare data
+        phase_data = []
+        cutoff_grade = 0.3
+        
+        # Determine grade field name (from UI or fallback to common names)
+        grade_field = self.grade_combo.currentText() if hasattr(self, 'grade_combo') and self.grade_combo.currentText() else None
+        if not grade_field or grade_field not in mined_blocks.columns:
+            # Try common grade field names
+            for possible_grade in ['GRADE', 'Au', 'Cu', 'grade', 'au']:
+                if possible_grade in mined_blocks.columns:
+                    grade_field = possible_grade
+                    break
+        
+        if not grade_field or grade_field not in mined_blocks.columns:
+            logger.error(f"No grade field found in schedule. Available columns: {list(mined_blocks.columns)}")
+            QMessageBox.critical(self, "Missing Grade Field", 
+                               f"Grade field not found in schedule.\n\n"
+                               f"Available fields: {', '.join(list(mined_blocks.columns)[:10])}")
+            return
+        
+        logger.info(f"Using grade field: {grade_field} for phase charts")
+        
+        for phase_id in phases:
+            phase_blocks = mined_blocks[mined_blocks['PHASE'] == phase_id]
+            ore_blocks = phase_blocks[phase_blocks[grade_field] >= cutoff_grade]
+            
+            phase_data.append({
+                'phase': int(phase_id),
+                'total': phase_blocks['TONNAGE'].sum() / 1e6,
+                'ore': ore_blocks['TONNAGE'].sum() / 1e6,
+                'waste': (phase_blocks['TONNAGE'].sum() - ore_blocks['TONNAGE'].sum()) / 1e6,
+                'grade': ore_blocks[grade_field].mean() if len(ore_blocks) > 0 else 0,
+                'value': phase_blocks['VALUE'].sum() / 1e6 if 'VALUE' in phase_blocks.columns else 0
+            })
+        
+        phase_nums = [d['phase'] for d in phase_data]
+        ax_idx = 0
+        
+        # Chart 1: Ore vs Waste
+        if self.phase_chart_ore_waste.isChecked():
+            ax = axes[ax_idx]
+            ore_tonnes = [d['ore'] for d in phase_data]
+            waste_tonnes = [d['waste'] for d in phase_data]
+            
+            ax.bar(phase_nums, ore_tonnes, label='Ore', color='#2E7D32', edgecolor='black')
+            ax.bar(phase_nums, waste_tonnes, bottom=ore_tonnes, label='Waste', color='#757575', edgecolor='black')
+            ax.set_xlabel('Phase')
+            ax.set_ylabel('Tonnes (Mt)')
+            ax.set_title('Ore and Waste by Phase')
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+            ax_idx += 1
+        
+        # Chart 2: Strip Ratio
+        if self.phase_chart_strip.isChecked():
+            ax = axes[ax_idx]
+            strip_ratios = [d['waste'] / d['ore'] if d['ore'] > 0 else 0 for d in phase_data]
+            ax.plot(phase_nums, strip_ratios, marker='o', linewidth=2, markersize=8, color='#D32F2F')
+            ax.set_xlabel('Phase')
+            ax.set_ylabel('Strip Ratio (Waste:Ore)')
+            ax.set_title('Strip Ratio Trend')
+            ax.grid(True, alpha=0.3)
+            ax_idx += 1
+        
+        # Chart 3: Average Grade
+        if self.phase_chart_grade.isChecked():
+            ax = axes[ax_idx]
+            grades = [d['grade'] for d in phase_data]
+            ax.bar(phase_nums, grades, color='#F57C00', edgecolor='black')
+            ax.set_xlabel('Phase')
+            ax.set_ylabel('Grade (g/t)')
+            ax.set_title('Average Grade by Phase')
+            ax.grid(True, alpha=0.3, axis='y')
+            ax_idx += 1
+        
+        # Chart 4: Economic Value
+        if self.phase_chart_value.isChecked():
+            ax = axes[ax_idx]
+            values = [d['value'] for d in phase_data]
+            ax.bar(phase_nums, values, color='#1976D2', edgecolor='black')
+            ax.set_xlabel('Phase')
+            ax.set_ylabel('Value ($M)')
+            ax.set_title('Economic Value by Phase')
+            ax.grid(True, alpha=0.3, axis='y')
+            ax_idx += 1
+        
+        # Hide unused subplots
+        for i in range(ax_idx, len(axes)):
+            axes[i].set_visible(False)
+        
+        self.phase_figure.tight_layout()
+        self.phase_canvas.draw()
+        
+        logger.info(f"Plotted {num_selected} phase charts")
+    
+    def _plot_economic_charts(self):
+        """Plot economic analysis charts."""
+        if self.cumulative_irr_table.rowCount() == 0:
+            QMessageBox.warning(self, "No Data", "Please run the IRR analysis first.")
+            return
+        
+        # Extract data from table
+        phases = []
+        cum_tonnage = []
+        cum_npv = []
+        cum_irr = []
+        marginal_npv = []
+        
+        for row in range(self.cumulative_irr_table.rowCount()):
+            phase_item = self.cumulative_irr_table.item(row, 0)
+            if phase_item:
+                # Extract phase number - handle both "1" and "Phase 1" formats
+                phase_text = phase_item.text()
+                if 'Phase' in phase_text:
+                    phase_num = int(phase_text.replace('Phase', '').strip())
+                else:
+                    phase_num = int(phase_text)
+                
+                phases.append(phase_num)
+                cum_tonnage.append(float(self.cumulative_irr_table.item(row, 1).text()))
+                cum_npv.append(float(self.cumulative_irr_table.item(row, 2).text()))
+                cum_irr.append(float(self.cumulative_irr_table.item(row, 3).text()))
+                marginal_npv.append(float(self.cumulative_irr_table.item(row, 4).text()))
+        
+        # Clear and create subplots
+        self.economic_figure.clear()
+        axes = self.economic_figure.subplots(2, 2)
+        
+        # Chart 1: Cumulative NPV
+        ax1 = axes[0, 0]
+        ax1.plot(phases, cum_npv, marker='o', linewidth=2, markersize=8, color='#1976D2')
+        ax1.set_xlabel('Phase')
+        ax1.set_ylabel('Cumulative NPV ($M)')
+        ax1.set_title('Cumulative NPV Trend')
+        ax1.grid(True, alpha=0.3)
+        
+        # Chart 2: Cumulative IRR
+        ax2 = axes[0, 1]
+        ax2.plot(phases, cum_irr, marker='s', linewidth=2, markersize=8, color='#388E3C')
+        ax2.set_xlabel('Phase')
+        ax2.set_ylabel('Cumulative IRR (%)')
+        ax2.set_title('Cumulative IRR Trend')
+        ax2.grid(True, alpha=0.3)
+        
+        # Chart 3: Marginal NPV
+        ax3 = axes[1, 0]
+        ax3.bar(phases, marginal_npv, color='#F57C00', edgecolor='black')
+        ax3.set_xlabel('Phase')
+        ax3.set_ylabel('Marginal NPV ($M)')
+        ax3.set_title('Marginal NPV by Phase')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # Chart 4: Cumulative Tonnage
+        ax4 = axes[1, 1]
+        ax4.plot(phases, cum_tonnage, marker='^', linewidth=2, markersize=8, color='#D32F2F')
+        ax4.set_xlabel('Phase')
+        ax4.set_ylabel('Cumulative Tonnes (Mt)')
+        ax4.set_title('Cumulative Tonnage Mined')
+        ax4.grid(True, alpha=0.3)
+        
+        self.economic_figure.tight_layout()
+        self.economic_canvas.draw()
+        
+        logger.info("Plotted economic analysis charts")
+    
+    def _plot_npv_distribution(self):
+        """Plot NPV distribution histogram with modern dark theme."""
+        if self.results is None or 'scenario_npvs' not in self.results:
+            QMessageBox.warning(self, "No Data", "Please run the IRR analysis first.")
+            return
+        
+        npvs = self.results['scenario_npvs']
+        
+        # Clear and plot
+        self.npv_figure.clear()
+        ax = self.npv_figure.add_subplot(111)
+        
+        # Apply modern dark theme styling
+        style_matplotlib_figure(self.npv_figure, ax)
+        
+        # Histogram with modern colors
+        n, bins, patches = ax.hist(
+            npvs / 1e6, bins=30, 
+            color=ModernColors.ACCENT_PRIMARY, 
+            edgecolor=ModernColors.CARD_BG, 
+            alpha=0.85
+        )
+        
+        # Add mean and percentiles with modern colors
+        mean_npv = np.mean(npvs) / 1e6
+        p10 = np.percentile(npvs, 10) / 1e6
+        p50 = np.percentile(npvs, 50) / 1e6
+        p90 = np.percentile(npvs, 90) / 1e6
+        
+        ax.axvline(mean_npv, color='#ff6b6b', linestyle='--', linewidth=2, label=f'Mean: ${mean_npv:.1f}M')
+        ax.axvline(p10, color=ModernColors.WARNING, linestyle='--', linewidth=1.5, label=f'P10: ${p10:.1f}M')
+        ax.axvline(p50, color=ModernColors.SUCCESS, linestyle='--', linewidth=1.5, label=f'P50: ${p50:.1f}M')
+        ax.axvline(p90, color='#a855f7', linestyle='--', linewidth=1.5, label=f'P90: ${p90:.1f}M')
+        
+        ax.set_xlabel('NPV ($M)', fontsize=10, color=ModernColors.TEXT_PRIMARY)
+        ax.set_ylabel('Frequency', fontsize=10, color=ModernColors.TEXT_PRIMARY)
+        ax.set_title('📊 NPV Distribution (Risk Analysis)', fontsize=12, fontweight='bold', color=ModernColors.TEXT_PRIMARY)
+        
+        # Style legend
+        legend = ax.legend(facecolor=ModernColors.CARD_BG, edgecolor=ModernColors.BORDER, 
+                          labelcolor=ModernColors.TEXT_PRIMARY, fontsize=9)
+        
+        self.npv_figure.tight_layout()
+        self.npv_canvas.draw()
+        
+        logger.info("Plotted NPV distribution")
+    
+    def _plot_convergence(self):
+        """Plot IRR convergence history with modern dark theme."""
+        if self.results is None or 'convergence_history' not in self.results:
+            QMessageBox.warning(self, "No Data", "Please run the IRR analysis first.")
+            return
+        
+        conv_history = self.results['convergence_history']
+        
+        if not conv_history or len(conv_history.get('iterations', [])) == 0:
+            QMessageBox.warning(self, "No Data", "No convergence data available.")
+            return
+        
+        # Clear and create 2x2 subplot layout
+        self.convergence_figure.clear()
+        
+        # Plot 1: IRR value convergence
+        ax1 = self.convergence_figure.add_subplot(2, 2, 1)
+        ax1.plot(conv_history['iterations'], np.array(conv_history['r_values']) * 100, 
+                marker='o', linewidth=2, markersize=6, color=ModernColors.ACCENT_PRIMARY, label='Trial IRR')
+        ax1.fill_between(conv_history['iterations'], 
+                        np.array(conv_history['r_low_values']) * 100,
+                        np.array(conv_history['r_high_values']) * 100,
+                        alpha=0.2, color=ModernColors.ACCENT_PRIMARY, label='Search Bracket')
+        ax1.set_xlabel('Iteration')
+        ax1.set_ylabel('Discount Rate (%)')
+        ax1.set_title('📈 IRR Convergence')
+        ax1.legend(facecolor=ModernColors.CARD_BG, edgecolor=ModernColors.BORDER, 
+                  labelcolor=ModernColors.TEXT_PRIMARY, fontsize=8)
+        
+        # Plot 2: Satisfaction rate convergence
+        ax2 = self.convergence_figure.add_subplot(2, 2, 2)
+        sat_rates = np.array(conv_history['satisfaction_rates']) * 100
+        alpha_target = self.results.get('alpha_target', 0.80) * 100
+        ax2.plot(conv_history['iterations'], sat_rates, 
+                marker='s', linewidth=2, markersize=6, color=ModernColors.SUCCESS)
+        ax2.axhline(alpha_target, color='#ff6b6b', linestyle='--', linewidth=2, 
+                   label=f'Target: {alpha_target:.0f}%')
+        ax2.set_xlabel('Iteration')
+        ax2.set_ylabel('Satisfaction Rate (%)')
+        ax2.set_title('✅ Scenario Satisfaction Rate')
+        ax2.legend(facecolor=ModernColors.CARD_BG, edgecolor=ModernColors.BORDER, 
+                  labelcolor=ModernColors.TEXT_PRIMARY, fontsize=8)
+        ax2.set_ylim([0, 105])
+        
+        # Plot 3: Mean NPV evolution
+        ax3 = self.convergence_figure.add_subplot(2, 2, 3)
+        mean_npvs = np.array(conv_history['mean_npvs']) / 1e6
+        ax3.plot(conv_history['iterations'], mean_npvs, 
+                marker='D', linewidth=2, markersize=6, color=ModernColors.WARNING)
+        ax3.axhline(0, color='#ff6b6b', linestyle='--', linewidth=1, alpha=0.5)
+        ax3.set_xlabel('Iteration')
+        ax3.set_ylabel('Mean NPV ($M)')
+        ax3.set_title('💰 Mean NPV Evolution')
+        
+        # Plot 4: Bracket width (convergence measure)
+        ax4 = self.convergence_figure.add_subplot(2, 2, 4)
+        bracket_width = (np.array(conv_history['r_high_values']) - 
+                        np.array(conv_history['r_low_values'])) * 100
+        ax4.semilogy(conv_history['iterations'], bracket_width, 
+                    marker='v', linewidth=2, markersize=6, color='#a855f7')
+        ax4.set_xlabel('Iteration')
+        ax4.set_ylabel('Search Bracket Width (% points)')
+        ax4.set_title('🎯 Convergence Speed (Log Scale)')
+        
+        # Apply modern dark theme to all axes
+        style_matplotlib_figure(self.convergence_figure, [ax1, ax2, ax3, ax4])
+        
+        self.convergence_canvas.draw()
+        
+        logger.info("Plotted IRR convergence analysis")
+    
+    def _plot_scenario_distribution(self):
+        """Plot enhanced scenario NPV distribution."""
+        if self.results is None or 'npv_distribution' not in self.results:
+            QMessageBox.warning(self, "No Data", "Please run the IRR analysis first.")
+            return
+        
+        npvs = self.results['npv_distribution'] / 1e6  # Convert to millions
+        
+        # Clear and create 2x1 subplot layout
+        self.scenario_figure.clear()
+        
+        # Plot 1: Enhanced histogram with annotations
+        ax1 = self.scenario_figure.add_subplot(2, 1, 1)
+        n, bins, patches = ax1.hist(npvs, bins=40, color='#1976D2', edgecolor='black', alpha=0.7)
+        
+        # Color code bins (negative = red, positive = green)
+        for i, patch in enumerate(patches):
+            if bins[i] < 0:
+                patch.set_facecolor('#EF5350')  # Red for negative NPV
+            else:
+                patch.set_facecolor('#66BB6A')  # Green for positive NPV
+        
+        # Statistics
+        mean_npv = np.mean(npvs)
+        median_npv = np.median(npvs)
+        std_npv = np.std(npvs)
+        p10 = np.percentile(npvs, 10)
+        p90 = np.percentile(npvs, 90)
+        
+        # Add vertical lines for key statistics
+        ax1.axvline(0, color='black', linestyle='-', linewidth=2, label='Break-even', alpha=0.8)
+        ax1.axvline(mean_npv, color='red', linestyle='--', linewidth=2, label=f'Mean: ${mean_npv:.1f}M')
+        ax1.axvline(median_npv, color='blue', linestyle='--', linewidth=2, label=f'Median: ${median_npv:.1f}M')
+        ax1.axvline(p10, color='orange', linestyle=':', linewidth=1.5, label=f'P10: ${p10:.1f}M', alpha=0.7)
+        ax1.axvline(p90, color='purple', linestyle=':', linewidth=1.5, label=f'P90: ${p90:.1f}M', alpha=0.7)
+        
+        ax1.set_xlabel('NPV ($M)', fontsize=12)
+        ax1.set_ylabel('Number of Scenarios', fontsize=12)
+        ax1.set_title(f'Scenario NPV Distribution ({len(npvs)} scenarios)', fontsize=14, fontweight='bold')
+        ax1.legend(loc='upper right', fontsize=9)
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Add text box with statistics
+        stats_text = f'μ = ${mean_npv:.2f}M\nσ = ${std_npv:.2f}M\nP(NPV≥0) = {np.sum(npvs >= 0)/len(npvs)*100:.1f}%'
+        ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        # Plot 2: Cumulative Distribution Function (CDF)
+        ax2 = self.scenario_figure.add_subplot(2, 1, 2)
+        sorted_npvs = np.sort(npvs)
+        cumulative = np.arange(1, len(sorted_npvs) + 1) / len(sorted_npvs) * 100
+        
+        ax2.plot(sorted_npvs, cumulative, color='darkblue', linewidth=3, label='CDF')
+        ax2.axvline(0, color='red', linestyle='--', linewidth=2, label='Break-even')
+        ax2.axhline(50, color='gray', linestyle=':', alpha=0.5, label='Median')
+        ax2.axhline(self.results.get('alpha_target', 0.80) * 100, color='green', 
+                   linestyle='--', linewidth=2, alpha=0.7, label=f'Target α = {self.results.get("alpha_target", 0.80)*100:.0f}%')
+        
+        # Add grid at key percentiles
+        for p in [10, 25, 50, 75, 90]:
+            ax2.axhline(p, color='gray', linestyle=':', alpha=0.3, linewidth=0.5)
+        
+        ax2.set_xlabel('NPV ($M)', fontsize=12)
+        ax2.set_ylabel('Cumulative Probability (%)', fontsize=12)
+        ax2.set_title('Cumulative Distribution Function', fontsize=14, fontweight='bold')
+        ax2.legend(loc='lower right', fontsize=9)
+        ax2.grid(True, alpha=0.3)
+        ax2.set_ylim([0, 100])
+        
+        self.scenario_figure.tight_layout()
+        self.scenario_canvas.draw()
+        
+        logger.info("Plotted scenario NPV distribution")
+    
+    def _plot_cashflow(self):
+        """Plot period-by-period discounted cash flows."""
+        if self.results is None or 'best_cashflows' not in self.results or self.results['best_cashflows'] is None:
+            QMessageBox.warning(self, "No Data", "Cash flow data not available. Please run the IRR analysis first.")
+            return
+        
+        cashflows = self.results['best_cashflows']
+        npv_details = self.results.get('best_npv_details', {})
+        
+        if cashflows is None or len(cashflows) == 0:
+            QMessageBox.warning(self, "No Data", "No cash flow data available.")
+            return
+        
+        periods = np.arange(len(cashflows))
+        discount_rate = self.results.get('irr_alpha', 0.10)
+        
+        # Calculate discounted cash flows
+        discount_factors = 1.0 / np.power(1.0 + discount_rate, periods)
+        discounted_cashflows = cashflows * discount_factors
+        cumulative_npv = np.cumsum(discounted_cashflows)
+        
+        # Clear and create 3x1 subplot layout
+        self.cashflow_figure.clear()
+        
+        # Plot 1: Undiscounted vs Discounted Cash Flows
+        ax1 = self.cashflow_figure.add_subplot(3, 1, 1)
+        width = 0.35
+        x = periods
+        ax1.bar(x - width/2, cashflows / 1e6, width, label='Undiscounted CF', color='#64B5F6', alpha=0.8)
+        ax1.bar(x + width/2, discounted_cashflows / 1e6, width, label='Discounted CF', color='#1976D2', alpha=0.8)
+        ax1.axhline(0, color='black', linestyle='-', linewidth=1)
+        ax1.set_xlabel('Period', fontsize=11)
+        ax1.set_ylabel('Cash Flow ($M)', fontsize=11)
+        ax1.set_title(f'Period Cash Flows (Discount Rate: {discount_rate*100:.2f}%)', fontsize=13, fontweight='bold')
+        ax1.legend(loc='upper right')
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 2: Cumulative NPV over time
+        ax2 = self.cashflow_figure.add_subplot(3, 1, 2)
+        ax2.plot(periods, cumulative_npv / 1e6, marker='o', linewidth=2.5, markersize=7, 
+                color='#4CAF50', label='Cumulative NPV')
+        ax2.fill_between(periods, 0, cumulative_npv / 1e6, alpha=0.3, color='#4CAF50')
+        ax2.axhline(0, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
+        ax2.set_xlabel('Period', fontsize=11)
+        ax2.set_ylabel('Cumulative NPV ($M)', fontsize=11)
+        ax2.set_title(f'Cumulative NPV Evolution (Final: ${cumulative_npv[-1]/1e6:.2f}M)', 
+                     fontsize=13, fontweight='bold')
+        ax2.legend(loc='lower right')
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Cash Flow Components (if NPV details available)
+        ax3 = self.cashflow_figure.add_subplot(3, 1, 3)
+        
+        # Try to extract revenue and cost components
+        if npv_details:
+            # If we have detailed NPV breakdown, we can show more
+            total_npv = npv_details.get('npv', 0) / 1e6
+            primary_rev = npv_details.get('primary_revenue', 0) / 1e6
+            byproduct_rev = npv_details.get('byproduct_revenue', 0) / 1e6
+            opex = npv_details.get('operating_cost', 0) / 1e6
+            capex = npv_details.get('capital_cost', 0) / 1e6
+            
+            categories = ['Primary\nRevenue', 'By-Product\nRevenue', 'Operating\nCost', 'Capital\nCost', 'Net NPV']
+            values = [primary_rev, byproduct_rev, -opex, -capex, total_npv]
+            colors = ['#66BB6A', '#81C784', '#EF5350', '#E57373', '#2196F3']
+            
+            bars = ax3.bar(categories, values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
+            ax3.axhline(0, color='black', linestyle='-', linewidth=1)
+            ax3.set_ylabel('Value ($M)', fontsize=11)
+            ax3.set_title('NPV Components Breakdown', fontsize=13, fontweight='bold')
+            ax3.grid(True, alpha=0.3, axis='y')
+            
+            # Add value labels on bars
+            for bar in bars:
+                height = bar.get_height()
+                ax3.text(bar.get_x() + bar.get_width()/2., height,
+                        f'${height:.1f}M',
+                        ha='center', va='bottom' if height > 0 else 'top', fontsize=9, fontweight='bold')
+        else:
+            # Fallback: Show positive vs negative cash flows
+            positive_cf = np.sum(cashflows[cashflows > 0]) / 1e6
+            negative_cf = np.sum(cashflows[cashflows < 0]) / 1e6
+            net_cf = positive_cf + negative_cf
+            
+            categories = ['Total\nRevenue', 'Total\nCosts', 'Net\nCash Flow']
+            values = [positive_cf, negative_cf, net_cf]
+            colors = ['#66BB6A', '#EF5350', '#2196F3']
+            
+            bars = ax3.bar(categories, values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
+            ax3.axhline(0, color='black', linestyle='-', linewidth=1)
+            ax3.set_ylabel('Cash Flow ($M)', fontsize=11)
+            ax3.set_title('Total Cash Flow Summary', fontsize=13, fontweight='bold')
+            ax3.grid(True, alpha=0.3, axis='y')
+            
+            # Add value labels on bars
+            for bar in bars:
+                height = bar.get_height()
+                ax3.text(bar.get_x() + bar.get_width()/2., height,
+                        f'${height:.1f}M',
+                        ha='center', va='bottom' if height > 0 else 'top', fontsize=9, fontweight='bold')
+        
+        self.cashflow_figure.tight_layout()
+        self.cashflow_canvas.draw()
+        
+        logger.info("Plotted cash flow analysis")
+    
+    def _clear_results(self):
+        """Clear all IRR analysis results."""
+        reply = QMessageBox.question(
+            self,
+            "Clear Results",
+            "Are you sure you want to clear all IRR analysis results?\n\n"
+            "This will remove all data from the Results tab.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Clear results data
+            self.results = None
+            self.pit_result = None
+            
+            # Clear all tables
+            self.results_text.clear()
+            self.stats_table.setRowCount(0)
+            self.phase_table.setRowCount(0)
+            self.cumulative_irr_table.setRowCount(0)
+            self.sensitivity_table.setRowCount(0)
+            self.npv_table.setRowCount(0)
+            self.optimal_pit_summary.clear()
+            
+            # Clear all charts
+            self.phase_figure.clear()
+            self.phase_canvas.draw()
+            self.economic_figure.clear()
+            self.economic_canvas.draw()
+            self.sensitivity_figure.clear()
+            self.sensitivity_canvas.draw()
+            self.npv_figure.clear()
+            self.npv_canvas.draw()
+            self.optimal_pit_figure.clear()
+            self.optimal_pit_canvas.draw()
+            self.convergence_figure.clear()
+            self.convergence_canvas.draw()
+            self.scenario_figure.clear()
+            self.scenario_canvas.draw()
+            self.cashflow_figure.clear()
+            self.cashflow_canvas.draw()
+            
+            # Reset progress
+            self.progress_log.clear()
+            self.progress_bar.setValue(0)
+            
+            QMessageBox.information(self, "Results Cleared", "All IRR analysis results have been cleared.")
+            logger.info("IRR analysis results cleared by user")
+    
+    def _export_schedule(self):
+        """Export the mining schedule to CSV."""
+        if self.results is None or self.results['best_schedule'] is None:
+            QMessageBox.warning(self, "No Results", "No mining schedule available to export.")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Mining Schedule",
+            "",
+            "CSV Files (*.csv)"
+        )
+        
+        if file_path:
+            # Step 10: Use ExportHelpers
+            from ..utils.export_helpers import export_dataframe_to_csv
+            try:
+                export_dataframe_to_csv(self.results['best_schedule'], file_path)
+                QMessageBox.information(self, "Export Complete", f"Mining schedule exported to:\n{file_path}")
+                logger.info(f"Exported mining schedule to {file_path}")
+            except Exception as e:
+                logger.error(f"Error exporting schedule: {e}", exc_info=True)
+                QMessageBox.critical(self, "Export Error", f"Failed to export schedule:\n{e}")
+    
+    def _view_schedule_table(self):
+        """Open the mining schedule in the generic Table Viewer."""
+        try:
+            if self.results is None or 'best_schedule' not in self.results or self.results['best_schedule'] is None:
+                QMessageBox.information(self, "No Schedule", "Run the IRR analysis to generate a mining schedule first.")
+                return
+
+            df = self.results['best_schedule']
+            parent = self.parent()
+            title = "IRR - Mining Schedule"
+            if parent is not None and hasattr(parent, 'open_table_viewer_window_from_df'):
+                parent.open_table_viewer_window_from_df(df, title=title)
+            else:
+                QMessageBox.information(self, "Table Viewer Unavailable", "Cannot access main window to open Table Viewer.")
+        except Exception as e:
+            logger.error("Failed to open schedule table: %s", e, exc_info=True)
+            QMessageBox.critical(self, "Error", f"Failed to open schedule table:\n{e}")
+    
+    def _export_results(self):
+        """Export comprehensive results to Excel/CSV (Phase 3)."""
+        if self.results is None:
+            QMessageBox.warning(self, "No Results", "No results available to export.")
+            return
+        
+        file_path, filter_selected = QFileDialog.getSaveFileName(
+            self,
+            "Export Comprehensive Results",
+            "",
+            "Excel Files (*.xlsx);;JSON Files (*.json);;CSV Files (*.csv)"
+        )
+        
+        if not file_path:
+            return
+            
+        path = Path(file_path)
+        
+        try:
+            if path.suffix == '.xlsx':
+                # Phase 3: Comprehensive Excel export with multiple sheets
+                self._export_to_excel(file_path)
+            
+            elif path.suffix == '.json':
+                # JSON export
+                import json
+                export_data = {
+                    'irr_alpha': float(self.results['irr_alpha']),
+                    'satisfaction_rate': float(self.results['satisfaction_rate']),
+                    'alpha_target': float(self.results['alpha_target']),
+                    'num_scenarios': int(self.results['num_scenarios']),
+                    'iterations': int(self.results['iterations']),
+                    'mean_npv': float(self.results['mean_npv']),
+                    'std_npv': float(self.results['std_npv']),
+                    'min_npv': float(self.results['min_npv']),
+                    'max_npv': float(self.results['max_npv'])
+                }
+                
+                with open(file_path, 'w') as f:
+                    json.dump(export_data, f, indent=2)
+            
+            elif path.suffix == '.csv':
+                # Step 10: Use ExportHelpers
+                from ..utils.export_helpers import export_dataframe_to_csv
+                npv_df = pd.DataFrame({
+                    'Scenario': range(len(self.results['npv_distribution'])),
+                    'NPV': self.results['npv_distribution']
+                })
+                export_dataframe_to_csv(npv_df, file_path)
+            
+            QMessageBox.information(
+                self, 
+                "Export Complete", 
+                f"✅ Results exported successfully to:\n{file_path}\n\n"
+                f"Format: {path.suffix.upper()}"
+            )
+            logger.info(f"Exported results to {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to export results: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Failed to export results:\n{str(e)}"
+            )
+    
+    def _export_to_excel(self, file_path: str):
+        """Export comprehensive results to Excel with multiple sheets (Phase 3)."""
+        try:
+            import openpyxl
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill
+        except ImportError:
+            # Fallback to pandas Excel writer
+            logger.warning("openpyxl not available, using pandas ExcelWriter")
+            self._export_to_excel_pandas(file_path)
+            return
+        
+        wb = Workbook()
+        
+        # Sheet 1: Summary
+        ws_summary = wb.active
+        ws_summary.title = "Summary"
+        self._write_summary_sheet(ws_summary)
+        
+        # Sheet 2: NPV Distribution
+        ws_npv = wb.create_sheet("NPV Distribution")
+        npv_df = pd.DataFrame({
+            'Scenario': range(len(self.results['npv_distribution'])),
+            'NPV ($)': self.results['npv_distribution']
+        })
+        for r_idx, row in enumerate(npv_df.itertuples(index=False), start=1):
+            for c_idx, value in enumerate(row, start=1):
+                ws_npv.cell(row=r_idx, column=c_idx, value=value)
+        
+        # Sheet 3: Mining Schedule
+        if 'best_schedule' in self.results and self.results['best_schedule'] is not None:
+            ws_schedule = wb.create_sheet("Mining Schedule")
+            schedule_df = self.results['best_schedule']
+            for r_idx, row in enumerate([schedule_df.columns.tolist()] + schedule_df.values.tolist(), start=1):
+                for c_idx, value in enumerate(row, start=1):
+                    ws_schedule.cell(row=r_idx, column=c_idx, value=value)
+        
+        # Sheet 4: Pit Results (if available)
+        if hasattr(self, 'pit_result') and self.pit_result:
+            ws_pit = wb.create_sheet("Ultimate Pit")
+            pit_df = self.pit_result['ultimate_pit']
+            for r_idx, row in enumerate([pit_df.columns.tolist()] + pit_df.values.tolist()[:1000], start=1):  # Limit rows
+                for c_idx, value in enumerate(row, start=1):
+                    ws_pit.cell(row=r_idx, column=c_idx, value=value)
+        
+        wb.save(file_path)
+        logger.info(f"Exported comprehensive Excel results with {len(wb.sheetnames)} sheets")
+    
+    def _export_to_excel_pandas(self, file_path: str):
+        """Fallback Excel export using ExportHelpers (Step 10)."""
+        from ..utils.export_helpers import export_multiple_sheets_to_excel
+        
+        # Build frames dictionary
+        frames = {}
+        
+        # Summary
+        frames['Summary'] = pd.DataFrame({
+            'Metric': ['IRR_alpha', 'Satisfaction Rate', 'Alpha Target', 'Scenarios', 
+                      'Mean NPV', 'Std NPV', 'Min NPV', 'Max NPV'],
+            'Value': [
+                f"{self.results['irr_alpha']*100:.2f}%",
+                f"{self.results['satisfaction_rate']*100:.2f}%",
+                f"{self.results['alpha_target']*100:.2f}%",
+                self.results['num_scenarios'],
+                f"${self.results['mean_npv']:,.2f}",
+                f"${self.results['std_npv']:,.2f}",
+                f"${self.results['min_npv']:,.2f}",
+                f"${self.results['max_npv']:,.2f}"
+            ]
+        })
+        
+        # NPV Distribution
+        frames['NPV Distribution'] = pd.DataFrame({
+            'Scenario': range(len(self.results['npv_distribution'])),
+            'NPV': self.results['npv_distribution']
+        })
+        
+        # Mining Schedule
+        if 'best_schedule' in self.results and self.results['best_schedule'] is not None:
+            frames['Mining Schedule'] = self.results['best_schedule']
+        
+        # Pit Results
+        if hasattr(self, 'pit_result') and self.pit_result:
+            frames['Ultimate Pit'] = self.pit_result['ultimate_pit']
+        
+        # Export all sheets at once
+        export_multiple_sheets_to_excel(frames, file_path)
+    
+    def _write_summary_sheet(self, ws):
+        """Write summary information to Excel sheet."""
+        # Header
+        ws['A1'] = 'IRR Analysis - Summary Report'
+        ws['A1'].font = ExcelFont(size=14, bold=True)
+        
+        # Results
+        row = 3
+        results_data = [
+            ('Risk-Adjusted IRR (IRR_α)', f"{self.results['irr_alpha']*100:.2f}%"),
+            ('Confidence Level (α)', f"{self.results['alpha_target']*100:.2f}%"),
+            ('Satisfaction Rate', f"{self.results['satisfaction_rate']*100:.2f}%"),
+            ('', ''),
+            ('Mean NPV', f"${self.results['mean_npv']:,.2f}"),
+            ('Std Dev NPV', f"${self.results['std_npv']:,.2f}"),
+            ('Min NPV', f"${self.results['min_npv']:,.2f}"),
+            ('Max NPV', f"${self.results['max_npv']:,.2f}"),
+            ('', ''),
+            ('Number of Scenarios', str(self.results['num_scenarios'])),
+            ('Iterations', str(self.results['iterations'])),
+        ]
+        
+        for metric, value in results_data:
+            ws[f'A{row}'] = metric
+            ws[f'B{row}'] = value
+            if metric:
+                ws[f'A{row}'].font = ExcelFont(bold=True)
+            row += 1
+    
+    def _calculate_ultimate_pit(self):
+        """Calculate ultimate pit limit using Lerchs-Grossmann algorithm."""
+        if self.block_model is None:
+            QMessageBox.warning(self, "No Block Model", "Please load a block model first.")
+            return
+        
+        try:
+            from ..irr_engine.lerchs_grossmann import LerchsGrossmann, PitShellGenerator, visualize_pit_shells
+            
+            # Prepare block model with standardized names
+            try:
+                prepared_model = self._prepare_block_model()
+            except ValueError as e:
+                QMessageBox.warning(
+                    self,
+                    "Preparation Error",
+                    f"Failed to prepare block model:\n{str(e)}\n\n"
+                    "Please select all required fields before calculating ultimate pit."
+                )
+                return
+            
+            # Update configuration
+            self._update_config_from_ui()
+            
+            # Show progress dialog
+            from PyQt6.QtWidgets import QProgressDialog
+            progress = QProgressDialog("Calculating Ultimate Pit Limit...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(10)
+            
+            # Initialize LG algorithm
+            lg = LerchsGrossmann(
+                block_model=prepared_model,
+                slope_angles=self.config['optimization'].get('slope_angles', {}),
+                economic_params=self.config['economic_parameters']
+            )
+            
+            progress.setValue(30)
+            progress.setLabelText("Running Lerchs-Grossmann algorithm...")
+            
+            # Compute ultimate pit
+            pit_result = lg.compute_ultimate_pit()
+            
+            progress.setValue(60)
+            progress.setLabelText("Generating pit shells...")
+            
+            # Generate nested shells
+            num_shells = self.config['optimization'].get('num_phases', 3)
+            shell_gen = PitShellGenerator(self.block_model, pit_result)
+            shell_result = shell_gen.generate_revenue_shells(num_shells=num_shells)
+            
+            progress.setValue(80)
+            progress.setLabelText("Optimizing shell sequence...")
+            
+            # Optimize sequence
+            optimal_sequence = shell_gen.optimize_shell_sequence(
+                discount_rate=self.config['irr_search'].get('r_high', 0.10)
+            )
+            
+            progress.setValue(100)
+            
+            # Store results
+            self._block_model = shell_result  # Use private backing field (property contract)
+            self.pit_result = {
+                'ultimate_pit': pit_result,
+                'shells': shell_result,
+                'optimal_sequence': optimal_sequence,
+                'viz_data': visualize_pit_shells(shell_result)
+            }
+            
+            # Display results
+            pit_blocks = pit_result[pit_result['IN_PIT'] == 1]
+            ore_blocks = pit_blocks[pit_blocks['GRADE'] > 0]
+            
+            result_msg = f"""
+            <b>Ultimate Pit Limit Calculated Successfully!</b><br><br>
+            
+            <b>📊 Pit Statistics:</b><br>
+            • Total blocks in pit: {len(pit_blocks):,}<br>
+            • Ore blocks: {len(ore_blocks):,}<br>
+            • Waste blocks: {len(pit_blocks) - len(ore_blocks):,}<br>
+            • Total tonnage: {pit_blocks['TONNAGE'].sum():,.0f} tonnes<br>
+            • Average grade: {ore_blocks['GRADE'].mean():.2f} g/t<br>
+            • Total pit value: ${pit_blocks['VALUE'].sum():,.2f}<br><br>
+            
+            <b>🎯 Nested Pit Shells:</b><br>
+            • Number of shells: {num_shells}<br>
+            • Optimal mining sequence: {optimal_sequence}<br><br>
+            
+            <b>✨ Next Steps:</b><br>
+            • Click "Visualize Pit in 3D" below<br>
+            • Run IRR Analysis to optimize timing<br>
+            • Export pit design
+            """
+            
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Ultimate Pit Complete")
+            msg_box.setText(result_msg)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            
+            # Add custom "Visualize in 3D" button
+            visualize_btn = msg_box.addButton("Visualize Pit in 3D", QMessageBox.ButtonRole.ActionRole)
+            msg_box.addButton(QMessageBox.StandardButton.Ok)
+            
+            msg_box.exec()
+            
+            # Check if user clicked the visualize button
+            if msg_box.clickedButton() == visualize_btn:
+                self._visualize_pit_in_3d()
+            
+            logger.info("Ultimate pit calculation completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Ultimate pit calculation failed: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Calculation Error",
+                f"Failed to calculate ultimate pit:\n{str(e)}"
+            )
+    
+    def _visualize_pit_in_3d(self):
+        """Emit signal to visualize ultimate pit in main 3D viewer."""
+        if not hasattr(self, 'pit_result') or self.pit_result is None:
+            QMessageBox.warning(
+                self,
+                "No Pit Result",
+                "Please calculate the ultimate pit first before visualizing."
+            )
+            return
+        
+        try:
+            # Emit the pit result for visualization
+            pit_df = self.pit_result['ultimate_pit']
+            self.pit_visualization_requested.emit(pit_df)
+            
+            QMessageBox.information(
+                self,
+                "Pit Visualized",
+                "Ultimate pit has been sent to the 3D viewer!\n\n"
+                "The blocks are colored by:\n"
+                "• IN_PIT status (1 = in pit, 0 = out of pit)\n"
+                "• SHELL_ID (for nested shells)\n\n"
+                "You can switch properties in the Property Panel."
+            )
+            
+            logger.info("Sent ultimate pit to 3D viewer for visualization")
+            
+        except Exception as e:
+            logger.error(f"Failed to visualize pit: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Visualization Error",
+                f"Failed to visualize pit:\n{str(e)}"
+            )
+    
+    def _visualize_schedule(self):
+        """Visualize the mining schedule in 3D with full controls."""
+        if self.results is None or self.results['best_schedule'] is None:
+            QMessageBox.warning(self, "No Results", "No mining schedule available to visualize.")
+            return
+        
+        if self.block_model is None:
+            QMessageBox.warning(self, "No Block Model", "Block model not loaded.")
+            return
+        
+        # Open dedicated results visualization window
+        from .results_viewer_window import ResultsViewerWindow
+        
+        try:
+            viewer_window = ResultsViewerWindow(
+                block_model=self.block_model,
+                schedule=self.results['best_schedule'],
+                parent=self
+            )
+            viewer_window.setModal(False)
+            viewer_window.show()
+            logger.info("Opened 3D results visualization window")
+        except Exception as e:
+            logger.error(f"Failed to open results viewer: {e}", exc_info=True)
+            QMessageBox.critical(self, "Visualization Error", f"Failed to open 3D viewer:\n{str(e)}")
+    
+    def _save_configuration(self):
+        """Save current configuration to file."""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Configuration",
+            "",
+            "YAML Files (*.yaml);;JSON Files (*.json)"
+        )
+        
+        if file_path:
+            self._update_config_from_ui()
+            save_config(self.config, file_path)
+            QMessageBox.information(self, "Saved", f"Configuration saved to:\n{file_path}")
+    
+    def _load_configuration(self):
+        """Load configuration from file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Configuration",
+            "",
+            "YAML Files (*.yaml);;JSON Files (*.json)"
+        )
+        
+        if file_path:
+            try:
+                self.config = load_config(file_path)
+                self._update_ui_from_config()
+                QMessageBox.information(self, "Loaded", f"Configuration loaded from:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Load Error", f"Failed to load configuration:\n{e}")
+    
+    def _update_config_from_ui(self):
+        """Update configuration dictionary from UI values."""
+        self.config['scenario_generation']['num_scenarios'] = self.num_scenarios_spin.value()
+        self.config['scenario_generation']['num_periods'] = self.num_periods_spin.value()
+        self.config['scenario_generation']['price']['initial'] = self.price_init_spin.value()
+        self.config['scenario_generation']['price']['volatility'] = self.price_vol_spin.value()
+        self.config['scenario_generation']['costs']['mining_cost_base'] = self.mining_cost_spin.value()
+        self.config['scenario_generation']['costs']['processing_cost_base'] = self.processing_cost_spin.value()
+        self.config['scenario_generation']['costs']['inflation'] = self.cost_inflation_spin.value()
+        self.config['scenario_generation']['costs']['uncertainty'] = self.cost_uncertainty_spin.value()
+        self.config['scenario_generation']['recovery']['base'] = self.recovery_spin.value()
+        self.config['irr_search']['alpha'] = self.alpha_spin.value()
+        self.config['optimization']['production_capacity'] = self.production_capacity_spin.value()
+        self.config['optimization']['num_periods'] = self.num_periods_spin.value()
+        self.config['irr_search']['parallel'] = self.parallel_check.isChecked()
+        
+        # Mining operations parameters
+        self.config['optimization']['annual_rom'] = self.annual_rom_spin.value()
+        self.config['optimization']['min_bottom_width'] = self.min_bottom_width_spin.value()
+        
+        # Slope angles
+        if 'slope_angles' not in self.config['optimization']:
+            self.config['optimization']['slope_angles'] = {}
+        self.config['optimization']['slope_angles']['ore'] = self.slope_ore_spin.value()
+        self.config['optimization']['slope_angles']['soil'] = self.slope_soil_spin.value()
+        self.config['optimization']['slope_angles']['weathered'] = self.slope_weathered_spin.value()
+        self.config['optimization']['slope_angles']['fresh'] = self.slope_fresh_spin.value()
+        
+        # Phase parameters
+        self.config['optimization']['enable_phases'] = self.enable_phases_check.isChecked()
+        self.config['optimization']['num_phases'] = self.num_phases_spin.value()
+        self.config['optimization']['phase_gap'] = self.phase_gap_spin.value()
+        
+        # Fast optimization settings (CRITICAL for performance!)
+        # These use Lerchs-Grossmann + greedy scheduling instead of slow MILP
+        # ALWAYS force these to True for fast IRR analysis
+        self.config['optimization']['use_lerchs_grossmann'] = True
+        self.config['optimization']['simple_phase_sequencing'] = True
+        
+        # Update economic parameters to match
+        self.config['economic_parameters']['metal_price'] = self.price_init_spin.value()
+        self.config['economic_parameters']['mining_cost'] = self.mining_cost_spin.value()
+        self.config['economic_parameters']['processing_cost'] = self.processing_cost_spin.value()
+        self.config['economic_parameters']['recovery'] = self.recovery_spin.value()
+        self.config['economic_parameters']['selling_cost'] = self.selling_cost_spin.value()
+        
+        # Update by-product configurations
+        self.config['economic_parameters']['by_products'] = self._get_byproduct_configs()
+        
+        logger.info(f"Updated config with {len(self.config['economic_parameters']['by_products'])} by-products")
+    
+    def _update_ui_from_config(self):
+        """Update UI values from configuration dictionary."""
+        self.num_scenarios_spin.setValue(self.config['scenario_generation']['num_scenarios'])
+        self.num_periods_spin.setValue(self.config['scenario_generation']['num_periods'])
+        self.price_init_spin.setValue(self.config['scenario_generation']['price']['initial'])
+        self.price_vol_spin.setValue(self.config['scenario_generation']['price']['volatility'])
+        self.mining_cost_spin.setValue(self.config['scenario_generation']['costs']['mining_cost_base'])
+        self.processing_cost_spin.setValue(self.config['scenario_generation']['costs']['processing_cost_base'])
+        self.recovery_spin.setValue(self.config['scenario_generation']['recovery']['base'])
+        self.alpha_spin.setValue(self.config['irr_search']['alpha'])
+        self.production_capacity_spin.setValue(self.config['optimization']['production_capacity'])
+        self.parallel_check.setChecked(self.config['irr_search']['parallel'])
+
+    # =========================================================
+    # PROJECT SAVE/RESTORE
+    # =========================================================
+    def get_panel_settings(self) -> Optional[Dict[str, Any]]:
+        """Get panel settings for project save.
+        
+        IRR Panel has its own configuration save system (_save_configuration),
+        but we also integrate with the generic panel settings system.
+        """
+        try:
+            # Update config from UI
+            self._update_config_from_ui()
+            
+            # Return the full config dictionary for saving
+            return {
+                'config': self.config,
+                'grade_field': self.grade_combo.currentText() if hasattr(self, 'grade_combo') else None,
+                'density_field': self.density_combo.currentText() if hasattr(self, 'density_combo') else None,
+            }
+            
+        except Exception as e:
+            logger.warning(f"Could not save IRR panel settings: {e}")
+            return None
+
+    def apply_panel_settings(self, settings: Dict[str, Any]) -> None:
+        """Apply panel settings from project load."""
+        if not settings:
+            return
+            
+        try:
+            from .panel_settings_utils import set_safe_widget_value
+            
+            # Restore config
+            if 'config' in settings:
+                self.config = settings['config']
+                self._update_ui_from_config()
+            
+            # Restore field selections
+            set_safe_widget_value(self, 'grade_combo', settings.get('grade_field'))
+            set_safe_widget_value(self, 'density_combo', settings.get('density_field'))
+                
+            logger.info("Restored IRR panel settings from project")
+            
+        except Exception as e:
+            logger.warning(f"Could not restore IRR panel settings: {e}")
+

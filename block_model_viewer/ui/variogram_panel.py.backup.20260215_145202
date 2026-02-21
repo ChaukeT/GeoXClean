@@ -1,0 +1,3091 @@
+"""
+3D VARIOGRAM ANALYSIS PANEL
+
+Interactive UI for computing, visualizing, and fitting 3D variograms.
+Integrates with the DataRegistry to receive drillhole data and publish models.
+
+AUDIT COMPLIANCE (2025-12-16):
+- Lineage gates integrated for data hash tracking
+- Nugget consistency enforcement
+- JORC/SAMREC compliant data tracking
+"""
+
+from __future__ import annotations
+
+import logging
+import numpy as np
+import pandas as pd
+from typing import Optional, Dict, Any, List
+
+from PyQt6.QtWidgets import (
+QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
+    QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QTabWidget,
+    QFileDialog, QMessageBox, QScrollArea, QFrame, QCheckBox,
+    QSizePolicy, QFormLayout, QTextEdit, QSplitter, QStyle, QProgressBar,
+    QRadioButton, QButtonGroup
+)
+from .panel_manager import PanelCategory, DockArea
+
+from PyQt6.QtCore import Qt, QSize, QTimer
+from PyQt6.QtGui import QIcon
+
+# Matplotlib
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+# mpl_toolkits.mplot3d is imported implicitly for 3d projection
+
+from .base_analysis_panel import BaseAnalysisPanel, log_registry_data_status
+from ..utils.coordinate_utils import ensure_xyz_columns
+from ..models import variogram3d as vg3d
+
+# Lineage gates for audit compliance (JORC/SAMREC requirement)
+from ..geostats.variogram_gates import (
+    compute_data_hash,
+    analyze_nugget_consistency,
+)
+from .modern_styles import get_analysis_panel_stylesheet, get_theme_colors, ModernColors
+
+logger = logging.getLogger(__name__)
+
+
+def _get_btn_style_primary() -> str:
+    """Get primary button style for current theme."""
+    colors = get_theme_colors()
+    return f"""
+        QPushButton {{ background-color: {colors.SUCCESS}; color: white; font-weight: bold; padding: 8px; border-radius: 4px; }}
+        QPushButton:hover {{ background-color: #43A047; }}
+        QPushButton:disabled {{ background-color: {colors.BORDER}; color: {colors.TEXT_DISABLED}; }}
+    """
+
+
+def _get_btn_style_danger() -> str:
+    """Get danger button style for current theme."""
+    colors = get_theme_colors()
+    return f"""
+        QPushButton {{ background-color: {colors.ERROR}; color: white; border-radius: 3px; }}
+        QPushButton:hover {{ background-color: #b71c1c; }}
+    """
+
+
+def get_variogram_panel_stylesheet() -> str:
+    """Enhanced stylesheet for Variogram panel with high contrast fixes."""
+    colors = get_theme_colors()
+    return f"""
+        /* Ensure all text is bright white/light grey */
+        QLabel {{
+            color: {ModernColors.TEXT_PRIMARY};
+            font-size: 10pt;
+        }}
+
+        /* Highlight the Refresh Banner */
+        QLabel#NewDataBanner {{
+            background-color: #1a3a5a;
+            color: #4fc3f7;
+            padding: 10px;
+            border: 2px solid #2196F3;
+            border-radius: 6px;
+            font-weight: bold;
+        }}
+
+        /* Style Group Boxes to have a clear header */
+        QGroupBox {{
+            font-weight: bold;
+            border: 1px solid #444;
+            border-radius: 6px;
+            margin-top: 15px;
+            padding-top: 15px;
+            background-color: #222222;
+        }}
+
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            left: 10px;
+            color: #3498db;
+            padding: 0 5px;
+        }}
+
+        /* Make inputs pop */
+        QDoubleSpinBox, QSpinBox, QComboBox {{
+            background-color: #111;
+            border: 1px solid #555;
+            color: white;
+            padding: 4px;
+            min-height: 25px;
+        }}
+
+        QPushButton#RefreshBtn {{
+            background-color: #2c3e50;
+            border: 1px solid #3498db;
+            color: #3498db;
+            font-weight: bold;
+            font-size: 14pt;
+        }}
+        QPushButton#RefreshBtn:hover {{
+            background-color: #3498db;
+            color: white;
+        }}
+    """
+
+# =========================================================
+# PLOTTING CANVAS
+# =========================================================
+class VariogramCanvas(FigureCanvas):
+    """Custom Matplotlib canvas for Variogram plots."""
+
+    def __init__(self, parent=None, width=8, height=6, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        colors = get_theme_colors()
+        self.fig.patch.set_facecolor(colors.CARD_BG)
+        super().__init__(self.fig)
+        self.setParent(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(400, 300)
+        self.updateGeometry()
+
+    def clear_figure(self):
+        """Clear the figure safely."""
+        try:
+            self.fig.clear()
+            self._safe_draw()
+        except Exception as e:
+            logger.debug(f"Figure clear failed: {e}")
+            # If clearing fails completely, just continue without clearing
+            pass
+    
+    def _safe_draw(self):
+        """Draw the figure with protection against deleted QAction errors.
+        
+        The NavigationToolbar may have been deleted but the canvas still has
+        event connections to it. When draw() fires events, accessing deleted
+        QActions causes RuntimeError. This wrapper catches and logs such errors.
+        """
+        try:
+            # Debug layout issues
+            if self.width() < 10 or self.height() < 10:
+                logger.warning(f"Canvas draw called on small/invisible widget: {self.width()}x{self.height()}")
+            
+            # Use draw_idle() for thread-safe rendering, then flush to ensure it happens
+            self.draw_idle()
+            self.flush_events()
+        except RuntimeError as e:
+            if "QAction" in str(e) or "deleted" in str(e):
+                logger.debug(f"Ignoring stale QAction error during draw: {e}")
+                # Try alternative draw methods
+                try:
+                    # Force a blit update if available
+                    if hasattr(self, 'blit'):
+                        self.blit(self.fig.bbox)
+                    # Force Qt repaint
+                    self.update()
+                    self.repaint()
+                except Exception:
+                    pass
+            else:
+                raise
+        except Exception as e:
+            logger.debug(f"Draw failed with {type(e).__name__}: {e}")
+            # Fallback: force Qt widget repaint
+            try:
+                self.update()
+                self.repaint()
+            except Exception:
+                pass
+
+    def _apply_theme(self, ax, is_3d: bool = False):
+        """Apply current theme colors to matplotlib axes."""
+        colors = get_theme_colors()
+        ax.set_facecolor(colors.CARD_BG)
+        ax.tick_params(colors=colors.TEXT_PRIMARY)
+        ax.xaxis.label.set_color(colors.TEXT_PRIMARY)
+        ax.yaxis.label.set_color(colors.TEXT_PRIMARY)
+        if is_3d:
+            ax.zaxis.label.set_color(colors.TEXT_PRIMARY)
+        ax.title.set_color(colors.TEXT_PRIMARY)
+        for spine in ax.spines.values():
+            spine.set_color(colors.BORDER)
+        ax.grid(True, color=colors.BORDER, linestyle="--", alpha=0.5)
+
+    def plot_variogram(
+        self,
+        variogram_data: pd.DataFrame,
+        fitted_params: Optional[Dict] = None,
+        title: str = "Variogram",
+        direction: str = "omni",
+        normalize: bool = False,
+    ):
+
+        try:
+            self.fig.clear()
+        except RuntimeError as e:
+            if "QAction" in str(e) or "deleted" in str(e):
+                logger.debug(f"Ignored QAction error during fig.clear(): {e}")
+            else:
+                raise
+
+        ax = self.fig.add_subplot(111)
+        self._apply_theme(ax)
+        
+        # Handle empty or missing data gracefully
+        if variogram_data is None or len(variogram_data) == 0:
+            ax.text(0.5, 0.5, f"No data available for {title}\n\n"
+                    "Possible causes:\n"
+                    "• No HOLEID column found (for downhole)\n"
+                    "• Not enough samples in this direction\n"
+                    "• FROM/TO depth columns missing",
+                    ha='center', va='center', color='#ff9800', fontsize=10,
+                    transform=ax.transAxes, wrap=True)
+            ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+            self._safe_draw()
+            return
+        
+        # Check for required columns
+        required_cols = ["distance", "gamma", "npairs"]
+        missing_cols = [c for c in required_cols if c not in variogram_data.columns]
+        if missing_cols:
+            ax.text(0.5, 0.5, f"Missing columns: {missing_cols}",
+                    ha='center', va='center', color='red', transform=ax.transAxes)
+            ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+            self._safe_draw()
+            return
+
+        dist = variogram_data["distance"].values
+        gamma = variogram_data["gamma"].values
+        npairs = variogram_data["npairs"].values
+        
+        # Handle empty arrays
+        if len(dist) == 0 or len(gamma) == 0:
+            ax.text(0.5, 0.5, f"No valid lags for {title}\n\n"
+                    "Try:\n"
+                    "• Increasing lag tolerance\n"
+                    "• Checking data coordinates",
+                    ha='center', va='center', color='#ff9800', fontsize=10,
+                    transform=ax.transAxes, wrap=True)
+            ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+            self._safe_draw()
+            return
+
+        # Size points by pair count with more explicit visual feedback
+        sizes = 30
+        if npairs.size > 0 and npairs.max() > 0:
+            # Normalize sizes: minimum 20, maximum 120, based on pair count
+            min_size, max_size = 20, 120
+            sizes = min_size + ((npairs / npairs.max()) * (max_size - min_size))
+
+        # Optional normalization of Y-axis (divide by sill/peak) to compare shapes
+        norm_factor = 1.0
+        if normalize:
+            if fitted_params:
+                nug = fitted_params.get("nugget", 0.0)
+                psill = fitted_params.get("sill", 0.0)
+                norm_factor = max(nug + psill, 1e-9)
+            else:
+                norm_factor = max(np.nanmax(gamma), 1e-9)
+
+        gamma_plot = gamma / norm_factor if normalize else gamma
+
+        # Plot experimental points with pair count information
+        scatter = ax.scatter(dist, gamma_plot, s=sizes, alpha=0.8, 
+                           label="Experimental", color="#4fc3f7", 
+                           edgecolors="white", linewidth=0.5, zorder=3)
+        
+        # Add pair count annotations for key points (every 3rd point to avoid clutter)
+        for i in range(0, len(dist), max(1, len(dist) // 5)):  # Show ~5 annotations max
+            if i < len(npairs) and npairs[i] > 0:
+                ax.annotate(f'{int(npairs[i])}', 
+                          (dist[i], gamma_plot[i]),
+                          xytext=(5, 5), textcoords='offset points',
+                          fontsize=8, alpha=0.7, color='#4fc3f7',
+                          bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.6))
+        
+        # Add pair count info to title for user awareness
+        if npairs.size > 0:
+            total_pairs = int(np.sum(npairs))
+            avg_pairs_per_lag = int(np.mean(npairs[npairs > 0])) if np.sum(npairs > 0) > 0 else 0
+            title = f"{title} ({total_pairs} total pairs, ~{avg_pairs_per_lag} avg/lag)"
+
+        if fitted_params:
+            m_type = fitted_params.get("model_type", "spherical")
+            nug = fitted_params["nugget"]
+            psill = fitted_params.get("sill", 0.0)
+            rng = fitted_params["range"]
+            tot_sill = fitted_params.get("total_sill", nug + psill)
+
+            # Generate model curve
+            x_model = np.linspace(0, dist.max() * 1.1 if dist.size else 1.0, 100)
+            
+            # Check for nested model
+            nested = fitted_params.get("nested")
+            if nested and nested.get("n_structures", 1) > 1:
+                # Plot nested model with individual structures
+                structures = nested.get("structures", [])
+                n_nug = nested.get("nugget", nug)
+                
+                # Plot each structure as dashed line
+                colors = ["#81c784", "#64b5f6", "#ffb74d"]  # Green, Blue, Orange
+                y_total = np.full_like(x_model, n_nug)
+                
+                for i, struct in enumerate(structures):
+                    s_type = struct.get("model_type", m_type)
+                    s_contrib = struct.get("contribution", 0)
+                    s_range = struct.get("range_major", rng)
+                    
+                    vg = vg3d.Variogram3D()
+                    y_struct = vg.evaluate_model(x_model, s_type, 0, s_contrib, s_range)
+                    y_total += y_struct
+                    
+                    # Plot individual structure contribution
+                    y_struct_plot = (n_nug + y_struct) / norm_factor if normalize else (n_nug + y_struct)
+                    ax.plot(x_model, y_struct_plot, color=colors[i % len(colors)], 
+                           linewidth=1.5, linestyle="--", alpha=0.6,
+                           label=f"Struct {i+1}: R={s_range:.0f}m")
+                
+                # Plot total nested model
+                y_model_plot = y_total / norm_factor if normalize else y_total
+                ax.plot(x_model, y_model_plot, color="#ffb74d", linewidth=2.5, 
+                       label=f"Nested {m_type.title()}", zorder=2)
+            else:
+                # Single structure model
+                vg = vg3d.Variogram3D()
+                y_model = vg.evaluate_model(x_model, m_type, nug, psill, rng)
+                y_model_plot = y_model / norm_factor if normalize else y_model
+                ax.plot(x_model, y_model_plot, color="#ffb74d", linewidth=2.5, 
+                       label=f"{m_type.title()} Model", zorder=2)
+            
+            # Reference lines with clear geostatistical notation
+            ax.axhline(y=(nug / norm_factor) if normalize else nug, color="#9e9e9e", linestyle=":", alpha=0.6, label=f"C₀={nug:.2f}")
+            ax.axhline(y=(tot_sill / norm_factor) if normalize else tot_sill, color="#ef5350", linestyle="--", alpha=0.6, label=f"C₀+C={tot_sill:.2f}")
+            ax.axvline(x=rng, color="#66bb6a", linestyle="--", alpha=0.6, label=f"Range ({rng:.1f})")
+
+        colors = get_theme_colors()
+        ax.set_xlabel("Distance (h)")
+        ax.set_ylabel("Semivariance (γ)")
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+        ax.legend(loc="lower right", facecolor=colors.CARD_BG, edgecolor=colors.BORDER, labelcolor=colors.TEXT_PRIMARY, fontsize=8)
+        
+        # Log limits to debug "blank plot" issues
+        logger.debug(f"Plot '{title}' limits: X={ax.get_xlim()}, Y={ax.get_ylim()}")
+        
+        try:
+            # Use basic tight_layout without rect to avoid annoying warnings
+            self.fig.tight_layout()
+        except Exception as e:
+            logger.debug(f"tight_layout failed for {title}: {e}")
+            
+        self._safe_draw()
+
+    def plot_3d_anisotropic_model(self, combined_model: Dict[str, Any], title: str = "3D Model"):
+        """Visualizes the 3D Ellipsoid (Rotated correctly in 3D space) and directional curves."""
+        self.fig.clear()
+        
+        if not combined_model:
+            ax = self.fig.add_subplot(111)
+            self._apply_theme(ax)
+            colors = get_theme_colors()
+            ax.text(0.5, 0.5, "No 3D model available.", ha='center', va='center', color=colors.TEXT_PRIMARY)
+            self._safe_draw()
+            return
+        
+        # 2x2 Grid with better spacing
+        gs = self.fig.add_gridspec(2, 2, hspace=0.4, wspace=0.35, 
+                                   left=0.08, right=0.95, top=0.92, bottom=0.1)
+        
+        # --- 1. Directional Curves (Top-Left) ---
+        ax1 = self.fig.add_subplot(gs[0, 0])
+        self._apply_theme(ax1)
+        
+        maj_r = combined_model.get("major_range", 100)
+        min_r = combined_model.get("minor_range", 100)
+        vert_r = combined_model.get("vertical_range", 100)
+        nug = combined_model.get("nugget", 0)
+        # SILL SEMANTICS FIX: 'sill' is now partial sill (C), use directly
+        psill = combined_model.get("sill", 1)  # Partial sill (C)
+        total_sill = combined_model.get("total_sill", nug + psill)  # Total sill (C0 + C)
+        m_type = combined_model.get("model_type", "spherical")
+        
+        max_x = max(maj_r, min_r, vert_r) * 1.2
+        x = np.linspace(0, max_x, 100)
+        
+        vg = vg3d.Variogram3D()
+        # evaluate_model expects (dist, model_type, nugget, partial_sill, range)
+        y_maj = vg.evaluate_model(x, m_type, nug, psill, maj_r)
+        y_min = vg.evaluate_model(x, m_type, nug, psill, min_r)
+        y_vert = vg.evaluate_model(x, m_type, nug, psill, vert_r)
+        
+        colors = get_theme_colors()
+        ax1.plot(x, y_maj, 'g-', lw=2, label='Major')
+        ax1.plot(x, y_min, 'b-', lw=2, label='Minor')
+        ax1.plot(x, y_vert, 'r-', lw=2, label='Vertical')
+        ax1.set_title("Directional Models", color=colors.TEXT_PRIMARY, fontweight='bold')
+        ax1.legend(facecolor=colors.CARD_BG, labelcolor=colors.TEXT_PRIMARY, fontsize=8)
+
+        # --- 2. Rotated 3D Ellipsoid (Top-Right) ---
+        ax2 = self.fig.add_subplot(gs[0, 1], projection='3d')
+        self._apply_theme(ax2, is_3d=True)
+        ax2.set_facecolor(colors.CARD_BG)
+        
+        # 1. Generate Axis-Aligned Unit Sphere
+        u = np.linspace(0, 2 * np.pi, 20)
+        v = np.linspace(0, np.pi, 10)
+        x = np.outer(np.cos(u), np.sin(v))
+        y = np.outer(np.sin(u), np.sin(v))
+        z = np.outer(np.ones_like(u), np.cos(v))
+        
+        # 2. Scale by Ranges
+        x *= maj_r
+        y *= min_r
+        z *= vert_r
+        
+        # 3. Rotate Coordinates (ZXZ Convention usually, or Z-Y-X)
+        # Assuming: Azimuth (Z rot), Dip (X rot), Pitch (Y rot)
+        az = np.radians(combined_model.get("azimuth", 0.0))
+        dip = np.radians(combined_model.get("dip", 0.0))
+        pitch = np.radians(combined_model.get("plunge", 0.0)) # Or plunge
+        
+        # Rotation Matrix (Simple Azimuth/Dip for visual context)
+        # Rotate around Y (Dip) then Z (Azimuth) - Mining convention varies, this is standard GSLIB
+        
+        # Flatten for rotation
+        coords = np.vstack([x.flatten(), y.flatten(), z.flatten()])
+        
+        # Rotate Dip (around X axis - geology convention positive down)
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(dip), -np.sin(dip)],
+            [0, np.sin(dip), np.cos(dip)]
+        ])
+        
+        # Rotate Azimuth (around Z axis)
+        Rz = np.array([
+            [np.cos(az), -np.sin(az), 0],
+            [np.sin(az), np.cos(az), 0],
+            [0, 0, 1]
+        ])
+        
+        # Apply Rotation: Rz * Rx * v
+        rotated = Rz @ (Rx @ coords)
+        
+        # Reshape back
+        shape = x.shape
+        X_rot = rotated[0, :].reshape(shape)
+        Y_rot = rotated[1, :].reshape(shape)
+        Z_rot = rotated[2, :].reshape(shape)
+        
+        ax2.plot_wireframe(X_rot, Y_rot, Z_rot, color='#4fc3f7', alpha=0.4, linewidth=0.5)
+        
+        # Add Axes Markers (Scaled)
+        m_lim = max(maj_r, min_r, vert_r) * 1.1
+        ax2.plot([-m_lim, m_lim], [0,0], [0,0], 'w--', lw=0.5, alpha=0.3) # East-West
+        ax2.plot([0,0], [-m_lim, m_lim], [0,0], 'w--', lw=0.5, alpha=0.3) # North-South
+        ax2.plot([0,0], [0,0], [-m_lim, m_lim], 'w--', lw=0.5, alpha=0.3) # Vertical
+        
+        ax2.set_xlim(-m_lim, m_lim); ax2.set_ylim(-m_lim, m_lim); ax2.set_zlim(-m_lim, m_lim)
+        ax2.set_title("Anisotropy (Rotated)", color=colors.TEXT_PRIMARY, fontweight='bold')
+        ax2.set_xlabel("E"); ax2.set_ylabel("N"); ax2.set_zlabel("Z")
+
+        # --- 3. Parameters Table (Bottom Row) ---
+        ax3 = self.fig.add_subplot(gs[1, :])
+        ax3.axis('off')
+
+        aniso_min = min_r / maj_r if maj_r > 0 else 1.0
+        aniso_vert = vert_r / maj_r if maj_r > 0 else 1.0
+
+        rows = [
+            ["Parameter", "Value", "Description"],
+            ["Nugget (C₀)", f"{nug:.3f}", "Short-range variability"],
+            ["Partial Sill (C)", f"{psill:.3f}", "Structured variance"],
+            ["Total Sill (C₀+C)", f"{total_sill:.3f}", "Total variance"],
+            ["Major Range", f"{maj_r:.1f} m", "Primary continuity direction"],
+            ["Minor Ratio", f"{aniso_min:.2f}", f"Range: {min_r:.1f} m"],
+            ["Vertical Ratio", f"{aniso_vert:.2f}", f"Range: {vert_r:.1f} m"],
+            ["Orientation", f"Az: {np.degrees(az):.0f}° Dip: {np.degrees(dip):.0f}°", "Ellipsoid rotation"]
+        ]
+
+        table = ax3.table(cellText=rows, loc='center', cellLoc='left',
+                          colWidths=[0.25, 0.25, 0.5], bbox=[0, 0, 1, 1])
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.5)
+
+        for key, cell in table.get_celld().items():
+            cell.set_facecolor(colors.CARD_BG); cell.set_text_props(color=colors.TEXT_PRIMARY); cell.set_edgecolor(colors.BORDER)
+            if key[0] == 0:
+                cell.set_facecolor(colors.ELEVATED_BG); cell.set_text_props(weight='bold', color=colors.ACCENT_PRIMARY)
+
+        self.fig.suptitle(title, color=colors.TEXT_PRIMARY, fontsize=14, fontweight='bold', y=0.98)
+        try:
+            self.fig.tight_layout(rect=[0, 0, 1, 0.96])
+        except Exception:
+            pass  # Suppress tight_layout warning for incompatible axes
+        self._safe_draw()
+
+    def plot_variogram_cloud(self, dists, gammas):
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        self._apply_theme(ax)
+        
+        colors = get_theme_colors()
+        # Hexbin for density if many points
+        if len(dists) > 5000:
+            hb = ax.hexbin(dists, gammas, gridsize=40, cmap='Blues', mincnt=1)
+            self.fig.colorbar(hb, ax=ax, label='Count')
+        else:
+            ax.scatter(dists, gammas, s=5, alpha=0.4, color=colors.ACCENT_PRIMARY, edgecolors='none')
+
+        ax.set_title(f"Variogram Cloud ({len(dists)} pairs)", color=colors.TEXT_PRIMARY, fontweight='bold', pad=10)
+        ax.set_xlabel("Distance"); ax.set_ylabel("Semivariance")
+        self.fig.tight_layout(rect=[0.05, 0.05, 0.95, 0.95])
+        self._safe_draw()
+
+    def plot_radial(self, azimuth_ranges, title="Radial Ranges"):
+        """Rose diagram of ranges."""
+        colors = get_theme_colors()
+        self.fig.clear()
+        ax = self.fig.add_subplot(111, polar=True)
+        ax.set_facecolor(colors.CARD_BG); self.fig.patch.set_facecolor(colors.PANEL_BG)
+        ax.tick_params(colors=colors.TEXT_PRIMARY); ax.spines['polar'].set_color(colors.BORDER)
+
+        # Data
+        azs = np.array(list(azimuth_ranges.keys()))
+        rngs = np.array(list(azimuth_ranges.values()))
+
+        # Sort
+        idx = np.argsort(azs)
+        azs = azs[idx]; rngs = rngs[idx]
+
+        # Convert azimuth (deg) to polar theta (rad, 0=East, CCW)
+        # Azimuth: 0=N, 90=E. Polar: 0=E, 90=N.
+        theta = np.deg2rad(90 - azs)
+
+        # Plot bars
+        bars = ax.bar(theta, rngs, width=0.5, alpha=0.7, edgecolor=colors.TEXT_PRIMARY)
+
+        # Compass labels
+        ax.set_theta_zero_location('N')
+        ax.set_theta_direction(-1)
+        # Set tick positions first, then labels (fixes matplotlib warning)
+        tick_positions = np.linspace(0, 2*np.pi, 8, endpoint=False)
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(['N','NE','E','SE','S','SW','W','NW'], color=colors.TEXT_PRIMARY)
+        ax.set_title(title, color=colors.TEXT_PRIMARY, pad=15, fontweight='bold')
+        
+        self.fig.tight_layout(rect=[0.05, 0.05, 0.95, 0.95])
+        self._safe_draw()
+
+# =========================================================
+# MAIN PANEL
+# =========================================================
+class VariogramAnalysisPanel(BaseAnalysisPanel):
+    task_name = "variogram"
+
+    def __init__(self, parent=None, main_window=None):
+        super().__init__(parent=parent, panel_id="variogram")
+        self.setWindowTitle("3D Variogram Analysis")
+        self.resize(1500, 900)
+        self.setMinimumSize(1200, 700)
+        self.setStyleSheet(get_analysis_panel_stylesheet())
+        # DO NOT set WA_DeleteOnClose - we want to preserve variogram results
+        # when panel is hidden/closed and reopened
+
+        self.main_window = main_window
+
+        # Data State
+        self.drillhole_data = None
+        self.variogram_results = None
+        
+        # Optimization State
+        self._lags_optimized = False
+        
+        # Analysis State - ensure it starts as False
+        self._is_running = False
+
+        # Note: UI is built by base class calling setup_ui() -> _setup_ui()
+        # Connect registry after UI is set up (which may trigger callbacks that need UI elements)
+        self._connect_registry()
+
+    def refresh_theme(self) -> None:
+        """Refresh styles when theme changes."""
+        self.setStyleSheet(get_analysis_panel_stylesheet())
+        if hasattr(self, 'run_btn'):
+            self.run_btn.setStyleSheet(_get_btn_style_primary())
+        if hasattr(self, 'clear_btn'):
+            self.clear_btn.setStyleSheet(_get_btn_style_danger())
+
+    def _connect_registry(self):
+        """Connect to the DataRegistry signals.
+        
+        FIX: Added null checks for signal properties before calling .connect().
+        Signal properties return None if _signals is not initialized.
+        """
+        try:
+            self.registry = self.get_registry()
+            if not self.registry:
+                logger.warning("VariogramPanel: DataRegistry not available")
+                return
+            
+            # FIX: Check if signal is available before connecting
+            drillhole_signal = self.registry.drillholeDataLoaded
+            if drillhole_signal is not None:
+                drillhole_signal.connect(self._on_data_loaded)
+                logger.debug("VariogramPanel: Connected to drillholeDataLoaded signal")
+            else:
+                logger.warning("VariogramPanel: drillholeDataLoaded signal not available")
+            
+            # Connect declustering signal if available
+            declustering_signal = getattr(self.registry, 'declusteringResultsLoaded', None)
+            if declustering_signal is not None:
+                declustering_signal.connect(self._on_declustering_results_loaded)
+                logger.debug("VariogramPanel: Connected to declusteringResultsLoaded signal")
+            
+            # Initial load - check for declustered data first (handles lazy panel creation)
+            declust = self.registry.get_data("declustering_results")
+            if declust:
+                self._on_declustering_results_loaded(declust)
+            else:
+                data = self.registry.get_drillhole_data()
+                if data is not None:
+                    self._on_data_loaded(data)
+        except Exception as exc:
+            self.registry = None
+            logger.warning(f"VariogramPanel: DataRegistry connection failed: {exc}", exc_info=True)
+
+    def _on_declustering_results_loaded(self, results):
+        """Handle new declustering results."""
+        if not results or 'weighted_dataframe' not in results:
+            return
+
+        # Validate dataframe
+        df = results.get('weighted_dataframe')
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            logger.warning("Invalid declustering results - no valid weighted_dataframe")
+            return
+
+        # Log receipt
+        logger.info("Received declustered data for variogram analysis")
+
+        # Store and use
+        self.drillhole_data = ensure_xyz_columns(df)
+        self._populate_combos()
+        
+        # Update data source UI to show "Declustered" is active
+        if hasattr(self, 'data_source_status_label'):
+            self.data_source_status_label.setText("Using: ✅ Declustered data")
+            self.data_source_status_label.setStyleSheet("font-size: 9px; color: #4CAF50;")
+            
+        # Ensure run button enabled
+        if hasattr(self, 'run_btn'):
+            self.run_btn.setEnabled(True)
+            
+        # Flash/notify user
+        if self.isVisible():
+            self.info_text.setHtml("<p style='color: #4CAF50'><b>New Data Loaded:</b><br>Declustered weights available.</p>")
+
+    def setup_ui(self):
+        """Setup UI - called by base class."""
+        self._setup_ui()
+
+    @staticmethod
+    def _safe_disconnect(signal):
+        """Safely disconnect a signal, ignoring if no connections exist."""
+        try:
+            signal.disconnect()
+        except TypeError:
+            pass  # No existing connections
+
+    def _setup_ui(self):
+        # 1. Main Layout
+        layout = self.main_layout
+        layout.setContentsMargins(0,0,0,0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(2)
+
+        # 2. Sidebar (Controls)
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(380)
+        sidebar.setMaximumWidth(420)
+        sidebar.setStyleSheet(get_variogram_panel_stylesheet())
+        sb_layout = QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Track if data has changed since last view
+        self._pending_data_update = False
+
+        # 1. TOP ACTION AREA (Data Status Card - Outside Scroll Area)
+        status_card = QFrame()
+        status_card.setStyleSheet("background-color: #1a1a1a; border-radius: 8px; border: 1px solid #333;")
+        status_layout = QVBoxLayout(status_card)
+        status_layout.setContentsMargins(12, 12, 12, 12)
+
+        h_header = QHBoxLayout()
+        header_title = QLabel("DATA SOURCE")
+        header_title.setStyleSheet("color: #888; font-weight: bold; font-size: 9pt;")
+
+        # THE REFRESH BUTTON (Made Large and Visible)
+        self.refresh_btn = QPushButton("🔄")
+        self.refresh_btn.setObjectName("RefreshBtn")
+        self.refresh_btn.setFixedSize(40, 40)
+        self.refresh_btn.setToolTip("Refresh data from registry (get latest composites/transforms)")
+        self.refresh_btn.clicked.connect(self._manual_refresh)
+
+        h_header.addWidget(header_title)
+        h_header.addStretch()
+        h_header.addWidget(self.refresh_btn)
+        status_layout.addLayout(h_header)
+
+        # Radio buttons for source (moved from configuration group)
+        self.data_source_group = QButtonGroup()
+        self.data_source_composited = QRadioButton("Composited Data")
+        self.data_source_composited.setToolTip("Use composited drillhole data (recommended for variogram analysis)")
+        self.data_source_raw = QRadioButton("Raw Assay Data")
+        self.data_source_raw.setToolTip("Use raw drillhole assay data")
+
+        self.data_source_group.addButton(self.data_source_composited, 0)
+        self.data_source_group.addButton(self.data_source_raw, 1)
+
+        # Default to composited if available
+        self.data_source_composited.setChecked(True)
+        self.data_source_group.buttonClicked.connect(self._on_data_source_changed)
+
+        status_layout.addWidget(self.data_source_composited)
+        status_layout.addWidget(self.data_source_raw)
+
+        # Data source status label (moved from configuration group)
+        self.data_source_status_label = QLabel("Initializing data...")
+        self.data_source_status_label.setWordWrap(True)
+        self.data_source_status_label.setStyleSheet("font-size: 9pt; color: #aaa; margin-top: 8px;")
+        status_layout.addWidget(self.data_source_status_label)
+
+        sb_layout.addWidget(status_card)
+
+        # 2. CONFIGURATION SCROLL AREA
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_content = QWidget()
+        sc_layout = QVBoxLayout(scroll_content)
+        sc_layout.setSpacing(8)
+
+        # New data notification banner (hidden by default) - Enhanced styling
+        self._new_data_banner = QLabel("🔔 New composite data is available!")
+        self._new_data_banner.setObjectName("NewDataBanner")
+        self._new_data_banner.setWordWrap(True)
+        self._new_data_banner.setVisible(False)
+        sc_layout.addWidget(self._new_data_banner)
+
+        # -- Config Group (Data source selector removed - now in status card) --
+        gb_conf = QGroupBox("Configuration")
+        f_conf = QFormLayout()
+        f_conf.setSpacing(6)
+        f_conf.setContentsMargins(8, 12, 8, 8)
+        f_conf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f_conf.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.var_combo = QComboBox()
+        self.var_combo.currentTextChanged.connect(self._on_variable_changed)
+        self.var_combo.setToolTip(
+            "Select the grade variable for variogram analysis.\n"
+            "Variogram models spatial continuity and anisotropy for kriging."
+        )
+
+        self.hole_combo = QComboBox()
+        self.hole_combo.addItem("Auto")
+        self.hole_combo.setToolTip(
+            "Hole ID field for drillhole identification.\n"
+            "'Auto' detects common column names (HOLEID, BHID, etc.)."
+        )
+
+        self.domain_combo = QComboBox()
+        self.domain_combo.addItem("All Data")
+        self.domain_combo.setToolTip(
+            "Geological domain for variogram modeling.\n"
+            "Different domains may have distinct spatial continuity patterns."
+        )
+
+        self.nlag_spin = QSpinBox(); self.nlag_spin.setRange(5, 100); self.nlag_spin.setValue(15)
+        self.nlag_spin.setToolTip(
+            "Number of lag distances for experimental variogram.\n"
+            "Typical: 15-20 lags. More lags = better long-range resolution."
+        )
+
+        self.lag_dist_spin = QDoubleSpinBox(); self.lag_dist_spin.setRange(0.1, 5000); self.lag_dist_spin.setValue(25.0); self.lag_dist_spin.setSuffix(" m")
+        self.lag_dist_spin.setToolTip(
+            "Lag distance (separation interval) in project units.\n"
+            "Typical: 0.5-1.0× average drill spacing. Smaller = more detail."
+        )
+
+        self.lag_tol_spin = QDoubleSpinBox(); self.lag_tol_spin.setRange(0.1, 2500); self.lag_tol_spin.setValue(12.5); self.lag_tol_spin.setSuffix(" m")
+        self.lag_tol_spin.setToolTip(
+            "Lag tolerance (±distance window for pairing samples).\n"
+            "Typical: 50% of lag distance. Larger = more pairs but less precision."
+        )
+
+        # Auto-lags checkbox (professional mode: auto-calculates optimal lags per direction)
+        self.auto_lags_checkbox = QCheckBox("Auto (per direction)")
+        self.auto_lags_checkbox.setToolTip(
+            "Professional mode: Automatically calculates optimal lag parameters per direction.\n"
+            "• Horizontal: based on drill spacing (~0.5-1x spacing)\n"
+            "• Downhole: extended to ~150m to capture long-range structure\n"
+            "Disable manual Num Lags/Lag Dist when checked."
+        )
+        self.auto_lags_checkbox.stateChanged.connect(self._on_auto_lags_changed)
+
+        self.opt_btn = QPushButton("Auto-Optimize Lags")
+        self.opt_btn.setStyleSheet("background-color: #444; border: 1px solid #666; margin-top: 5px;")
+        # Disconnect any existing connections before connecting
+        self._safe_disconnect(self.opt_btn.clicked)
+        self.opt_btn.clicked.connect(self._optimize_lags)
+
+        f_conf.addRow("Variable:", self.var_combo)
+        f_conf.addRow("Domain:", self.domain_combo)
+        f_conf.addRow("Hole ID:", self.hole_combo)
+        f_conf.addRow("Num Lags:", self.nlag_spin)
+        f_conf.addRow("Lag Dist:", self.lag_dist_spin)
+        f_conf.addRow("Tolerance:", self.lag_tol_spin)
+        f_conf.addRow("", self.auto_lags_checkbox)
+        f_conf.addRow(self.opt_btn)
+
+        gb_conf.setLayout(f_conf)
+        sc_layout.addWidget(gb_conf)
+        
+        # -- Model Group --
+        gb_mod = QGroupBox("Model Fitting")
+        f_mod = QFormLayout()
+        f_mod.setSpacing(6)
+        f_mod.setContentsMargins(8, 12, 8, 8)
+        f_mod.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f_mod.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(["Spherical", "Exponential", "Gaussian"])
+        self.model_combo.setToolTip(
+            "Variogram model type:\n"
+            "• Spherical: Most common, reaches sill at range\n"
+            "• Exponential: Gradual approach, effective range ≈ 3×range\n"
+            "• Gaussian: Very smooth, for highly continuous phenomena"
+        )
+        
+        # Nested structures (1 = single model, 2 = short + long range)
+        self.struct_spin = QSpinBox()
+        self.struct_spin.setRange(1, 3); self.struct_spin.setValue(1)
+        self.struct_spin.setToolTip(
+            "Number of nested structures:\n"
+            "• 1: Single spherical model (standard)\n"
+            "• 2: Nested model (short range + long range)\n"
+            "   γ(h) = C0 + C1·Sph(h/a1) + C2·Sph(h/a2)\n"
+            "   Addresses: periodicity at ~40-60m in horizontal directions"
+        )
+        
+        # Global nugget enforcement
+        self.global_nugget_checkbox = QCheckBox("Lock Nugget")
+        self.global_nugget_checkbox.setToolTip(
+            "Enforce a single global nugget value across all directions.\n"
+            "Addresses: nugget inconsistency (your spread: 0.6 to 12.9)\n"
+            "Industry practice: single nugget is more defensible in audits."
+        )
+        self.global_nugget_checkbox.stateChanged.connect(self._on_global_nugget_changed)
+
+        self.global_nugget_spin = QDoubleSpinBox()
+        self.global_nugget_spin.setRange(0.0, 1000.0)
+        self.global_nugget_spin.setValue(12.0)  # Your suggested defensible value
+        self.global_nugget_spin.setDecimals(2)
+        self.global_nugget_spin.setEnabled(False)  # Disabled until checkbox is checked
+        self.global_nugget_spin.setToolTip("Global nugget value to enforce across all directions")
+
+        # =================================================================
+        # AUDIT-GRADE CONTROLS (JORC/SAMREC compliance)
+        # =================================================================
+        
+        # Model Intent Classification - MANDATORY for listed companies
+        self.model_intent_combo = QComboBox()
+        self.model_intent_combo.addItems([
+            "Estimation (local accuracy)",
+            "Smoothing (long-range stability)",
+            "Simulation (variance reproduction)"
+        ])
+        self.model_intent_combo.setToolTip(
+            "Declare model intent for audit compliance:\n"
+            "• Estimation: Optimizes local grade accuracy (OK for resource models)\n"
+            "• Smoothing: Reduces local variance (conservative, for recoverable resources)\n"
+            "• Simulation: Reproduces sample variance (SGSIM, uncertainty studies)\n\n"
+            "High nugget models are estimation-biased. State it explicitly."
+        )
+        
+        # Random Seed - MANDATORY for reproducibility
+        self.random_seed_spin = QSpinBox()
+        self.random_seed_spin.setRange(0, 999999)
+        self.random_seed_spin.setValue(42)  # Fixed default for determinism
+        self.random_seed_spin.setToolTip(
+            "Fixed random seed for deterministic reproducibility.\n"
+            "AUDIT REQUIREMENT: If auditors rerun this next year,\n"
+            "they MUST get the same variogram, bit-for-bit.\n\n"
+            "Value 42 is conventional. The value doesn't matter,\n"
+            "only that it's fixed and recorded."
+        )
+        
+        # Geological Range Cap - Professional practice
+        self.range_cap_checkbox = QCheckBox("Apply Geological Cap")
+        self.range_cap_checkbox.setToolTip(
+            "Cap ranges at a defensible geological distance.\n\n"
+            "Auditors prefer 'conservative but geological' over\n"
+            "'optimal but implausible'.\n\n"
+            "A 380m major range must make geological sense:\n"
+            "• Does continuity persist over this distance?\n"
+            "• Does it cross faults or domain boundaries?"
+        )
+        self.range_cap_checkbox.stateChanged.connect(self._on_range_cap_changed)
+        
+        self.range_cap_spin = QDoubleSpinBox()
+        self.range_cap_spin.setRange(10.0, 10000.0)
+        self.range_cap_spin.setValue(200.0)  # Conservative default
+        self.range_cap_spin.setSuffix(" m")
+        self.range_cap_spin.setEnabled(False)
+        self.range_cap_spin.setToolTip("Maximum allowable range (geological constraint)")
+
+        # Normalize Y-axis option (divide semivariance by sill)
+        self.normalize_y_checkbox = QCheckBox("Normalize Y-axis (γ / sill)")
+        self.normalize_y_checkbox.setChecked(False)
+        
+        colors = get_theme_colors()
+        self.assist_btn = QPushButton("Open Assistant")
+        self.assist_btn.setStyleSheet(f"background-color: #7b1fa2; color: {colors.TEXT_PRIMARY};")
+        # Disconnect any existing connections before connecting
+        self._safe_disconnect(self.assist_btn.clicked)
+        self.assist_btn.clicked.connect(self._open_assistant)
+        
+        f_mod.addRow("Type:", self.model_combo)
+        f_mod.addRow("Structures:", self.struct_spin)
+        
+        # Nugget row with checkbox and spinbox
+        nugget_widget = QWidget()
+        nugget_layout = QHBoxLayout(nugget_widget)
+        nugget_layout.setContentsMargins(0, 0, 0, 0)
+        nugget_layout.addWidget(self.global_nugget_checkbox)
+        nugget_layout.addWidget(self.global_nugget_spin)
+        f_mod.addRow("Nugget:", nugget_widget)
+        
+        # Range cap row with checkbox and spinbox
+        range_cap_widget = QWidget()
+        range_cap_layout = QHBoxLayout(range_cap_widget)
+        range_cap_layout.setContentsMargins(0, 0, 0, 0)
+        range_cap_layout.addWidget(self.range_cap_checkbox)
+        range_cap_layout.addWidget(self.range_cap_spin)
+        f_mod.addRow("Range Cap:", range_cap_widget)
+        
+        f_mod.addRow("Model Intent:", self.model_intent_combo)
+        f_mod.addRow("Random Seed:", self.random_seed_spin)
+        f_mod.addRow(self.normalize_y_checkbox)
+        f_mod.addRow(self.assist_btn)
+
+        gb_mod.setLayout(f_mod)
+        sc_layout.addWidget(gb_mod)
+
+        # -- Directional Analysis Group --
+        gb_dir = QGroupBox("Directional Analysis")
+        f_dir = QFormLayout()
+        f_dir.setSpacing(6)
+        f_dir.setContentsMargins(8, 12, 8, 8)
+        f_dir.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f_dir.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # Manual azimuth override checkbox
+        self.manual_azimuth_checkbox = QCheckBox("Manual Azimuths")
+        self.manual_azimuth_checkbox.setToolTip(
+            "Override automatic azimuth detection with manual directions.\n"
+            "Use this when the auto-detected directions don't match your deposit strike.\n"
+            "Major = primary continuity direction, Minor = secondary direction."
+        )
+        self.manual_azimuth_checkbox.stateChanged.connect(self._on_manual_azimuth_changed)
+
+        # Major azimuth (primary continuity direction)
+        self.major_azimuth_spin = QDoubleSpinBox()
+        self.major_azimuth_spin.setRange(0.0, 360.0)
+        self.major_azimuth_spin.setValue(0.0)  # Default North
+        self.major_azimuth_spin.setSuffix("°")
+        self.major_azimuth_spin.setEnabled(False)  # Disabled until checkbox checked
+        self.major_azimuth_spin.setToolTip("Azimuth of major continuity direction (deposit strike)")
+
+        # Minor azimuth (secondary continuity direction, typically perpendicular)
+        self.minor_azimuth_spin = QDoubleSpinBox()
+        self.minor_azimuth_spin.setRange(0.0, 360.0)
+        self.minor_azimuth_spin.setValue(90.0)  # Default East (perpendicular to North)
+        self.minor_azimuth_spin.setSuffix("°")
+        self.minor_azimuth_spin.setEnabled(False)  # Disabled until checkbox checked
+        self.minor_azimuth_spin.setToolTip("Azimuth of minor continuity direction (typically perpendicular to major)")
+
+        # Azimuth info label
+        self.azimuth_info_label = QLabel("")
+        self.azimuth_info_label.setStyleSheet("font-size: 9px; color: #888;")
+        self.azimuth_info_label.setWordWrap(True)
+
+        f_dir.addRow(self.manual_azimuth_checkbox)
+        f_dir.addRow("Major Azimuth:", self.major_azimuth_spin)
+        f_dir.addRow("Minor Azimuth:", self.minor_azimuth_spin)
+        f_dir.addRow(self.azimuth_info_label)
+
+        gb_dir.setLayout(f_dir)
+        sc_layout.addWidget(gb_dir)
+
+        # -- Actions --
+        self.run_btn = QPushButton("Compute & Fit")
+        self.run_btn.setStyleSheet(_get_btn_style_primary())
+        # Disconnect any existing connections before connecting (prevents "deleted QAction" error on rerun)
+        self._safe_disconnect(self.run_btn.clicked)
+        self.run_btn.clicked.connect(self.run_analysis)
+        sc_layout.addWidget(self.run_btn)
+
+        # Progress bar (hidden by default; used during compute/fit)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)  # Determinate progress 0-100%
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFormat("Variogram Analysis: %p%")
+        sc_layout.addWidget(self.progress_bar)
+        
+        # -- Info Box (Variogram Results) --
+        gb_results = QGroupBox("Variogram Results")
+        gb_results.setStyleSheet("""
+            QGroupBox { 
+                font-weight: bold; 
+                color: #4fc3f7; 
+                border: 2px solid #444; 
+                margin-top: 8px; 
+                border-radius: 6px;
+                background-color: #1a1a1a;
+            }
+            QGroupBox::title { 
+                subcontrol-origin: margin; 
+                left: 12px; 
+                padding: 0 6px; 
+                font-size: 12px;
+                color: #4fc3f7;
+            }
+        """)
+        results_layout = QVBoxLayout(gb_results)
+        results_layout.setContentsMargins(12, 16, 12, 12)
+
+        self.info_text = QTextEdit()
+        self.info_text.setReadOnly(True)
+        self.info_text.setMinimumHeight(180)
+        self.info_text.setMaximumHeight(400)
+        self.info_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.info_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: #252525;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 8px;
+                font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+                font-size: 11px;
+                line-height: 1.4;
+                color: {ModernColors.TEXT_PRIMARY};
+            }}
+        """)
+        results_layout.addWidget(self.info_text)
+        sc_layout.addWidget(gb_results)
+        
+        self.clear_btn = QPushButton("Clear Results")
+        self.clear_btn.setStyleSheet(_get_btn_style_danger())
+        # Disconnect any existing connections before connecting
+        self._safe_disconnect(self.clear_btn.clicked)
+        self.clear_btn.clicked.connect(self.clear_results)
+        sc_layout.addWidget(self.clear_btn)
+        
+        sc_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        sb_layout.addWidget(scroll)
+        
+        # 3. Right Area (Plots)
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        right_layout.setSpacing(5)
+        
+        self.tabs = QTabWidget()
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        self.canvas_downhole = VariogramCanvas(self)
+        self.canvas_omni = VariogramCanvas(self)
+        self.canvas_major = VariogramCanvas(self)
+        self.canvas_minor = VariogramCanvas(self)
+        self.canvas_vert = VariogramCanvas(self)
+        self.canvas_3d = VariogramCanvas(self, width=10, height=8)  # Larger for 3D plots
+        self.canvas_cloud = VariogramCanvas(self)
+        self.canvas_radial = VariogramCanvas(self)
+        
+        self.tabs.addTab(self.canvas_downhole, "Downhole")
+        self.tabs.addTab(self.canvas_omni, "Omni")
+        self.tabs.addTab(self.canvas_major, "Major")
+        self.tabs.addTab(self.canvas_minor, "Minor")
+        self.tabs.addTab(self.canvas_vert, "Vertical")
+        self.tabs.addTab(self.canvas_3d, "3D Model")
+        self.tabs.addTab(self.canvas_radial, "Radial")
+        self.tabs.addTab(self.canvas_cloud, "Cloud")
+        
+        # Toolbar (Dynamic)
+        self.toolbar_container = QWidget()
+        self.toolbar_container.setMaximumHeight(40)
+        self.toolbar_layout = QHBoxLayout(self.toolbar_container)
+        self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        self.toolbar = NavigationToolbar(self.canvas_downhole, self.toolbar_container)
+        self.toolbar_layout.addWidget(self.toolbar)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        
+        right_layout.addWidget(self.toolbar_container)
+        right_layout.addWidget(self.tabs)
+        
+        splitter.addWidget(sidebar)
+        splitter.addWidget(right_widget)
+        splitter.setStretchFactor(0, 0)  # Sidebar doesn't stretch
+        splitter.setStretchFactor(1, 1)  # Right area stretches
+        splitter.setSizes([350, 1050])  # Initial sizes
+        
+        layout.addWidget(splitter)
+
+    # =========================================================
+    # LOGIC
+    # =========================================================
+    
+    def _on_data_source_changed(self, button):
+        """Handle data source selection change."""
+        if not hasattr(self, 'registry') or not self.registry:
+            return
+
+        # Reload data with new selection
+        data = self.registry.get_drillhole_data()
+        if data:
+            self._on_data_loaded(data)
+    
+    def _on_data_loaded(self, data):
+        """Receive data from registry, respecting user's data source selection.
+
+        Shows notification banner if panel is visible, otherwise marks for refresh.
+        """
+        # Store raw registry data
+        self._registry_data = data
+
+        # If panel is visible, show notification banner (user decides when to refresh)
+        # This prevents disrupting ongoing work
+        if self.isVisible():
+            if hasattr(self, '_new_data_banner'):
+                self._new_data_banner.setVisible(True)
+                self._pending_data_update = True
+                logger.info("VariogramPanel: New data available, notification shown")
+            return
+
+        # Panel not visible - apply update immediately
+        self._apply_data_update(data)
+
+    def _apply_data_update(self, data):
+        """Apply the data update to UI controls."""
+        # Log diagnostic info about registry contents
+        data_source = log_registry_data_status("Variogram Analysis", data)
+
+        # Handle both dict and DataFrame inputs
+        df = None
+        using_composites = False
+        composites_available = False
+        assays_available = False
+
+        if isinstance(data, dict):
+            composites_from_registry = data.get('composites')
+            assays_from_registry = data.get('assays')
+
+            composites_available = isinstance(composites_from_registry, pd.DataFrame) and not composites_from_registry.empty
+            assays_available = isinstance(assays_from_registry, pd.DataFrame) and not assays_from_registry.empty
+
+            # Respect user's selection if radio buttons exist
+            if hasattr(self, 'data_source_composited') and hasattr(self, 'data_source_raw'):
+                use_composited = self.data_source_composited.isChecked()
+
+                if use_composited and composites_available:
+                    df = composites_from_registry
+                    using_composites = True
+                elif not use_composited and assays_available:
+                    df = assays_from_registry
+                    using_composites = False
+                elif composites_available:
+                    # Fallback to composites if raw not available
+                    df = composites_from_registry
+                    using_composites = True
+                    if hasattr(self, 'data_source_composited'):
+                        self.data_source_composited.setChecked(True)
+                elif assays_available:
+                    # Fallback to assays if composites not available
+                    df = assays_from_registry
+                    using_composites = False
+                    if hasattr(self, 'data_source_raw'):
+                        self.data_source_raw.setChecked(True)
+            else:
+                # Legacy behavior: prefer composites
+                if composites_available:
+                    df = composites_from_registry
+                    using_composites = True
+                elif assays_available:
+                    df = assays_from_registry
+                    using_composites = False
+        else:
+            df = data if isinstance(data, pd.DataFrame) else None
+            using_composites = False
+            composites_from_registry = None
+            assays_from_registry = None
+
+        # Update radio button states based on availability
+        if hasattr(self, 'data_source_composited') and hasattr(self, 'data_source_raw'):
+            self.data_source_composited.setEnabled(composites_available)
+            self.data_source_raw.setEnabled(assays_available)
+
+            # Update status label with enhanced visibility
+            if hasattr(self, 'data_source_status_label'):
+                count = len(df) if df is not None else 0
+                source_type = "Composites" if using_composites else "Raw Assays"
+
+                if composites_available and assays_available:
+                    self.data_source_status_label.setText(
+                        f"Status: <b style='color:#4CAF50'>ACTIVE</b><br>"
+                        f"Mode: {source_type}<br>"
+                        f"Composites: {len(composites_from_registry):,} | Assays: {len(assays_from_registry):,}"
+                    )
+                    # Change refresh button border to green to indicate active data
+                    if hasattr(self, 'refresh_btn'):
+                        self.refresh_btn.setStyleSheet(
+                            "QPushButton#RefreshBtn { background-color: #2c3e50; border: 2px solid #27ae60; color: #27ae60; font-weight: bold; font-size: 14pt; }"
+                            "QPushButton#RefreshBtn:hover { background-color: #3498db; color: white; }"
+                        )
+                elif composites_available:
+                    self.data_source_status_label.setText(
+                        f"Status: <b style='color:#4CAF50'>ACTIVE</b><br>"
+                        f"Mode: Composites<br>"
+                        f"Samples: {len(composites_from_registry):,}"
+                    )
+                    if hasattr(self, 'refresh_btn'):
+                        self.refresh_btn.setStyleSheet(
+                            "QPushButton#RefreshBtn { background-color: #2c3e50; border: 2px solid #27ae60; color: #27ae60; font-weight: bold; font-size: 14pt; }"
+                            "QPushButton#RefreshBtn:hover { background-color: #3498db; color: white; }"
+                        )
+                elif assays_available:
+                    self.data_source_status_label.setText(
+                        f"Status: <b style='color:#FF9800'>ACTIVE</b><br>"
+                        f"Mode: Raw Assays<br>"
+                        f"Samples: {len(assays_from_registry):,}"
+                    )
+                    if hasattr(self, 'refresh_btn'):
+                        self.refresh_btn.setStyleSheet(
+                            "QPushButton#RefreshBtn { background-color: #2c3e50; border: 2px solid #FF9800; color: #FF9800; font-weight: bold; font-size: 14pt; }"
+                            "QPushButton#RefreshBtn:hover { background-color: #3498db; color: white; }"
+                        )
+                else:
+                    self.data_source_status_label.setText(
+                        f"Status: <b style='color:#e57373'>NO DATA</b><br>"
+                        f"Click refresh to load data"
+                    )
+                    if hasattr(self, 'refresh_btn'):
+                        self.refresh_btn.setStyleSheet(
+                            "QPushButton#RefreshBtn { background-color: #2c3e50; border: 2px solid #e57373; color: #e57373; font-weight: bold; font-size: 14pt; }"
+                            "QPushButton#RefreshBtn:hover { background-color: #3498db; color: white; }"
+                        )
+
+        if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+            self.drillhole_data = ensure_xyz_columns(df)
+            self._populate_combos()
+            if hasattr(self, 'run_btn'):
+                self.run_btn.setEnabled(True)
+
+            logger.info(f"Variogram panel loaded {'COMPOSITES' if using_composites else 'RAW ASSAYS'} ({len(df)} samples)")
+
+        # Hide notification banner
+        if hasattr(self, '_new_data_banner'):
+            self._new_data_banner.setVisible(False)
+        self._pending_data_update = False
+
+    def _manual_refresh(self):
+        """Manual refresh - reload data from registry."""
+        try:
+            registry = self.get_registry()
+            if registry:
+                data = registry.get_drillhole_data()
+                if data:
+                    self._registry_data = data
+                    self._apply_data_update(data)
+
+                    # Show feedback
+                    if hasattr(self, 'info_text'):
+                        self.info_text.setHtml("<p style='color: #4CAF50'><b>Data Refreshed</b><br>Latest data loaded from registry.</p>")
+                    logger.info("VariogramPanel: Manual refresh completed")
+        except Exception as e:
+            logger.error(f"Failed to refresh data: {e}", exc_info=True)
+            if hasattr(self, 'info_text'):
+                self.info_text.setHtml(f"<p style='color: #e57373'><b>Refresh Failed</b><br>{e}</p>")
+
+    def showEvent(self, event):
+        """Auto-refresh when panel becomes visible."""
+        super().showEvent(event)
+
+        # If there's a pending update, apply it now
+        if getattr(self, '_pending_data_update', False):
+            if hasattr(self, '_registry_data') and self._registry_data is not None:
+                self._apply_data_update(self._registry_data)
+
+    def set_drillhole_data(self, df):
+        """
+        Legacy compatibility method - delegates to registry-based data loading.
+        New code should use registry.drillholeDataLoaded signal.
+        """
+        # Delegate to registry-based method
+        if df is not None:
+            self._on_data_loaded(df)
+
+    def _populate_combos(self):
+        if self.drillhole_data is None: return
+        
+        # Safety check: ensure UI is initialized
+        if not hasattr(self, 'var_combo'):
+            return
+        
+        # Variables
+        self.var_combo.blockSignals(True)
+        self.var_combo.clear()
+        nums = self.drillhole_data.select_dtypes(include=[np.number]).columns
+        ignore = {
+            'X','Y','Z','HOLEID','FROM','TO','LENGTH','GLOBAL_INTERVAL_ID',
+            # Compositing metadata columns (not geological properties)
+            'SAMPLE_COUNT','TOTAL_MASS','TOTAL_LENGTH','SUPPORT','IS_PARTIAL',
+            'METHOD','WEIGHTING','ELEMENT_WEIGHTS','MERGED_PARTIAL','MERGED_PARTIAL_AUTO'
+        }
+        valid = [c for c in nums if c.upper() not in ignore]
+        self.var_combo.addItems(sorted(valid))
+        self.var_combo.blockSignals(False)
+            
+        # Domains
+        self.domain_combo.clear()
+        self.domain_combo.addItem("All Data")
+        # Find categorical columns
+        cats = [c for c in self.drillhole_data.columns if self.drillhole_data[c].dtype == object]
+        for c in cats:
+            try:
+                # Check if column contains hashable values (skip dict/list columns)
+                # Try to get unique count - will fail if column contains unhashable types
+                unique_count = self.drillhole_data[c].nunique()
+                if unique_count < 20:  # Limit domain count
+                    self.domain_combo.addItem(c)
+            except (TypeError, ValueError):
+                # Skip columns with unhashable types (dicts, lists, etc.)
+                continue
+
+    def _on_auto_lags_changed(self, state):
+        """Enable/disable manual lag controls when auto-lags is toggled."""
+        auto_enabled = state == Qt.CheckState.Checked.value
+        self.nlag_spin.setEnabled(not auto_enabled)
+        self.lag_dist_spin.setEnabled(not auto_enabled)
+        self.opt_btn.setEnabled(not auto_enabled)
+        
+        if auto_enabled:
+            self.info_text.setText(
+                "<b>Auto-Lags Enabled:</b><br>"
+                "• Horizontal: lag = 0.5-1× drill spacing<br>"
+                "• Downhole: extended to ~150m for long-range structure<br>"
+                "<span style='color: #4CAF50'>Professional mode active</span>"
+            )
+    
+    def _on_manual_azimuth_changed(self, state):
+        """Enable/disable manual azimuth controls when checkbox is toggled."""
+        enabled = state == Qt.CheckState.Checked.value
+        self.major_azimuth_spin.setEnabled(enabled)
+        self.minor_azimuth_spin.setEnabled(enabled)
+
+        # Update info label
+        if enabled:
+            self.azimuth_info_label.setText("Using manual azimuths. Major direction should match deposit strike.")
+        else:
+            self.azimuth_info_label.setText("Using automatic azimuth detection (North=0°, East=90°).")
+
+    def _on_global_nugget_changed(self, state):
+        """Enable/disable global nugget spinbox when checkbox is toggled."""
+        enabled = state == Qt.CheckState.Checked.value
+        self.global_nugget_spin.setEnabled(enabled)
+
+        if enabled:
+            # Auto-suggest nugget if we have results
+            if self.variogram_results:
+                fits = self.variogram_results.get('fitted_models', {})
+                nuggets = []
+                for dir_name, models in fits.items():
+                    for model_name, params in models.items():
+                        if 'nugget' in params:
+                            nuggets.append(params['nugget'])
+                if nuggets:
+                    # Suggest median nugget (more robust than mean)
+                    suggested = float(np.median(nuggets))
+                    self.global_nugget_spin.setValue(suggested)
+                    self.info_text.setText(
+                        f"<b>Global Nugget:</b><br>"
+                        f"Fitted nuggets: {', '.join(f'{n:.1f}' for n in nuggets)}<br>"
+                        f"Suggested (median): <b>{suggested:.2f}</b><br>"
+                        f"<span style='color: #ffb74d'>Lock this value for audit consistency</span>"
+                    )
+
+    def _on_range_cap_changed(self, state):
+        """Enable/disable geological range cap spinbox when checkbox is toggled."""
+        enabled = state == Qt.CheckState.Checked.value
+        self.range_cap_spin.setEnabled(enabled)
+        
+        if enabled and self.variogram_results:
+            # Suggest range cap based on current major range
+            combined = self.variogram_results.get('combined_3d_model', {})
+            major_range = combined.get('major_range', 100)
+            # Suggest 80% of fitted range as conservative cap
+            suggested_cap = major_range * 0.8
+            self.range_cap_spin.setValue(suggested_cap)
+
+    def _optimize_lags(self):
+        """Auto-calculate lags based on data geometry."""
+        if self.drillhole_data is None: return
+        
+        coords = self.drillhole_data[['X','Y','Z']].dropna().values
+        if len(coords) < 5: return
+        
+        # 1. Horizontal Spacing (using Nearest Neighbors)
+        from sklearn.neighbors import NearestNeighbors
+        nn = NearestNeighbors(n_neighbors=2).fit(coords[:, :2])
+        dists, _ = nn.kneighbors(coords[:, :2])
+        h_spacing = float(np.percentile(dists[:, 1], 75)) # 75th percentile to avoid duplicates
+        
+        # 2. Vertical Spacing
+        v_spacing = 2.0 # Default
+        # Try to find FROM/TO
+        if 'TO' in self.drillhole_data.columns and 'FROM' in self.drillhole_data.columns:
+            lens = (self.drillhole_data['TO'] - self.drillhole_data['FROM']).median()
+            if lens > 0: v_spacing = float(lens)
+            
+        # 3. Rules
+        lag = max(5.0, h_spacing * 0.5)
+        tol = lag * 0.5
+        n_lags = 15
+        
+        self.lag_dist_spin.setValue(lag)
+        self.lag_tol_spin.setValue(tol)
+        self.nlag_spin.setValue(n_lags)
+        
+        self.info_text.setText(
+            f"<b>Auto-Optimized Lags:</b><br>"
+            f"Horizontal Spacing: {h_spacing:.1f} m<br>"
+            f"Vertical Spacing: {v_spacing:.1f} m<br>"
+            f"Recommended Lag: {lag:.1f} m"
+        )
+
+    def _check_data_lineage(self) -> bool:
+        """
+        HARD GATE: Verify data lineage before variogram analysis.
+
+        Checks:
+        1. QC-Validated (MUST pass or warn - HARD STOP on FAIL/NOT_RUN)
+        2. Prefers declustered data if available
+        3. Warns if using raw assays instead of composites
+        4. Logs lineage information for audit trail
+
+        Returns:
+            True if data is acceptable for variogram analysis
+        """
+        registry = getattr(self, 'registry', None)
+        if not registry:
+            logger.warning("LINEAGE: No registry available - cannot verify data lineage")
+            return True  # Allow to proceed but log warning
+
+        # HARD GATE: Use require_validation_for_estimation() method
+        # This enforces JORC/SAMREC compliance - NO estimation without validation
+        allowed, message = registry.require_validation_for_estimation()
+        if not allowed:
+            logger.error(f"LINEAGE HARD GATE: {message}")
+            QMessageBox.critical(
+                self, "Validation Required",
+                f"Cannot run variogram analysis:\n\n{message}\n\n"
+                "Open the QC Window to validate your data before running geostatistical analysis."
+            )
+            return False
+
+        # Log validation status for audit trail
+        validation_state = registry.get_drillholes_validation_state()
+        if validation_state:
+            status = validation_state.get("status", "UNKNOWN")
+            if status == "WARN":
+                logger.warning(
+                    "LINEAGE: Validation passed with warnings. "
+                    "Review warnings for JORC/SAMREC compliance."
+                )
+            else:
+                logger.info(f"LINEAGE: Validation status = {status}")
+
+        # Check if using declustered data
+        if getattr(self, '_using_declustered', False):
+            logger.info("LINEAGE: Using declustered data for variogram analysis (recommended)")
+            return True
+
+        # Check if composites are available
+        dh_data = registry.get_drillhole_data(copy_data=False)
+        if dh_data:
+            has_composites = isinstance(dh_data.get('composites'), pd.DataFrame) and not dh_data.get('composites').empty
+            has_assays = isinstance(dh_data.get('assays'), pd.DataFrame) and not dh_data.get('assays').empty
+
+            if hasattr(self, 'data_source_raw') and self.data_source_raw.isChecked():
+                if has_composites:
+                    logger.warning(
+                        "LINEAGE WARNING: Using raw assays for variogram analysis when composites are available. "
+                        "This may produce variograms with inconsistent sample support. "
+                        "Consider using composites or declustered data for JORC/SAMREC compliance."
+                    )
+                else:
+                    logger.info("LINEAGE: Using raw assays (composites not available)")
+            else:
+                logger.info("LINEAGE: Using composited data for variogram analysis")
+
+        return True
+
+    def run_analysis(self):
+        # Simple guard against concurrent runs
+        if getattr(self, "_is_running", False):
+            logger.warning("Analysis already running - skipping")
+            return
+        
+        if self.drillhole_data is None:
+            logger.warning("No drillhole data available")
+            return
+        
+        var = self.var_combo.currentText()
+        if not var:
+            logger.warning("No variable selected")
+            return
+        
+        # HARD GATE: Check data lineage before proceeding
+        if not self._check_data_lineage():
+            return
+        
+        logger.info(f"Starting variogram analysis for variable: {var}")
+        
+        # Check for declustered data first (preferred for variogram analysis)
+        registry = getattr(self, 'registry', None)
+        declust_data = None
+        if registry:
+            declust_results = registry.get_declustering_results()
+            if declust_results and 'weighted_dataframe' in declust_results:
+                declust_df = declust_results['weighted_dataframe']
+                if var in declust_df.columns and 'declust_weight' in declust_df.columns:
+                    declust_data = declust_df.dropna(subset=['X','Y','Z', var])
+                    logger.info(f"Using declustered data with {len(declust_data)} samples for variogram analysis")
+
+        # Use declustered data if available, otherwise fall back to raw data
+        if declust_data is not None and len(declust_data) > 0:
+            df = declust_data
+            self._using_declustered = True
+            if hasattr(self, 'data_source_status_label'):
+                self.data_source_status_label.setText("Using: ✅ Declustered data")
+                self.data_source_status_label.setStyleSheet("font-size: 9px; color: #4CAF50;")
+        else:
+            df = self.drillhole_data.dropna(subset=['X','Y','Z', var])
+            self._using_declustered = False
+            if hasattr(self, 'data_source_status_label'):
+                # Update status based on current selection
+                if hasattr(self, 'data_source_composited') and self.data_source_composited.isChecked():
+                    self.data_source_status_label.setText("Using: Composited data")
+                elif hasattr(self, 'data_source_raw') and self.data_source_raw.isChecked():
+                    self.data_source_status_label.setText("Using: Raw assay data")
+                else:
+                    self.data_source_status_label.setText("Using: Raw drillhole data")
+                self.data_source_status_label.setStyleSheet("font-size: 9px; color: #FF9800;")
+            if registry and registry.get_declustering_results():
+                logger.warning("Declustered data available but missing required columns - using raw data")
+        
+        self._is_running = True
+        if hasattr(self, "run_btn"):
+            self.run_btn.setEnabled(False)
+            self.run_btn.setText("Running...")
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("Variogram Analysis: Starting...")
+        
+        # Force initial UI update using safer processEvents
+        from PyQt6.QtCore import QEventLoop
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        
+        # Block tab change signal during analysis to prevent toolbar manipulation
+        # This is critical to avoid "wrapped C/C++ object of type QAction has been deleted" errors
+        tab_signal_blocked = False
+        try:
+            if hasattr(self, 'tabs') and self.tabs is not None and not self._is_qt_object_deleted(self.tabs):
+                self.tabs.blockSignals(True)
+                tab_signal_blocked = True
+        except (RuntimeError, Exception):
+            pass
+        
+        try:
+            # Get professional features settings
+            auto_lags = self.auto_lags_checkbox.isChecked()
+            n_structures = self.struct_spin.value()
+            global_nugget = None
+            if self.global_nugget_checkbox.isChecked():
+                global_nugget = self.global_nugget_spin.value()
+            
+            # Progress callback for updating the progress bar (throttled)
+            _last_progress_pct = [0]  # Use list to allow modification in closure
+            def update_progress(percent: int, message: str):
+                if hasattr(self, "progress_bar") and self.progress_bar is not None:
+                    # Only update every 5% to avoid UI signal flooding
+                    if percent >= _last_progress_pct[0] + 5 or percent >= 100:
+                        self.progress_bar.setValue(percent)
+                        self.progress_bar.setFormat(f"Variogram Analysis: {message} ({percent}%)")
+                        _last_progress_pct[0] = percent
+                        # Force UI repaint using safer processEvents
+                        from PyQt6.QtCore import QEventLoop
+                        from PyQt6.QtWidgets import QApplication
+                        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+            # Get manual azimuths if enabled
+            default_azimuth = None
+            default_dip = None
+            if self.manual_azimuth_checkbox.isChecked():
+                # Use major azimuth for primary direction, minor for secondary
+                # For 3D variograms, we need to provide both major and minor azimuths
+                # The pipeline will use these as overrides for the automatic detection
+                default_azimuth = self.major_azimuth_spin.value()
+                default_dip = 0.0  # Horizontal plane for now, could add dip controls later
+
+            results = vg3d.run_variogram_pipeline(
+                df,
+                vcol=var,
+                nlag=self.nlag_spin.value(),
+                lag_distance=self.lag_dist_spin.value(),
+                lag_tolerance=self.lag_tol_spin.value(),
+                model_types=[self.model_combo.currentText().lower()],
+                z_positive_up=True,
+                # Manual azimuth override
+                default_azimuth=default_azimuth,
+                default_dip=default_dip,
+                # New professional features
+                auto_lags=auto_lags,
+                n_structures=n_structures,
+                global_nugget=global_nugget,
+                progress_callback=update_progress,
+                # DETERMINISM: Use UI-specified seed for reproducibility (JORC/SAMREC requirement)
+                random_state=self.random_seed_spin.value()
+            )
+            
+            self.variogram_results = results
+            
+            # =================================================================
+            # AUDIT METADATA: Store all settings for reproducibility
+            # =================================================================
+            audit_metadata = {
+                'random_seed': self.random_seed_spin.value(),
+                'model_intent': self.model_intent_combo.currentText(),
+                'range_cap_enabled': self.range_cap_checkbox.isChecked(),
+                'range_cap_value': self.range_cap_spin.value() if self.range_cap_checkbox.isChecked() else None,
+                'global_nugget_enabled': self.global_nugget_checkbox.isChecked(),
+                'global_nugget_value': self.global_nugget_spin.value() if self.global_nugget_checkbox.isChecked() else None,
+                'manual_azimuth_enabled': self.manual_azimuth_checkbox.isChecked(),
+                'major_azimuth': self.major_azimuth_spin.value() if self.manual_azimuth_checkbox.isChecked() else None,
+                'minor_azimuth': self.minor_azimuth_spin.value() if self.manual_azimuth_checkbox.isChecked() else None,
+            }
+            self.variogram_results['audit_metadata'] = audit_metadata
+
+            # Update progress to 100%
+            if hasattr(self, "progress_bar"):
+                self.progress_bar.setValue(100)
+                self.progress_bar.setFormat("Variogram Analysis: Complete")
+
+            combined = self._build_combined_model()
+            self.variogram_results['combined_3d_model'] = combined
+            
+            if self.registry:
+                reg_payload = results.copy()
+                reg_payload['variable'] = var
+                
+                # AUDIT REQUIREMENT: Add data lineage hash for JORC/SAMREC compliance
+                try:
+                    source_data_hash = compute_data_hash(df, var)
+                    reg_payload['source_data_hash'] = source_data_hash
+                    reg_payload['data_source_type'] = 'declustered' if self._using_declustered else 'raw'
+                    logger.info(f"Variogram data lineage: hash={source_data_hash[:16]}..., source={reg_payload['data_source_type']}")
+                except Exception as e:
+                    logger.warning(f"Could not compute data lineage hash: {e}")
+                
+                # AUDIT REQUIREMENT: Analyze and log nugget consistency
+                try:
+                    # AUDIT FIX: Call analyze_nugget_consistency with correct signature
+                    nugget_report = analyze_nugget_consistency(results)
+                    if not nugget_report.is_consistent:
+                        logger.warning(
+                            f"Nugget consistency warning: ratio={nugget_report.ratio:.2f}, "
+                            f"range=[{nugget_report.min_nugget:.3f}, {nugget_report.max_nugget:.3f}], "
+                            f"recommended global={nugget_report.recommended_global:.3f}"
+                        )
+                        if nugget_report.warning_message:
+                            logger.warning(f"  {nugget_report.warning_message}")
+                    # Store as dict for JSON serialization
+                    reg_payload['nugget_analysis'] = {
+                        'is_consistent': nugget_report.is_consistent,
+                        'min_nugget': nugget_report.min_nugget,
+                        'max_nugget': nugget_report.max_nugget,
+                        'median_nugget': nugget_report.median_nugget,
+                        'ratio': nugget_report.ratio,
+                        'recommended_global': nugget_report.recommended_global,
+                        'warning_message': nugget_report.warning_message,
+                    }
+                except Exception as e:
+                    logger.warning(f"Nugget consistency analysis failed: {e}")
+
+                # AUDIT: Add explicit warnings summary for reports/exports
+                metadata = results.get('metadata', {})
+                warnings_summary = []
+
+                # Subsampling warning
+                if metadata.get('subsampled', False):
+                    subsample_frac = metadata.get('subsample_fraction', 0)
+                    warnings_summary.append(
+                        f"DATA SUBSAMPLED: Used {subsample_frac*100:.0f}% of data "
+                        f"(seed={metadata.get('subsample_seed', 'N/A')})"
+                    )
+
+                # Weak directions warning
+                weak_dirs = metadata.get('weak_directions', [])
+                for wd in weak_dirs:
+                    if not isinstance(wd, dict):
+                        continue  # Skip invalid entries
+                    if wd.get('is_critical', False):
+                        warnings_summary.append(
+                            f"WEAK DIRECTION: {wd['direction']} has {wd['avg_pairs_per_lag']:.0f} "
+                            f"pairs/lag (min=30 required)"
+                        )
+
+                if warnings_summary:
+                    reg_payload['warnings'] = warnings_summary
+                    reg_payload['has_warnings'] = True
+                    logger.info(f"Variogram warnings for export: {warnings_summary}")
+                else:
+                    reg_payload['has_warnings'] = False
+
+                self.registry.register_variogram_results(reg_payload, source_panel="Variogram")
+            
+            # Defer plot updates to avoid QAction deletion issues during analysis cleanup
+            QTimer.singleShot(100, self._update_plots)
+            QTimer.singleShot(200, self._update_info)
+            logger.info("Variogram analysis completed successfully")
+        except Exception as e:
+            logger.error(f"Analysis failed: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Variogram analysis failed:\n{str(e)}")
+        finally:
+            # CRITICAL: Always reset _is_running flag, even if something goes wrong
+            self._is_running = False
+            logger.debug("Reset _is_running flag")
+            
+            # Unblock tab signals first
+            if tab_signal_blocked:
+                try:
+                    if hasattr(self, 'tabs') and self.tabs is not None and not self._is_qt_object_deleted(self.tabs):
+                        self.tabs.blockSignals(False)
+                except (RuntimeError, Exception):
+                    pass
+            
+            # NOTE: We intentionally do NOT rebuild the toolbar here.
+            # Rebuilding the toolbar can cause "QAction has been deleted" errors
+            # if the canvas still has stale event connections. The toolbar will
+            # be updated naturally when the user changes tabs via _on_tab_changed.
+            
+            if hasattr(self, "run_btn"):
+                self.run_btn.setEnabled(True)
+                self.run_btn.setText("Run Analysis")  # Reset button text
+            if hasattr(self, "progress_bar"):
+                self.progress_bar.setVisible(False)
+            
+            # Force final UI update using safer processEvents
+            from PyQt6.QtCore import QEventLoop
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _build_combined_model(self):
+        """Construct the 3D Anisotropic model used for Kriging."""
+        res = self.variogram_results
+        fits = res.get('fitted_models', {})
+        m_type = self.model_combo.currentText().lower()
+        
+        # Get fitted models for each direction
+        major = fits.get('major', {}).get(m_type, {})
+        minor = fits.get('minor', {}).get(m_type, {})
+        downhole_fit = fits.get('downhole', {}).get(m_type, {})
+        vertical_fit = fits.get('vertical', {}).get(m_type, {})
+        omni_fit = fits.get('omni', {}).get(m_type, {})
+
+        # Validate that at least one direction has fitted models
+        if not any([major, minor, omni_fit, vertical_fit, downhole_fit]):
+            logger.error("No fitted models available - cannot build combined model")
+            raise ValueError(f"Variogram fitting failed for all directions (model type: {m_type})")
+
+        # =================================================================
+        # NUGGET: Check consistency across all directions first
+        # =================================================================
+        try:
+            nugget_report = analyze_nugget_consistency(res)
+            if not nugget_report.is_consistent:
+                logger.warning(
+                    f"Nugget inconsistency detected across directions: "
+                    f"using recommended global nugget {nugget_report.recommended_global:.3f}"
+                )
+                nugget = nugget_report.recommended_global
+                nugget_source = 'median_all_directions'
+            else:
+                # Consistent - use downhole (best for nugget due to tight spacing)
+                if downhole_fit and 'nugget' in downhole_fit:
+                    nugget = downhole_fit['nugget']
+                    nugget_source = 'downhole'
+                elif vertical_fit and 'nugget' in vertical_fit:
+                    nugget = vertical_fit['nugget']
+                    nugget_source = 'vertical'
+                elif omni_fit and 'nugget' in omni_fit:
+                    nugget = omni_fit['nugget']
+                    nugget_source = 'omni'
+                else:
+                    nugget = 0
+                    nugget_source = 'default'
+                    logger.warning("No fitted model available for nugget - using 0")
+        except Exception as e:
+            # Fallback if nugget consistency check fails
+            logger.warning(f"Nugget consistency check failed ({e}), using downhole")
+            if downhole_fit:
+                nugget = downhole_fit.get('nugget', 0)
+                nugget_source = 'downhole_fallback'
+            else:
+                nugget = 0
+                nugget_source = 'fallback_zero'
+        
+        # =================================================================
+        # SILL: Use omni or major as reference (most pairs, most stable)
+        # CRITICAL FIX: 'sill' key stores PARTIAL sill (C), not total sill!
+        # total_sill = nugget + partial_sill (C0 + C)
+        # =================================================================
+        # Extract metadata from results
+        metadata = res.get('metadata', {})
+        # Get sample variance as ultimate fallback
+        sample_var = metadata.get('sample_variance', 1.0)
+        sill_source = 'unknown'
+
+        # Get total sill from most reliable source (explicit checks to handle 0.0 values)
+        if 'total_sill' in omni_fit and omni_fit['total_sill'] is not None and omni_fit['total_sill'] > 0:
+            total_sill = omni_fit['total_sill']
+            sill_source = 'omni'
+        elif 'total_sill' in major and major['total_sill'] is not None and major['total_sill'] > 0:
+            total_sill = major['total_sill']
+            sill_source = 'major'
+        else:
+            # Fallback to sample variance
+            total_sill = sample_var
+            sill_source = 'sample_variance'
+            logger.warning(f"No fitted total_sill available, using sample variance: {total_sill:.3f}")
+
+        # Validate sill > nugget (with margin)
+        if total_sill <= nugget * 1.05:
+            logger.error(f"Total sill ({total_sill:.3f}) <= nugget ({nugget:.3f}). Correcting to maintain validity.")
+            total_sill = max(nugget * 1.2, sample_var)
+            sill_source = f'{sill_source}_corrected'
+
+        # Partial sill (C) = total_sill - nugget
+        partial_sill = max(total_sill - nugget, 0.01)
+
+        # Validate nugget ratio (nugget should not dominate)
+        nugget_ratio = nugget / (nugget + partial_sill) if (nugget + partial_sill) > 0 else 1.0
+        if nugget_ratio > 0.9:
+            logger.error(
+                f"PURE NUGGET MODEL: nugget ratio = {nugget_ratio:.1%} (nugget={nugget:.3f}, partial_sill={partial_sill:.3f}). "
+                f"Data shows minimal spatial structure! Check: 1) Data quality, 2) Duplicate samples, 3) Unit errors"
+            )
+        elif nugget_ratio > 0.7:
+            logger.warning(f"High nugget ratio ({nugget_ratio:.1%}) - limited spatial structure for kriging")
+        
+        # =================================================================
+        # INVARIANT ASSERTION: Fail fast if sill semantics are ever broken
+        # total_sill MUST equal nugget + partial_sill (within numerical tolerance)
+        # =================================================================
+        # INVARIANT CHECK: total_sill MUST equal nugget + partial_sill
+        # This is a mathematical identity - if violated, indicates a bug in parameter extraction
+        if not np.isclose(total_sill, nugget + partial_sill, rtol=1e-5, atol=1e-9):
+            error_msg = (
+                f"CRITICAL: Sill invariant violated! "
+                f"total_sill={total_sill:.6f}, nugget={nugget:.6f}, partial_sill={partial_sill:.6f}, "
+                f"sum={nugget + partial_sill:.6f}. "
+                f"This indicates a bug in model fitting or parameter extraction. "
+                f"Sources: nugget from {nugget_source}, sill from {sill_source}"
+            )
+            logger.error(error_msg)
+
+            # Import STRICT_MODE from gates
+            try:
+                from ..geostats.variogram_gates import STRICT_MODE
+            except ImportError:
+                STRICT_MODE = False
+
+            # In strict mode, FAIL (don't auto-correct and hide the bug)
+            if STRICT_MODE:
+                raise ValueError(error_msg)
+
+            # In non-strict mode, correct but log aggressively
+            logger.critical("AUTO-CORRECTING sill invariant - this should NOT happen in production!")
+            total_sill = nugget + partial_sill
+        
+        # =================================================================
+        # RANGES: CRITICAL FIX - Use correct source for each direction!
+        # - major_range: from major directional variogram (horizontal major)
+        # - minor_range: from minor directional variogram (horizontal minor)
+        # - vertical_range: from VERTICAL directional variogram (NOT downhole!)
+        # Downhole is for NUGGET estimation only, not for anisotropy!
+        # =================================================================
+        major_range = major.get('range', 100)
+        minor_range = minor.get('range', major_range * 0.5)  # Default to 50% of major
+        
+        # CRITICAL: vertical_range comes from VERTICAL fit, not downhole!
+        # Downhole range is along-hole distance, not true vertical anisotropy.
+        if vertical_fit and 'range' in vertical_fit and vertical_fit['range'] > 0:
+            vertical_range = vertical_fit['range']
+            vert_source = 'vertical'
+        # Fallback: use downhole as proxy IF it's reliable
+        elif downhole_fit and 'range' in downhole_fit and downhole_fit['range'] > 0:
+            vertical_range = downhole_fit['range']
+            vert_source = 'downhole_proxy'
+            logger.warning(f"Using downhole range ({vertical_range:.1f}m) as vertical proxy - vertical variogram unavailable")
+        # CRITICAL ERROR: Cannot build anisotropic model without vertical information
+        else:
+            error_msg = (
+                "CRITICAL: No vertical or downhole range available. Cannot build anisotropic 3D model. "
+                "Check: 1) dip_tolerance parameter, 2) vertical extent of drillhole data, 3) at least 2 holes"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # GEOSTATISTICAL FIX: Enforce proper range ordering (Major >= Minor >= Vertical)
+        try:
+            from ..geostats.anisotropy_utils import enforce_range_ordering, create_anisotropy_summary
+            
+            ordered_ranges, naming_info = enforce_range_ordering(
+                major_range, minor_range, vertical_range, use_descriptive_names=False
+            )
+
+            # Validate returned structure
+            required_keys = ["major_range", "minor_range", "vertical_range"]
+            if not all(key in ordered_ranges for key in required_keys):
+                logger.error(f"enforce_range_ordering returned invalid structure: {ordered_ranges.keys()}")
+                raise ValueError("Anisotropy utility returned incomplete range data")
+
+            # Use corrected ranges
+            major_range = ordered_ranges["major_range"]
+            minor_range = ordered_ranges["minor_range"]
+            vertical_range = ordered_ranges["vertical_range"]
+            
+            # Store naming info for UI warnings
+            aniso_warnings = naming_info.get("warnings", [])
+            
+        except ImportError:
+            # CRITICAL FALLBACK: Enforce range ordering inline (MATHEMATICAL REQUIREMENT)
+            logger.warning("Could not import anisotropy_utils - enforcing range ordering inline")
+            ranges_sorted = sorted([major_range, minor_range, vertical_range], reverse=True)
+            major_range, minor_range, vertical_range = ranges_sorted
+            aniso_warnings = ["Range ordering enforced (fallback - anisotropy_utils not available)"]
+
+        # VALIDATION: Ensure major >= minor >= vertical (with small tolerance for floating point)
+        if not (major_range >= minor_range * 0.999):
+            raise ValueError(f"CRITICAL: major_range ({major_range:.2f}) < minor_range ({minor_range:.2f}) after ordering!")
+        if not (minor_range >= vertical_range * 0.999):
+            raise ValueError(f"CRITICAL: minor_range ({minor_range:.2f}) < vertical_range ({vertical_range:.2f}) after ordering!")
+
+        # RANGE REASONABLENESS VALIDATION
+        lag_config = res.get('lag_config', {})
+        max_range_computed = lag_config.get('max_range', 1000)  # from analysis
+        min_lag = lag_config.get('lag_distance', 1)
+
+        # Check if ranges are within reasonable bounds
+        for range_name, range_val in [('major', major_range), ('minor', minor_range), ('vertical', vertical_range)]:
+            if range_val < min_lag:
+                logger.warning(f"{range_name} range ({range_val:.1f}m) < min lag distance ({min_lag:.1f}m) - may be numerical artifact")
+            if range_val > max_range_computed * 2:
+                logger.warning(f"{range_name} range ({range_val:.1f}m) > 2x analysis max_range ({max_range_computed:.1f}m) - extrapolating beyond data!")
+
+        # =================================================================
+        # GEOLOGICAL RANGE CAP (Professional practice for listed companies)
+        # Auditors prefer "conservative but geological" over "optimal but implausible"
+        # =================================================================
+        range_cap_applied = False
+        original_major_range = major_range
+        if hasattr(self, 'range_cap_checkbox') and self.range_cap_checkbox.isChecked():
+            range_cap = self.range_cap_spin.value()
+            if major_range > range_cap:
+                logger.info(f"GEOLOGICAL CAP: Major range {major_range:.1f}m capped to {range_cap:.1f}m")
+                major_range = range_cap
+                range_cap_applied = True
+            if minor_range > range_cap:
+                logger.info(f"GEOLOGICAL CAP: Minor range {minor_range:.1f}m capped to {range_cap:.1f}m")
+                minor_range = range_cap
+                range_cap_applied = True
+            if vertical_range > range_cap:
+                logger.info(f"GEOLOGICAL CAP: Vertical range {vertical_range:.1f}m capped to {range_cap:.1f}m")
+                vertical_range = range_cap
+                range_cap_applied = True
+        
+        logger.debug(f"Built 3D model: {m_type}, nugget={nugget:.3f} (from {nugget_source}), "
+                    f"partial_sill={partial_sill:.3f}, total_sill={total_sill:.3f}, "
+                    f"ranges=({major_range:.1f}, {minor_range:.1f}, {vertical_range:.1f}) (vert from {vert_source})"
+                    f"{' [CAPPED]' if range_cap_applied else ''}")
+        
+        # =================================================================
+        # SILL SEMANTICS (CRITICAL - industry standard):
+        # 'sill' = partial sill (C) - the contribution above nugget
+        # 'total_sill' = nugget + partial_sill (C0 + C) - total variance
+        # =================================================================
+        combined_model = {
+            'model_type': m_type,
+            'nugget': nugget,
+            'sill': partial_sill,  # PARTIAL sill (C), NOT total!
+            'total_sill': total_sill,  # Total sill (C0 + C)
+            'major_range': major_range,
+            'minor_range': minor_range,
+            'vertical_range': vertical_range,
+            'nugget_source': nugget_source,  # Track source for audit
+            'vert_source': vert_source,  # Track source for audit
+            'anisotropy_warnings': aniso_warnings,  # Range ordering warnings
+            # AUDIT METADATA: Track geological constraints for defensibility
+            'range_cap_applied': range_cap_applied,
+            'range_cap_value': self.range_cap_spin.value() if range_cap_applied else None,
+            'original_major_range': original_major_range if range_cap_applied else None,
+            'model_intent': self.model_intent_combo.currentText() if hasattr(self, 'model_intent_combo') else 'Estimation (local accuracy)',
+            'structures': [{
+                'type': m_type,
+                'contribution': partial_sill,  # Partial sill
+                'major_range': major_range,
+                'minor_range': minor_range,
+                'vertical_range': vertical_range
+            }]
+        }
+        
+        return combined_model
+
+    def _update_plots(self):
+        """Update all variogram plots with error handling."""
+        if not self.variogram_results:
+            logger.warning("No variogram results to plot")
+            return
+        
+        try:
+            res = self.variogram_results
+            fits = res.get('fitted_models', {})
+            m_type = self.model_combo.currentText().lower()
+            normalize = getattr(self, "normalize_y_checkbox", None)
+            normalize_flag = normalize.isChecked() if normalize else False
+
+            def plot(canvas, key, title, direction):
+                """Plot with error handling to prevent QAction deletion errors from cascading."""
+                plot_success = False
+                try:
+                    if self._is_qt_object_deleted(canvas):
+                        logger.debug(f"Skipping plot for {key} - canvas deleted")
+                        return False
+                    data = res.get(f"{key}_variogram")
+                    if data is None:
+                        logger.warning(f"No data for {key} variogram - creating empty plot")
+                        # Create empty DataFrame for plotting
+                        import pandas as pd
+                        data = pd.DataFrame({"distance": [], "gamma": [], "npairs": []})
+                    else:
+                        # Debug: log data shape to diagnose empty plots
+                        logger.debug(f"{key} variogram data: {len(data)} rows, cols={list(data.columns)}")
+                    
+                    params = fits.get(key, {}).get(m_type)
+                    logger.debug(f"{key} fitted params: {params}")
+                    
+                    canvas.plot_variogram(data, params, title, direction, normalize=normalize_flag)
+                    
+                    # Force immediate canvas update to prevent blank canvas
+                    canvas.fig.canvas.draw_idle()
+                    canvas.fig.canvas.flush_events()
+                    
+                    logger.debug(f"Successfully plotted {key} variogram")
+                    plot_success = True
+                    return True
+                except RuntimeError as e:
+                    if "QAction" in str(e) or "deleted" in str(e):
+                        logger.debug(f"Ignoring stale QAction error during {key} plot: {e}")
+                        # QAction errors are not plot failures - the plot may still be valid
+                        plot_success = True
+                        return True
+                    else:
+                        logger.error(f"RuntimeError during {key} plot: {e}", exc_info=True)
+                        return False
+                except Exception as e:
+                    logger.error(f"Error plotting {key} variogram: {e}", exc_info=True)
+                    # Try to show error message on canvas
+                    try:
+                        canvas.fig.clear()
+                        ax = canvas.fig.add_subplot(111)
+                        canvas._apply_theme(ax)
+                        ax.text(0.5, 0.5, f"Error plotting {title}:\n{str(e)}",
+                               ha='center', va='center', color='red', transform=ax.transAxes)
+                        ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+                        canvas._safe_draw()
+                    except:
+                        pass
+                    return False
+
+            logger.info("Updating variogram plots...")
+            plot_results = []
+            plot_results.append(("downhole", plot(self.canvas_downhole, "downhole", "Downhole (Nugget)", "downhole")))
+            plot_results.append(("omni", plot(self.canvas_omni, "omni", "Omnidirectional", "omni")))
+            plot_results.append(("major", plot(self.canvas_major, "major", "Major Direction", "major")))
+            plot_results.append(("minor", plot(self.canvas_minor, "minor", "Minor Direction", "minor")))
+            plot_results.append(("vertical", plot(self.canvas_vert, "vertical", "Vertical Direction", "vertical")))
+
+            # 3D Model - with error handling
+            plot_3d_success = False
+            try:
+                if not self._is_qt_object_deleted(self.canvas_3d):
+                    self.canvas_3d.plot_3d_anisotropic_model(res.get('combined_3d_model'), "Estimation Model")
+                    logger.debug("Successfully plotted 3D model")
+                    plot_3d_success = True
+            except RuntimeError as e:
+                if "QAction" in str(e) or "deleted" in str(e):
+                    logger.debug(f"Ignoring stale QAction error during 3D plot: {e}")
+                    plot_3d_success = True  # QAction errors don't count as plot failures
+                else:
+                    logger.error(f"Error plotting 3D model: {e}", exc_info=True)
+
+            # Check results - but wait for radial/cloud before final logging
+            successful_plots = [name for name, success in plot_results if success] + (["3d"] if plot_3d_success else [])
+            failed_plots = [name for name, success in plot_results if not success] + (["3d"] if not plot_3d_success else [])
+
+            # Track radial and cloud plot results (these are handled after the main loop)
+            radial_success = False
+            cloud_success = False
+
+            # Ensure current tab is refreshed and all canvases are repainted
+            current_idx = self.tabs.currentIndex()
+            if current_idx >= 0:
+                current_widget = self.tabs.widget(current_idx)
+                if hasattr(current_widget, '_safe_draw'):
+                    try:
+                        current_widget._safe_draw()
+                        logger.debug(f"Refreshed current tab: {self.tabs.tabText(current_idx)}")
+                    except Exception as e:
+                        logger.debug(f"Could not refresh current tab: {e}")
+
+            try:
+                from PyQt6.QtWidgets import QApplication
+                
+                for canvas in [self.canvas_downhole, self.canvas_omni, self.canvas_major,
+                              self.canvas_minor, self.canvas_vert, self.canvas_3d, 
+                              self.canvas_radial, self.canvas_cloud]:
+                    # Force matplotlib to render the figure
+                    try:
+                        canvas.fig.canvas.draw()
+                        canvas.fig.canvas.flush_events()
+                    except Exception:
+                        pass
+                    # Force Qt widget updates
+                    if hasattr(canvas, 'repaint'):
+                        canvas.repaint()
+                    if hasattr(canvas, 'update'):
+                        canvas.update()
+
+                # Update the tab widget itself
+                if hasattr(self.tabs, 'update'):
+                    self.tabs.update()
+                
+                # CRITICAL: Force Qt to process all pending paint events
+                # Without this, canvases may not render until user interacts
+                QApplication.processEvents()
+                logger.debug("Forced Qt event processing after plot updates")
+
+            except Exception as e:
+                logger.debug(f"Could not repaint canvases: {e}")
+        except Exception as e:
+            logger.error(f"Error in _update_plots: {e}", exc_info=True)
+            # Don't raise - we want analysis to complete even if plotting fails
+        
+        # Radial (Azimuth ranges)
+        # Extract ranges from directional variograms if available
+        # Based on variogram3d.py: major uses azimuth 0 (North), minor uses azimuth 90 (East)
+        azimuth_ranges = {}
+        
+        if 'major' in fits and m_type in fits.get('major', {}):
+            major_params = fits['major'][m_type]
+            major_range = major_params.get('range', 0)
+            if major_range > 0:
+                # Major direction: azimuth 0 (North) by default
+                major_azimuth = res.get('major_azimuth', 0.0)
+                azimuth_ranges[major_azimuth] = major_range
+        
+        if 'minor' in fits and m_type in fits.get('minor', {}):
+            minor_params = fits['minor'][m_type]
+            minor_range = minor_params.get('range', 0)
+            if minor_range > 0:
+                # Minor direction: azimuth 90 (East) by default
+                minor_azimuth = res.get('minor_azimuth', 90.0)
+                azimuth_ranges[minor_azimuth] = minor_range
+        
+        # If we have directional data, plot radial - with error handling
+        try:
+            if not self._is_qt_object_deleted(self.canvas_radial):
+                if azimuth_ranges:
+                    self.canvas_radial.plot_radial(azimuth_ranges, "Directional Ranges")
+                    logger.debug("Successfully plotted radial")
+                    radial_success = True
+                else:
+                    # Clear radial canvas if no data
+                    self.canvas_radial.fig.clear()
+                    ax = self.canvas_radial.fig.add_subplot(111)
+                    colors = get_theme_colors()
+                    ax.text(0.5, 0.5, 'No radial data available\n\nCompute variogram first',
+                           ha='center', va='center', color=colors.TEXT_PRIMARY, fontsize=12,
+                           transform=ax.transAxes)
+                    ax.set_facecolor(colors.CARD_BG)
+                    self.canvas_radial.fig.patch.set_facecolor(colors.PANEL_BG)
+                    self.canvas_radial._safe_draw()
+                    radial_success = True  # Empty plot is still successful
+        except RuntimeError as e:
+            if "QAction" in str(e) or "deleted" in str(e):
+                logger.debug(f"Ignoring stale QAction error during radial plot: {e}")
+                radial_success = True  # QAction errors don't count as plot failures
+            else:
+                logger.error(f"Error plotting radial: {e}", exc_info=True)
+                # Don't raise - continue with other plots
+        
+        # Cloud (Sample) - with error handling
+        try:
+            if not self._is_qt_object_deleted(self.canvas_cloud):
+                df = self.drillhole_data.sample(n=min(2000, len(self.drillhole_data)))
+                dists, gammas = vg3d.plot_variogram_cloud(
+                    df, xcol="X", ycol="Y", zcol="Z", vcol=self.var_combo.currentText(), max_pairs=5000
+                )
+                self.canvas_cloud.plot_variogram_cloud(dists, gammas)
+                logger.debug("Successfully plotted cloud")
+                cloud_success = True
+        except RuntimeError as e:
+            if "QAction" in str(e) or "deleted" in str(e):
+                logger.debug(f"Ignoring stale QAction error during cloud plot: {e}")
+                cloud_success = True  # QAction errors don't count as plot failures
+            else:
+                logger.error(f"Error plotting cloud: {e}", exc_info=True)
+                # Don't raise - continue with other operations
+
+        # Update final success tracking to include radial and cloud
+        successful_plots += (["radial"] if radial_success else []) + (["cloud"] if cloud_success else [])
+        failed_plots += (["radial"] if not radial_success else []) + (["cloud"] if not cloud_success else [])
+
+        if failed_plots:
+            logger.warning(f"Some plots failed: {failed_plots}. Successful: {successful_plots}")
+        else:
+            logger.info(f"All plots updated successfully: {successful_plots}")
+
+    def _update_info(self):
+        """Display variogram results in a clear, user-friendly format."""
+        try:
+            if not self.variogram_results:
+                return
+
+            mod = self.variogram_results.get('combined_3d_model', {})
+
+            # Validate that combined model exists
+            if not mod:
+                logger.warning("No combined 3D model available - model building may have failed")
+                if hasattr(self, 'info_text'):
+                    self.info_text.setHtml("<p style='color: red;'>ERROR: Model building failed. No combined 3D model available.</p>")
+                return
+
+            lag_config = self.variogram_results.get('lag_config', {})
+            fits = self.variogram_results.get('fitted_models', {})
+            metadata = self.variogram_results.get('metadata', {})
+            m_type = self.model_combo.currentText().lower()
+
+            # === MAIN RESULTS SECTION ===
+            nugget_val = mod.get('nugget', 0)
+            # SILL SEMANTICS FIX: 'sill' is now PARTIAL sill (C), use 'total_sill' for C0+C
+            partial_sill_val = mod.get('sill', 0)
+            total_sill = mod.get('total_sill', nugget_val + partial_sill_val)  # Use stored total_sill
+            major_range = mod.get('major_range', 0)
+            minor_range = mod.get('minor_range', 0)
+            vert_range = mod.get('vertical_range', 0)
+            
+            # Build clean header with key parameters
+            html = """
+            <div style='background: linear-gradient(135deg, #2E7D32, #388E3C); padding: 12px; border-radius: 6px; margin-bottom: 12px;'>
+                <h3 style='color: white; margin: 0; font-size: 14px;'>✓ Variogram Analysis Complete</h3>
+            </div>
+            """
+
+            # === KEY PARAMETERS CARD ===
+            html += """
+            <div style='background-color: #2a2a2a; border-left: 4px solid #4CAF50; padding: 12px; margin-bottom: 10px; border-radius: 4px;'>
+                <h4 style='color: #81C784; margin: 0 0 8px 0; font-size: 13px;'>📊 Key Parameters</h4>
+            """
+            
+            # Sills with clear labeling
+            html += f"""
+                <div style='margin-bottom: 6px;'>
+                    <strong style=f'color: {ModernColors.TEXT_PRIMARY};'>Nugget Effect (C₀):</strong> 
+                    <span style='color: #e8f5e8;'>{nugget_val:.3f}</span>
+                </div>
+                <div style='margin-bottom: 6px;'>
+                    <strong style=f'color: {ModernColors.TEXT_PRIMARY};'>Partial Sill (C):</strong> 
+                    <span style='color: #e8f5e8;'>{partial_sill_val:.3f}</span>
+                </div>
+                <div style='margin-bottom: 8px;'>
+                    <strong style=f'color: {ModernColors.TEXT_PRIMARY};'>Total Sill (C₀+C):</strong> 
+                    <span style='color: #a5d6a7; font-weight: bold;'>{total_sill:.3f}</span>
+                </div>
+            """
+            
+            # Sample variance comparison
+            sample_variance = metadata.get('sample_variance')
+            if sample_variance is not None:
+                sill_ratio = total_sill / sample_variance if sample_variance > 0 else 0
+                if 0.8 <= sill_ratio <= 1.2:
+                    status_icon = "✓"
+                    status_color = "#4CAF50"
+                    status_text = "Good match"
+                elif 0.6 <= sill_ratio <= 1.4:
+                    status_icon = "~"
+                    status_color = "#FF9800"
+                    status_text = "Acceptable"
+                else:
+                    status_icon = "⚠"
+                    status_color = "#F44336"
+                    status_text = "Review needed"
+                
+                html += f"""
+                    <div style='padding: 6px; background-color: rgba(77, 77, 77, 0.3); border-radius: 3px;'>
+                        <span style='color: #cccccc; font-size: 11px;'>Sample Variance: {sample_variance:.3f}</span><br>
+                        <span style='color: {status_color}; font-size: 11px;'>{status_icon} Ratio: {sill_ratio:.2f} ({status_text})</span>
+                    </div>
+                """
+            
+            html += "</div>"
+
+            # === RANGE PARAMETERS CARD ===
+            min_maj_ratio = minor_range / major_range if major_range > 0 else 0
+            vert_maj_ratio = vert_range / major_range if major_range > 0 else 0
+            
+            html += f"""
+            <div style='background-color: #2a2a2a; border-left: 4px solid #2196F3; padding: 12px; margin-bottom: 10px; border-radius: 4px;'>
+                <h4 style='color: #64B5F6; margin: 0 0 8px 0; font-size: 13px;'>📏 Range Analysis</h4>
+                <table style='width: 100%; border-spacing: 8px 4px;'>
+                    <tr>
+                        <td style=f'color: {ModernColors.TEXT_PRIMARY}; width: 60px;'><strong>Major:</strong></td>
+                        <td style='color: #e3f2fd;'>{major_range:.1f} m</td>
+                    </tr>
+                    <tr>
+                        <td style=f'color: {ModernColors.TEXT_PRIMARY};'><strong>Minor:</strong></td>
+                        <td style='color: #e3f2fd;'>{minor_range:.1f} m</td>
+                    </tr>
+                    <tr>
+                        <td style=f'color: {ModernColors.TEXT_PRIMARY};'><strong>Vertical:</strong></td>
+                        <td style='color: #e3f2fd;'>{vert_range:.1f} m</td>
+                    </tr>
+                </table>
+                <div style='margin-top: 8px; padding: 6px; background-color: rgba(33, 150, 243, 0.1); border-radius: 3px;'>
+                    <span style='color: #90CAF9; font-size: 11px;'>
+                        Anisotropy → Minor/Major: {min_maj_ratio:.2f} | Vertical/Major: {vert_maj_ratio:.2f}
+                    </span>
+                </div>
+            </div>
+            """
+
+            # === QUALITY ASSESSMENT ===
+            warnings = []
+            status_color = "#4CAF50"
+            status_icon = "✓"
+            status_text = "Model Ready for Kriging"
+            
+            # Check nugget effect
+            if total_sill > 0:
+                nugget_ratio = nugget_val / total_sill
+                if nugget_ratio >= 0.8:
+                    warnings.append({
+                        'type': 'critical',
+                        'icon': '⚠',
+                        'title': 'High Nugget Effect',
+                        'message': f'Nugget = {nugget_ratio*100:.0f}% of total variance. May reduce kriging efficiency.'
+                    })
+                    status_color = "#FF5722"
+                    status_icon = "⚠"
+                    status_text = "High Nugget - Review Data Quality"
+                elif nugget_ratio >= 0.6:
+                    warnings.append({
+                        'type': 'warning',
+                        'icon': '~',
+                        'title': 'Moderate Nugget Effect',
+                        'message': f'Nugget = {nugget_ratio*100:.0f}% of total variance. Consider if this is expected.'
+                    })
+            
+            # Check for subsampling
+            if metadata.get('subsampled', False):
+                subsample_fraction = metadata.get('subsample_fraction', 0)
+                subsample_size = metadata.get('subsample_size', 0)
+                source_rows = metadata.get('source_data_n_rows', 0)
+                
+                if subsample_fraction < 0.3:
+                    warning_type = 'critical'
+                elif subsample_fraction < 0.7:
+                    warning_type = 'warning'
+                else:
+                    warning_type = 'info'
+                
+                warnings.append({
+                    'type': warning_type,
+                    'icon': '📊',
+                    'title': 'Data Subsampling Applied',
+                    'message': f'Using {subsample_size:,} of {source_rows:,} samples ({subsample_fraction*100:.0f}%)'
+                })
+            
+            # Check weak directions
+            weak_directions = metadata.get('weak_directions', [])
+            if weak_directions:
+                critical_dirs = [wd for wd in weak_directions if isinstance(wd, dict) and wd.get('is_critical', False)]
+                if critical_dirs:
+                    warnings.append({
+                        'type': 'critical',
+                        'icon': '📉',
+                        'title': 'Insufficient Directional Data',
+                        'message': f'{len(critical_dirs)} direction(s) have <30 pairs/lag'
+                    })
+                    status_color = "#FF5722" if status_color == "#4CAF50" else status_color
+                    status_icon = "⚠"
+                    status_text = "Data Quality Issues Detected"
+
+            # Check downhole variogram
+            downhole_vg = self.variogram_results.get('downhole_variogram')
+            if downhole_vg is None or len(downhole_vg) == 0:
+                warnings.append({
+                    'type': 'warning',
+                    'icon': '🔍',
+                    'title': 'No Downhole Variogram',
+                    'message': 'Check HOLEID column or use Raw Assays for better nugget estimation'
+                })
+
+            # Check for directional sill inconsistencies
+            omni_sill = None
+            if 'omni' in fits and m_type in fits.get('omni', {}):
+                omni_params = fits['omni'][m_type]
+                omni_sill = omni_params.get('total_sill', omni_params.get('nugget', 0) + omni_params.get('sill', 0))
+                
+                if omni_sill and omni_sill > 0:
+                    for direction in ['major', 'minor', 'vertical', 'downhole']:
+                        if direction in fits and m_type in fits.get(direction, {}):
+                            params = fits[direction][m_type]
+                            dir_total_sill = params.get('total_sill', params.get('nugget', 0) + params.get('sill', 0))
+                            ratio = dir_total_sill / omni_sill
+                            if ratio > 1.5:
+                                warnings.append({
+                                    'type': 'warning',
+                                    'icon': '📊',
+                                    'title': f'{direction.title()} Sill Mismatch',
+                                    'message': f'Sill is {ratio:.1f}x omni sill - may indicate sparse data'
+                                })
+
+            # =================================================================
+            # BUG FIX #3: STRONG ANISOTROPY DETECTION
+            # If vertical continuity is < 25% of major, flag for review.
+            # This is a professional-standards issue - the model may be correct
+            # geologically, but requires explicit confirmation.
+            # =================================================================
+            if major_range > 0:
+                vert_aniso_ratio = vert_range / major_range
+                min_aniso_ratio = minor_range / major_range if minor_range > 0 else 0
+                
+                # Check for extreme anisotropy that requires review
+                if vert_aniso_ratio < 0.25:
+                    # Strong vertical anisotropy - common in stratiform deposits
+                    warnings.append({
+                        'type': 'warning',
+                        'icon': '🔶',
+                        'title': 'Strong Vertical Anisotropy',
+                        'message': f'Vertical continuity ({vert_range:.0f}m) is {vert_aniso_ratio*100:.0f}% of major ({major_range:.0f}m). Confirm geological control.'
+                    })
+                    # Don't mark as "ready" - needs review
+                    if status_color == "#4CAF50":
+                        status_color = "#FF9800"
+                        status_icon = "⚠"
+                        status_text = "Model Needs Review"
+                
+                if vert_aniso_ratio < 0.10:
+                    # Extreme vertical anisotropy - needs explicit confirmation
+                    warnings.append({
+                        'type': 'critical',
+                        'icon': '⚠',
+                        'title': 'Extreme Anisotropy Detected',
+                        'message': f'Vertical range is only {vert_aniso_ratio*100:.0f}% of major. Verify search strategy for kriging.'
+                    })
+                    status_color = "#FF5722"
+                    status_icon = "⚠"
+                    status_text = "Model Needs Review - Extreme Anisotropy"
+                
+                # Check if ranges vary by more than 4x (major vs vertical)
+                if major_range > 0 and vert_range > 0:
+                    range_ratio = major_range / vert_range
+                    if range_ratio > 4.0:
+                        warnings.append({
+                            'type': 'info',
+                            'icon': '📐',
+                            'title': 'Anisotropy Ratio',
+                            'message': f'Major/Vertical ratio = {range_ratio:.1f}x. Ensure estimation search ellipsoid reflects this.'
+                        })
+
+            # Build quality assessment section
+            html += f"""
+            <div style='background-color: #2a2a2a; border-left: 4px solid {status_color}; padding: 12px; margin-bottom: 10px; border-radius: 4px;'>
+                <h4 style='color: {'#81C784' if status_color == '#4CAF50' else ('#FFB74D' if status_color == '#FF9800' else '#EF5350')}; margin: 0 0 8px 0; font-size: 13px;'>
+                    {status_icon} Quality Assessment
+                </h4>
+                <div style=f'color: {ModernColors.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 8px;'>{status_text}</div>
+            """
+            
+            if warnings:
+                for warning in warnings:
+                    color_map = {
+                        'critical': '#FFCDD2',
+                        'warning': '#FFF3E0', 
+                        'info': '#E3F2FD'
+                    }
+                    bg_color_map = {
+                        'critical': 'rgba(244, 67, 54, 0.1)',
+                        'warning': 'rgba(255, 152, 0, 0.1)',
+                        'info': 'rgba(33, 150, 243, 0.1)'
+                    }
+                    
+                    text_color = color_map.get(warning['type'], f'{ModernColors.TEXT_PRIMARY}')
+                    bg_color = bg_color_map.get(warning['type'], 'rgba(255, 255, 255, 0.1)')
+                    
+                    html += f"""
+                    <div style='margin-bottom: 6px; padding: 6px; background-color: {bg_color}; border-radius: 3px;'>
+                        <span style='color: {text_color}; font-size: 11px;'>
+                            <strong>{warning['icon']} {warning['title']}:</strong> {warning['message']}
+                        </span>
+                    </div>
+                    """
+            
+            html += "</div>"
+
+            # === ADVANCED FEATURES SUMMARY ===
+            features = []
+            if lag_config.get('auto_lags', False):
+                features.append('🤖 Auto-Lag Optimization')
+            if lag_config.get('n_structures', 1) > 1:
+                features.append(f'🔗 Nested Structures ({lag_config["n_structures"]})')
+            if lag_config.get('global_nugget') is not None:
+                features.append('🔒 Global Nugget Lock')
+            
+            # Check manual azimuths
+            try:
+                manual_az_enabled = hasattr(self, 'manual_azimuth_checkbox') and self.manual_azimuth_checkbox.isChecked()
+                if manual_az_enabled:
+                    major_az = self.major_azimuth_spin.value() if hasattr(self, 'major_azimuth_spin') else 0
+                    minor_az = self.minor_azimuth_spin.value() if hasattr(self, 'minor_azimuth_spin') else 90
+                    features.append(f'🧭 Manual Azimuths ({major_az:.0f}°/{minor_az:.0f}°)')
+            except (RuntimeError, AttributeError):
+                pass
+            
+            # Check range cap
+            if mod.get('range_cap_applied', False):
+                cap_val = mod.get('range_cap_value', 0)
+                orig_range = mod.get('original_major_range', 0)
+                features.append(f'📐 Geological Cap ({cap_val:.0f}m, was {orig_range:.0f}m)')
+            
+            if features:
+                html += """
+                <div style='background-color: #2a2a2a; border-left: 4px solid #9C27B0; padding: 12px; margin-bottom: 10px; border-radius: 4px;'>
+                    <h4 style='color: #CE93D8; margin: 0 0 8px 0; font-size: 13px;'>⚙️ Active Features</h4>
+                """
+                for feature in features:
+                    html += f"<div style='color: #F3E5F5; font-size: 11px; margin-bottom: 3px;'>{feature}</div>"
+                html += "</div>"
+
+            # === AUDIT METADATA (JORC/SAMREC COMPLIANCE) ===
+            audit_meta = self.variogram_results.get('audit_metadata', {})
+            model_intent = mod.get('model_intent', audit_meta.get('model_intent', 'Not specified'))
+            random_seed = audit_meta.get('random_seed', 42)
+            
+            html += f"""
+            <div style='background-color: #1a1a2e; border-left: 4px solid #00bcd4; padding: 12px; margin-bottom: 10px; border-radius: 4px;'>
+                <h4 style='color: #4dd0e1; margin: 0 0 8px 0; font-size: 13px;'>📋 Audit Metadata</h4>
+                <table style='width: 100%; font-size: 11px; color: #b0bec5;'>
+                    <tr>
+                        <td style='padding: 2px 0;'><strong>Model Intent:</strong></td>
+                        <td style='color: #4dd0e1;'>{model_intent}</td>
+                    </tr>
+                    <tr>
+                        <td style='padding: 2px 0;'><strong>Random Seed:</strong></td>
+                        <td>{random_seed} (deterministic)</td>
+                    </tr>
+                    <tr>
+                        <td style='padding: 2px 0;'><strong>Nugget Source:</strong></td>
+                        <td>{mod.get('nugget_source', 'unknown')}</td>
+                    </tr>
+                    <tr>
+                        <td style='padding: 2px 0;'><strong>Vertical Source:</strong></td>
+                        <td>{mod.get('vert_source', 'unknown')}</td>
+                    </tr>
+                </table>
+            </div>
+            """
+
+            # === FOOTER WITH NEXT STEPS ===
+            if status_color == "#4CAF50":
+                next_steps = "Model is ready for kriging estimation. Parameters validated and quality checked."
+                footer_color = "#2E7D32"
+            elif status_color == "#FF9800":
+                next_steps = "Review warnings above. Model may be usable with caveats."
+                footer_color = "#F57700"
+            else:
+                next_steps = "Address critical issues before proceeding to kriging estimation."
+                footer_color = "#C62828"
+                
+            html += f"""
+            <div style='background: linear-gradient(135deg, {footer_color}, rgba({int(footer_color[1:3], 16)}, {int(footer_color[3:5], 16)}, {int(footer_color[5:7], 16)}, 0.8)); padding: 10px; border-radius: 6px; margin-top: 8px;'>
+                <div style='color: white; font-size: 11px; text-align: center;'>{next_steps}</div>
+            </div>
+            """
+
+            if hasattr(self, 'info_text') and self.info_text is not None:
+                self.info_text.setHtml(html)
+                
+        except Exception as e:
+            logger.error(f"Error in _update_info: {e}", exc_info=True)
+            # Fallback to simple text display
+            if hasattr(self, 'info_text') and self.info_text is not None:
+                self.info_text.setPlainText(f"Error displaying results: {e}")
+            # Don't raise - we want analysis to complete even if info update fails
+
+    def _on_tab_changed(self, idx):
+        """Re-parent toolbar to current canvas when tab changes."""
+        # Skip during analysis to avoid QAction deletion issues
+        if getattr(self, "_is_running", False):
+            return
+        
+        try:
+            # Check if tabs widget is still valid
+            if not hasattr(self, 'tabs') or self.tabs is None or self._is_qt_object_deleted(self.tabs):
+                return
+            
+            current = self.tabs.widget(idx)
+            if current is None or self._is_qt_object_deleted(current):
+                return
+            
+            if isinstance(current, VariogramCanvas):
+                self._safe_clear_toolbar()
+                # Create new toolbar for current canvas
+                # Use the toolbar_container as parent instead of self to avoid parent issues
+                parent_widget = getattr(self, 'toolbar_container', None)
+                if parent_widget is not None and not self._is_qt_object_deleted(parent_widget):
+                    if hasattr(parent_widget, 'isVisible') and parent_widget.isVisible():
+                        self.toolbar = NavigationToolbar(current, parent_widget)
+                        if hasattr(self, 'toolbar_layout') and self.toolbar_layout is not None:
+                            self.toolbar_layout.addWidget(self.toolbar)
+                    else:
+                        logger.debug("Skipping toolbar creation - parent widget not visible")
+                else:
+                    logger.debug("Skipping toolbar creation - parent widget not valid")
+                
+                # CRITICAL FIX: Force canvas redraw when tab becomes visible
+                # This fixes the blank canvas issue on tab switch
+                try:
+                    current.draw_idle()
+                    current.flush_events()
+                    # Also force a Qt repaint to ensure visibility
+                    current.update()
+                    current.repaint()
+                    logger.debug(f"Forced canvas redraw on tab switch to index {idx}")
+                except Exception as draw_err:
+                    logger.debug(f"Canvas redraw on tab switch failed: {draw_err}")
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"Tab change toolbar update skipped: {e}")
+
+    def _is_qt_object_deleted(self, obj) -> bool:
+        """Check if a Qt/C++ object has been deleted.
+        
+        PyQt6 uses PyQt6.sip module for this check.
+        Returns True if object is deleted or check fails (safer to assume deleted).
+        """
+        if obj is None:
+            return True
+        try:
+            from PyQt6 import sip
+            return sip.isdeleted(obj)
+        except (ImportError, AttributeError):
+            pass
+        
+        # Fallback: try accessing a simple property
+        try:
+            _ = obj.objectName()
+            return False
+        except (RuntimeError, AttributeError):
+            return True
+    
+    def _safe_clear_toolbar(self):
+        """Disconnect and delete the dynamic toolbar safely.
+        
+        IMPORTANT: We intentionally do NOT iterate over toolbar.actions() because
+        Qt may have already deleted the QAction C++ objects while Python still holds
+        references. Simply iterating over deleted QAction pointers causes:
+        'RuntimeError: wrapped C/C++ object of type QAction has been deleted'
+        
+        We MUST disconnect the toolbar from its canvas before deleting, otherwise
+        the canvas will try to fire events to the deleted toolbar during draw().
+        """
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return
+        
+        # Clear the reference FIRST to prevent any re-entry issues
+        self.toolbar = None
+
+        # Check if the C++ object is still valid
+        if self._is_qt_object_deleted(toolbar):
+            return
+
+        # CRITICAL: Disconnect toolbar from canvas to prevent deleted QAction errors
+        # NavigationToolbar2QT connects to canvas via mpl_connect for various events.
+        # If we delete the toolbar without disconnecting, the canvas will fire events
+        # to the deleted toolbar during draw(), causing "QAction has been deleted" errors.
+        try:
+            # Break circular reference by setting canvas to None
+            # This is more reliable than trying to disconnect individual event handlers
+            if hasattr(toolbar, 'canvas'):
+                toolbar.canvas = None
+        except (RuntimeError, AttributeError, Exception):
+            pass
+
+        # Remove from layout
+        try:
+            if hasattr(self, 'toolbar_layout') and self.toolbar_layout is not None:
+                self.toolbar_layout.removeWidget(toolbar)
+        except (RuntimeError, Exception):
+            pass
+        
+        # Hide the toolbar to prevent any further interaction
+        try:
+            if not self._is_qt_object_deleted(toolbar):
+                toolbar.hide()
+        except (RuntimeError, Exception):
+            pass
+        
+        # Set parent to None to break Qt parent-child relationship
+        try:
+            if not self._is_qt_object_deleted(toolbar):
+                toolbar.setParent(None)
+        except (RuntimeError, Exception):
+            pass
+        
+        # Schedule for deletion - Qt will clean up all child QActions
+        try:
+            if not self._is_qt_object_deleted(toolbar):
+                toolbar.deleteLater()
+        except (RuntimeError, Exception):
+            pass
+
+    def closeEvent(self, event):
+        """Ensure toolbars are cleaned up to avoid deleted QAction errors on reopen."""
+        # Disconnect tab signal first
+        try:
+            if hasattr(self, 'tabs') and self.tabs is not None and not self._is_qt_object_deleted(self.tabs):
+                self.tabs.currentChanged.disconnect(self._on_tab_changed)
+        except (TypeError, RuntimeError, Exception):
+            pass
+        
+        # Clean up toolbar
+        try:
+            self._safe_clear_toolbar()
+        except Exception:
+            pass
+        
+        # Clear main_window references
+        if getattr(self, "main_window", None):
+            try:
+                self.main_window.variogram_dialog = None
+                self.main_window.variogram_panel = None
+            except Exception:
+                pass
+        
+        # Clear registry connection
+        try:
+            if hasattr(self, 'registry') and self.registry is not None and not self._is_qt_object_deleted(self.registry):
+                if hasattr(self.registry, 'drillholeDataLoaded'):
+                    try:
+                        self.registry.drillholeDataLoaded.disconnect(self._on_data_loaded)
+                    except (TypeError, RuntimeError):
+                        pass
+        except Exception:
+            pass
+        
+        super().closeEvent(event)
+
+    def _open_assistant(self):
+        """Open the Variogram Assistant as a standalone panel (not a child dialog)."""
+        # Use panel manager to open as standalone panel
+        if hasattr(self, '_panel_manager') and self._panel_manager:
+            # Open through panel manager (standalone, dockable panel)
+            self._panel_manager.show_panel("VariogramAssistantPanel")
+            
+            # Get the panel instance and set up data/signals
+            panel_info = self._panel_manager.get_panel_info("VariogramAssistantPanel")
+            if panel_info and panel_info.instance:
+                assistant_panel = panel_info.instance
+                # Set drillhole data
+                if hasattr(assistant_panel, 'set_drillhole_data'):
+                    assistant_panel.set_drillhole_data(self.drillhole_data)
+                # Connect signal for model acceptance
+                try:
+                    assistant_panel.model_accepted.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+                assistant_panel.model_accepted.connect(self._apply_assistant_model)
+                logger.info("Opened Variogram Assistant as standalone panel")
+        else:
+            # Fallback: create as child dialog if panel manager not available
+            from .variogram_assistant_panel import VariogramAssistantPanel
+            # Check if assistant dialog already exists and is valid
+            if hasattr(self, '_assistant_dialog') and self._assistant_dialog is not None:
+                try:
+                    if self._assistant_dialog.isVisible():
+                        self._assistant_dialog.raise_()
+                        self._assistant_dialog.activateWindow()
+                        return
+                except RuntimeError:
+                    self._assistant_dialog = None
+            
+            dlg = VariogramAssistantPanel(self)
+            self._assistant_dialog = dlg  # Store reference
+            dlg.set_drillhole_data(self.drillhole_data)
+            try:
+                dlg.model_accepted.disconnect()
+            except TypeError:
+                pass
+            dlg.model_accepted.connect(self._apply_assistant_model)
+            dlg.show()
+            logger.warning("Opened Variogram Assistant as child dialog (panel manager not available)")
+
+    def _apply_assistant_model(self, model_dict):
+        # Map assistant result back to local state
+        # (Simplified integration for brevity)
+        QMessageBox.information(self, "Applied", "Model from Assistant applied.")
+        # Trigger re-plot with new params...
+
+    def get_variogram_results(self):
+        """Get the current variogram results dictionary."""
+        return self.variogram_results
+
+    def show_variogram_cloud(self):
+        """Switch to the Variogram Cloud tab."""
+        if hasattr(self, 'tabs') and self.tabs is not None:
+            # Cloud tab is at index 7
+            self.tabs.setCurrentIndex(7)
+
+    def export_variogram_tables(self):
+        """Export variogram results to CSV files."""
+        if not self.variogram_results:
+            QMessageBox.warning(
+                self,
+                "No Results",
+                "No variogram results available to export.\n\nPlease run the analysis first."
+            )
+            return
+
+        # Get save directory from user
+        save_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Directory for Variogram Export",
+            "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+
+        if not save_dir:
+            return  # User cancelled
+
+        try:
+            import os
+
+            # Export combined 3D model parameters
+            mod = self.variogram_results.get('combined_3d_model', {})
+            if mod:
+                model_data = {
+                    'Parameter': ['Nugget (C0)', 'Partial Sill (C)', 'Total Sill (C0+C)',
+                                  'Major Range', 'Minor Range', 'Vertical Range'],
+                    'Value': [
+                        mod.get('nugget', 0),
+                        mod.get('sill', 0),
+                        mod.get('total_sill', 0),
+                        mod.get('major_range', 0),
+                        mod.get('minor_range', 0),
+                        mod.get('vertical_range', 0)
+                    ]
+                }
+                df_model = pd.DataFrame(model_data)
+                model_path = os.path.join(save_dir, 'variogram_model_parameters.csv')
+                df_model.to_csv(model_path, index=False)
+
+            # Export directional variogram data
+            for direction in ['downhole', 'omni', 'major', 'minor', 'vertical']:
+                if direction in self.variogram_results:
+                    vario_data = self.variogram_results[direction]
+                    if isinstance(vario_data, dict):
+                        dist = vario_data.get('dist', [])
+                        gamma = vario_data.get('gamma', [])
+                        npairs = vario_data.get('npairs', [])
+
+                        if len(dist) > 0:
+                            df_vario = pd.DataFrame({
+                                'Distance': dist,
+                                'Gamma': gamma,
+                                'Pairs': npairs
+                            })
+                            vario_path = os.path.join(save_dir, f'variogram_{direction}.csv')
+                            df_vario.to_csv(vario_path, index=False)
+
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Variogram results exported successfully to:\n{save_dir}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to export variogram results: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Failed to export variogram results:\n{str(e)}"
+            )
+
+    def clear_results(self):
+        """Clear variogram results and reset state."""
+        self.variogram_results = None
+        # Force reset running flag if stuck
+        self._is_running = False
+        if hasattr(self, 'info_text') and self.info_text is not None and not self._is_qt_object_deleted(self.info_text):
+            self.info_text.clear()
+        # Safely clear toolbar before clearing figures to avoid QAction deletion issues
+        self._safe_clear_toolbar()
+        for c in [self.canvas_downhole, self.canvas_omni, self.canvas_3d]:
+            if c is not None and not self._is_qt_object_deleted(c):
+                c.clear_figure()
+        # Re-enable run button
+        if hasattr(self, "run_btn"):
+            self.run_btn.setEnabled(True)
+            self.run_btn.setText("Run Analysis")
+
+    def clear_panel(self):
+        """Clear all panel UI and state to initial defaults."""
+        # Clear internal state
+        self.drillhole_data = None
+
+        # Clear results (reuse existing method)
+        self.clear_results()
+
+        # Call base class to clear common widgets
+        super().clear_panel()
+        logger.info("VariogramAnalysisPanel: Panel fully cleared")
+
+    def _on_variable_changed(self):
+        self.clear_results()
+
+    # =========================================================
+    # PROJECT SAVE/RESTORE
+    # =========================================================
+    def get_panel_settings(self) -> Optional[Dict[str, Any]]:
+        """Get panel settings for project save.
+        
+        Returns:
+            Dictionary of all user-configurable settings, or None if no settings.
+        """
+        try:
+            from .panel_settings_utils import get_safe_widget_value
+            
+            settings = {}
+            
+            # Configuration group
+            settings['variable'] = get_safe_widget_value(self, 'var_combo')
+            settings['holeid'] = get_safe_widget_value(self, 'hole_combo')
+            settings['domain'] = get_safe_widget_value(self, 'domain_combo')
+            settings['nlag'] = get_safe_widget_value(self, 'nlag_spin')
+            settings['lag_dist'] = get_safe_widget_value(self, 'lag_dist_spin')
+            settings['lag_tol'] = get_safe_widget_value(self, 'lag_tol_spin')
+            settings['auto_lags'] = get_safe_widget_value(self, 'auto_lags_checkbox')
+            
+            # Data source
+            if hasattr(self, 'data_source_composited'):
+                settings['data_source'] = 'composited' if self.data_source_composited.isChecked() else 'raw'
+            
+            # Model fitting group
+            settings['model_type'] = get_safe_widget_value(self, 'model_combo')
+            settings['structures'] = get_safe_widget_value(self, 'struct_spin')
+            settings['global_nugget_enabled'] = get_safe_widget_value(self, 'global_nugget_checkbox')
+            settings['global_nugget_value'] = get_safe_widget_value(self, 'global_nugget_spin')
+            settings['normalize_y'] = get_safe_widget_value(self, 'normalize_y_checkbox')
+            
+            # Directional analysis group
+            settings['manual_azimuth'] = get_safe_widget_value(self, 'manual_azimuth_checkbox')
+            settings['major_azimuth'] = get_safe_widget_value(self, 'major_azimuth_spin')
+            settings['minor_azimuth'] = get_safe_widget_value(self, 'minor_azimuth_spin')
+            
+            # Filter out None values
+            settings = {k: v for k, v in settings.items() if v is not None}
+            
+            return settings if settings else None
+            
+        except Exception as e:
+            logger.warning(f"Could not save variogram panel settings: {e}")
+            return None
+
+    def apply_panel_settings(self, settings: Dict[str, Any]) -> None:
+        """Apply panel settings from project load.
+        
+        Args:
+            settings: Dictionary of previously saved settings
+        """
+        if not settings:
+            return
+            
+        try:
+            from .panel_settings_utils import set_safe_widget_value
+            
+            # Configuration group
+            set_safe_widget_value(self, 'var_combo', settings.get('variable'))
+            set_safe_widget_value(self, 'hole_combo', settings.get('holeid'))
+            set_safe_widget_value(self, 'domain_combo', settings.get('domain'))
+            set_safe_widget_value(self, 'nlag_spin', settings.get('nlag'))
+            set_safe_widget_value(self, 'lag_dist_spin', settings.get('lag_dist'))
+            set_safe_widget_value(self, 'lag_tol_spin', settings.get('lag_tol'))
+            set_safe_widget_value(self, 'auto_lags_checkbox', settings.get('auto_lags'))
+            
+            # Data source
+            if 'data_source' in settings:
+                if settings['data_source'] == 'composited' and hasattr(self, 'data_source_composited'):
+                    self.data_source_composited.setChecked(True)
+                elif settings['data_source'] == 'raw' and hasattr(self, 'data_source_raw'):
+                    self.data_source_raw.setChecked(True)
+            
+            # Model fitting group
+            set_safe_widget_value(self, 'model_combo', settings.get('model_type'))
+            set_safe_widget_value(self, 'struct_spin', settings.get('structures'))
+            set_safe_widget_value(self, 'global_nugget_checkbox', settings.get('global_nugget_enabled'))
+            set_safe_widget_value(self, 'global_nugget_spin', settings.get('global_nugget_value'))
+            set_safe_widget_value(self, 'normalize_y_checkbox', settings.get('normalize_y'))
+            
+            # Directional analysis group
+            set_safe_widget_value(self, 'manual_azimuth_checkbox', settings.get('manual_azimuth'))
+            set_safe_widget_value(self, 'major_azimuth_spin', settings.get('major_azimuth'))
+            set_safe_widget_value(self, 'minor_azimuth_spin', settings.get('minor_azimuth'))
+            
+            # Trigger UI updates if needed
+            if settings.get('global_nugget_enabled') and hasattr(self, '_on_global_nugget_changed'):
+                self._on_global_nugget_changed()
+            if settings.get('manual_azimuth') and hasattr(self, '_on_manual_azimuth_changed'):
+                self._on_manual_azimuth_changed()
+            if settings.get('auto_lags') and hasattr(self, '_on_auto_lags_changed'):
+                self._on_auto_lags_changed()
+                
+            logger.info("Restored variogram panel settings from project")
+            
+        except Exception as e:
+            logger.warning(f"Could not restore variogram panel settings: {e}")

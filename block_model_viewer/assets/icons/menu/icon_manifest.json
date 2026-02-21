@@ -1,0 +1,248 @@
+{
+  "version": "1.0",
+  "description": "GeoX Menu Icon Manifest",
+  "icon_style": {
+    "format": "SVG",
+    "viewBox": "0 0 24 24",
+    "stroke": "currentColor",
+    "stroke_width": 2,
+    "fill": "none",
+    "stroke_linecap": "round",
+    "stroke_linejoin": "round"
+  },
+  "menus": {
+    "file": {
+      "path": "file/",
+      "icons": [
+        {"name": "new_project.svg", "menu_item": "New Project"},
+        {"name": "open_project.svg", "menu_item": "Open Project"},
+        {"name": "save_project.svg", "menu_item": "Save Project"},
+        {"name": "save_as.svg", "menu_item": "Save Project As"},
+        {"name": "open_file.svg", "menu_item": "Open File"},
+        {"name": "block_model_loading.svg", "menu_item": "Block Model Loading"},
+        {"name": "recent_files.svg", "menu_item": "Recent Files"},
+        {"name": "restore_session.svg", "menu_item": "Restore Last Session on Startup"},
+        {"name": "screenshot.svg", "menu_item": "Export Screenshot"},
+        {"name": "advanced_screenshot.svg", "menu_item": "Advanced Screenshot Export"},
+        {"name": "export_data.svg", "menu_item": "Export Data"},
+        {"name": "export_model.svg", "menu_item": "Export Model (STL/OBJ)"},
+        {"name": "restart.svg", "menu_item": "Restart"},
+        {"name": "clear_scene.svg", "menu_item": "Clear Scene"},
+        {"name": "exit.svg", "menu_item": "Exit"}
+      ]
+    },
+    "search": {
+      "path": "search/",
+      "icons": [
+        {"name": "search.svg", "menu_item": "Search Modules"}
+      ]
+    },
+    "edit": {
+      "path": "edit/",
+      "icons": [
+        {"name": "undo.svg", "menu_item": "Undo"},
+        {"name": "redo.svg", "menu_item": "Redo"},
+        {"name": "preferences.svg", "menu_item": "Preferences"}
+      ]
+    },
+    "view": {
+      "path": "view/",
+      "icons": [
+        {"name": "reset_view.svg", "menu_item": "Reset View"},
+        {"name": "view_top.svg", "menu_item": "Top View"},
+        {"name": "view_bottom.svg", "menu_item": "Bottom View"},
+        {"name": "view_front.svg", "menu_item": "Front View"},
+        {"name": "view_back.svg", "menu_item": "Back View"},
+        {"name": "view_right.svg", "menu_item": "Right View"},
+        {"name": "view_left.svg", "menu_item": "Left View"},
+        {"name": "view_isometric.svg", "menu_item": "Isometric View"},
+        {"name": "orthographic.svg", "menu_item": "Orthographic Projection"},
+        {"name": "data_registry.svg", "menu_item": "Data Registry Status"},
+        {"name": "panels.svg", "menu_item": "Panels"},
+        {"name": "cross_section.svg", "menu_item": "Cross-Section Tool"},
+        {"name": "view_data.svg", "menu_item": "View Block Model Data"},
+        {"name": "lighting.svg", "menu_item": "Lighting Presets"},
+        {"name": "theme_light.svg", "menu_item": "Light Theme"},
+        {"name": "theme_dark.svg", "menu_item": "Dark Theme"},
+        {"name": "workspace.svg", "menu_item": "Workspace Layout"}
+      ]
+    },
+    "tools": {
+      "path": "tools/",
+      "icons": [
+        {"name": "slice.svg", "menu_item": "Slice Tool"},
+        {"name": "filter.svg", "menu_item": "Filter Tool"},
+        {"name": "selection.svg", "menu_item": "Selection Mode"},
+        {"name": "statistics.svg", "menu_item": "Property Statistics"},
+        {"name": "block_selection.svg", "menu_item": "Block Selection Manager"},
+        {"name": "axes_scale.svg", "menu_item": "Floating Axes & Scale Bar"}
+      ]
+    },
+    "panels": {
+      "path": "panels/",
+      "icons": [
+        {"name": "controls.svg", "menu_item": "Controls & Scene"},
+        {"name": "reset_layout.svg", "menu_item": "Reset Layout"}
+      ]
+    },
+    "data_analysis": {
+      "path": "data_analysis/",
+      "icons": [
+        {"name": "statistics.svg", "menu_item": "Statistics"},
+        {"name": "charts.svg", "menu_item": "Charts & Visualization"},
+        {"name": "swath_3d.svg", "menu_item": "3D Swath Analysis"}
+      ]
+    },
+    "mouse": {
+      "path": "mouse/",
+      "icons": [
+        {"name": "select.svg", "menu_item": "Select (Click)"},
+        {"name": "pan.svg", "menu_item": "Pan"},
+        {"name": "zoom.svg", "menu_item": "Zoom (Box)"},
+        {"name": "zoom_in.svg", "menu_item": "Zoom In"},
+        {"name": "zoom_out.svg", "menu_item": "Zoom Out"},
+        {"name": "zoom_extents.svg", "menu_item": "Zoom to Extents"}
+      ]
+    },
+    "drillholes": {
+      "path": "drillholes/",
+      "icons": [
+        {"name": "drillhole.svg", "menu_item": "Drillholes (menu header)"},
+        {"name": "loading.svg", "menu_item": "Drillhole Loading"},
+        {"name": "validation.svg", "menu_item": "Data Validation & QC"},
+        {"name": "compositing.svg", "menu_item": "Compositing"},
+        {"name": "declustering.svg", "menu_item": "Declustering Analysis"},
+        {"name": "grade_stats.svg", "menu_item": "Downhole Grade Statistics"},
+        {"name": "reporting.svg", "menu_item": "Reporting"},
+        {"name": "plotting.svg", "menu_item": "Plotting"},
+        {"name": "transform.svg", "menu_item": "Transform Grade Data"}
+      ]
+    },
+    "resources": {
+      "path": "resources/",
+      "icons": [
+        {"name": "resources.svg", "menu_item": "Resources (menu header)"},
+        {"name": "block_resources.svg", "menu_item": "Block Model Resources"},
+        {"name": "sensitivity.svg", "menu_item": "Cut-off Sensitivity Analysis"}
+      ]
+    },
+    "scan": {
+      "path": "scan/",
+      "icons": [
+        {"name": "load_scan.svg", "menu_item": "Load Scan"},
+        {"name": "scan_panel.svg", "menu_item": "Scan Analysis Panel"},
+        {"name": "export_psd.svg", "menu_item": "Fragment Metrics & PSD (CSV)"},
+        {"name": "export_fragments.svg", "menu_item": "Fragments (OBJ/STL)"},
+        {"name": "clear_scan.svg", "menu_item": "Clear Scan Data"}
+      ]
+    },
+    "estimations": {
+      "path": "estimations/",
+      "icons": [
+        {"name": "variogram.svg", "menu_item": "Compute 3D Variogram"},
+        {"name": "variogram_cloud.svg", "menu_item": "Show 3D Variogram Cloud"},
+        {"name": "kriging.svg", "menu_item": "Ordinary/Simple/Universal Kriging"},
+        {"name": "cokriging.svg", "menu_item": "Co-Kriging"},
+        {"name": "indicator_kriging.svg", "menu_item": "Indicator Kriging"},
+        {"name": "bayesian.svg", "menu_item": "Soft / Bayesian Kriging"},
+        {"name": "rbf.svg", "menu_item": "RBF Interpolation"},
+        {"name": "uncertainty.svg", "menu_item": "Uncertainty Propagation"},
+        {"name": "simulation.svg", "menu_item": "Simulations (submenu)"},
+        {"name": "sgsim.svg", "menu_item": "Sequential Gaussian Simulation"},
+        {"name": "resource_model.svg", "menu_item": "Build Block Model"},
+        {"name": "classification.svg", "menu_item": "Resource Classification"},
+        {"name": "grade_tonnage.svg", "menu_item": "Grade-Tonnage Curves"}
+      ]
+    },
+    "geological_modeling": {
+      "path": "geological_modeling/",
+      "icons": [
+        {"name": "wizard.svg", "menu_item": "Geological Modelling Wizard"},
+        {"name": "explorer.svg", "menu_item": "Geological Model Explorer"},
+        {"name": "boundary.svg", "menu_item": "Define Boundary"},
+        {"name": "domains.svg", "menu_item": "Create Domains"},
+        {"name": "surfaces.svg", "menu_item": "Build Surfaces"},
+        {"name": "solids.svg", "menu_item": "Build Solids"},
+        {"name": "structural.svg", "menu_item": "Structural Analysis"},
+        {"name": "wireframe.svg", "menu_item": "Wireframe Editor"},
+        {"name": "slope_stability.svg", "menu_item": "Slope Stability Analysis"},
+        {"name": "bench_design.svg", "menu_item": "Bench Design"},
+        {"name": "geomet_domain.svg", "menu_item": "Geomet Domain Mapping"},
+        {"name": "grade_control.svg", "menu_item": "Grade Control"},
+        {"name": "digline.svg", "menu_item": "Diglines"},
+        {"name": "reconciliation.svg", "menu_item": "Reconciliation"}
+      ]
+    },
+    "geotechnical": {
+      "path": "geotechnical/",
+      "icons": [
+        {"name": "dashboard.svg", "menu_item": "Geotechnical Dashboard"}
+      ]
+    },
+    "mine_planning": {
+      "path": "mine_planning/",
+      "icons": [
+        {"name": "pit_optimisation.svg", "menu_item": "Pit Optimisation"},
+        {"name": "underground.svg", "menu_item": "Underground Mining"},
+        {"name": "scheduling.svg", "menu_item": "Scheduling"},
+        {"name": "strategic.svg", "menu_item": "Strategic Schedule"},
+        {"name": "fleet.svg", "menu_item": "Fleet & Haulage"},
+        {"name": "npv.svg", "menu_item": "NPVS Optimisation"},
+        {"name": "pushback.svg", "menu_item": "Pushback Visual Designer"},
+        {"name": "esg.svg", "menu_item": "ESG Dashboard"}
+      ]
+    },
+    "machine_learning": {
+      "path": "machine_learning/",
+      "icons": [
+        {"name": "kmeans.svg", "menu_item": "K-Means Clustering Analysis"}
+      ]
+    },
+    "dashboards": {
+      "path": "dashboards/",
+      "icons": [
+        {"name": "geological.svg", "menu_item": "Geological Views"},
+        {"name": "planning.svg", "menu_item": "Planning Dashboard"},
+        {"name": "production.svg", "menu_item": "Production Dashboard"},
+        {"name": "research.svg", "menu_item": "Research Mode Dashboard"}
+      ]
+    },
+    "workbench": {
+      "path": "workbench/",
+      "icons": [
+        {"name": "workbench.svg", "menu_item": "Workbench (menu header)"},
+        {"name": "geologist.svg", "menu_item": "Geologist Layout"},
+        {"name": "planner.svg", "menu_item": "Mine Planner Layout"},
+        {"name": "metallurgist.svg", "menu_item": "Metallurgist Layout"},
+        {"name": "esg_report.svg", "menu_item": "ESG / Reporting Layout"},
+        {"name": "save_layout.svg", "menu_item": "Save Current Layout"}
+      ]
+    },
+    "workflows": {
+      "path": "workflows/",
+      "icons": [
+        {"name": "workflow.svg", "menu_item": "Workflows (menu header)"},
+        {"name": "open_pit_wizard.svg", "menu_item": "Open Pit Planning Wizard"},
+        {"name": "geomet_wizard.svg", "menu_item": "Geomet Planning Wizard"},
+        {"name": "gc_wizard.svg", "menu_item": "Grade Control & Short-Term Wizard"},
+        {"name": "save_template.svg", "menu_item": "Save Current Session as Template"},
+        {"name": "load_template.svg", "menu_item": "Load Template"},
+        {"name": "delete_template.svg", "menu_item": "Delete Template"}
+      ]
+    },
+    "help": {
+      "path": "help/",
+      "icons": [
+        {"name": "help.svg", "menu_item": "Help (menu header)"},
+        {"name": "documentation.svg", "menu_item": "Documentation"},
+        {"name": "keyboard.svg", "menu_item": "Keyboard Shortcuts"},
+        {"name": "about.svg", "menu_item": "About"}
+      ]
+    }
+  },
+  "total_icons": 148,
+  "usage_example": {
+    "python": "from PyQt6.QtGui import QIcon\nicon = QIcon('assets/icons/menu/file/save_project.svg')\naction.setIcon(icon)"
+  }
+}
+

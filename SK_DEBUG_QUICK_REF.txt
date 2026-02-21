@@ -1,0 +1,112 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║         SIMPLE KRIGING DEBUG MODE - QUICK REFERENCE                  ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO ENABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Open Simple Kriging panel
+  2. Check ☑ "Debug Mode" checkbox (orange text)
+  3. Run your kriging analysis
+  4. If it fails → check sk_debug_log.txt
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ WHAT GETS LOGGED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✓ Every execution stage with timestamp
+  ✓ Full error tracebacks
+  ✓ Input validation results
+  ✓ Data statistics (rows, columns, value ranges)
+  ✓ Grid configuration (dimensions, memory usage)
+  ✓ Kriging parameters (mean, range, sill, etc.)
+  ✓ Progress updates
+  ✓ Results summary
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DEBUG LOG FILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  📁 Location: sk_debug_log.txt (current working directory)
+  📝 Format: Plain text with timestamps
+  🔄 Overwrites each run
+  📊 Summary at end of file
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ COMMON FAILURE PATTERNS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  🔴 Crashes during grid creation
+     → Log shows: "Building estimation grid" then stops
+     → Solution: Reduce nx, ny, nz values
+
+  🔴 Crashes calling simple_kriging_3d
+     → Log shows: "CALLING simple_kriging_3d" then error
+     → Solution: Check variogram parameters, add nugget
+
+  🔴 Invalid input data
+     → Log shows: "Validation FAILED" with issues list
+     → Solution: Fix data (missing columns, wrong variable name)
+
+  🔴 Memory allocation error
+     → Log shows: memory_mb > 1000, then crash
+     → Solution: Reduce grid size or increase RAM
+
+  🔴 Singular matrix error
+     → Log shows: "Covariance matrix is singular"
+     → Solution: Add nugget, increase search radius
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ READING THE DEBUG LOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Find ERROR section → shows what went wrong
+  2. Check last successful stage → shows where it stopped
+  3. Review validation failures → shows input problems
+  4. Look at timeline → shows performance bottlenecks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ EXAMPLE ERROR SECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ============================================================
+  ERROR CAUGHT AT STAGE: simple_kriging_3d execution
+  Error Type: ValueError
+  Error Message: Covariance matrix is singular
+
+  Full Traceback:
+  [detailed stack trace here]
+  ============================================================
+
+  ↑ Copy this section when asking for help
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ WHEN TO USE DEBUG MODE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✅ USE when:
+     • Kriging fails or crashes
+     • Testing new parameters
+     • Working with new datasets
+     • Need performance profiling
+
+  ⛔ NOT NEEDED for:
+     • Routine production runs (unless issues occur)
+     • Successful executions (unless debugging performance)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PERFORMANCE IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Overhead: < 2% execution time (minimal)
+  Safe for production troubleshooting
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FOR MORE DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  📖 See: SIMPLE_KRIGING_DEBUG_GUIDE.md
+  📧 Support: Include sk_debug_log.txt when reporting issues
+
+╚══════════════════════════════════════════════════════════════════════╝

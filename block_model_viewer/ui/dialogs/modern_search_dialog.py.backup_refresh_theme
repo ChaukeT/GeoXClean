@@ -1,0 +1,694 @@
+"""
+Modern command-palette style search dialog for GeoX.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, List, Tuple, Optional
+
+from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from ..modern_styles import get_theme_colors, ModernColors
+from PyQt6.QtGui import QFont, QPainter, QColor
+from PyQt6.QtWidgets import (
+    QDialog,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QVBoxLayout,
+    QHBoxLayout,
+    QWidget,
+    QLabel,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
+)
+
+if TYPE_CHECKING:
+    from PyQt6.QtGui import QAction
+
+logger = logging.getLogger(__name__)
+
+
+class SearchItemDelegate(QStyledItemDelegate):
+    """Custom delegate for rendering search results with highlighted matches."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.search_text = ""
+        self._icon_size = 18
+
+
+
+    def refresh_theme(self):
+        """Update colors when theme changes."""
+        colors = get_theme_colors()
+        # Re-apply stylesheet with new theme colors
+        if hasattr(self, "setStyleSheet"):
+            self.setStyleSheet(self.styleSheet())
+        # Refresh child widgets
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "refresh_theme"):
+                child.refresh_theme()
+    def set_search_text(self, text: str):
+        """Update the search text for highlighting."""
+        self.search_text = text.lower()
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        """Paint the item with highlighted search matches."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Get item data
+        name = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        description = index.data(Qt.ItemDataRole.ToolTipRole) or ""
+        shortcut = index.data(Qt.ItemDataRole.UserRole + 1) or ""
+        category = index.data(Qt.ItemDataRole.UserRole + 2) or ""
+
+        # Determine colors based on selection state
+        is_selected = option.state & QStyle.StateFlag.State_Selected
+        is_hovered = option.state & QStyle.StateFlag.State_MouseOver
+
+        # Background
+        rect = option.rect
+        if is_selected:
+            painter.fillRect(rect, QColor("#1976d2"))
+        elif is_hovered:
+            painter.fillRect(rect, QColor(f"{ModernColors.BORDER}"))
+        else:
+            painter.fillRect(rect, QColor(f"{ModernColors.CARD_BG}"))
+
+        # Calculate positions
+        padding = 12
+        icon_area = 32
+        x = rect.x() + padding
+        y = rect.y()
+        available_width = rect.width() - (padding * 2) - icon_area
+
+        # Draw category icon/indicator
+        icon_x = x
+        icon_y = y + (rect.height() - self._icon_size) // 2
+        self._draw_category_icon(painter, icon_x, icon_y, category, is_selected)
+
+        x += icon_area
+
+        # Draw name with highlighting
+        name_font = QFont()
+        name_font.setPointSize(10)
+        name_font.setWeight(QFont.Weight.Medium)
+        painter.setFont(name_font)
+
+        name_color = QColor(f"{ModernColors.TEXT_PRIMARY}") if is_selected else QColor(f"{ModernColors.TEXT_PRIMARY}")
+        name_y = y + 18
+
+        self._draw_highlighted_text(painter, x, name_y, name, name_color, is_selected)
+
+        # Draw description below name
+        if description:
+            desc_font = QFont()
+            desc_font.setPointSize(9)
+            painter.setFont(desc_font)
+            desc_color = QColor(f"{ModernColors.TEXT_SECONDARY}") if is_selected else QColor("#757575")
+            painter.setPen(desc_color)
+
+            # Truncate description if too long
+            metrics = painter.fontMetrics()
+            elided = metrics.elidedText(description, Qt.TextElideMode.ElideRight, available_width - 100)
+            painter.drawText(x, y + 35, elided)
+
+        # Draw keyboard shortcut on the right
+        if shortcut:
+            shortcut_font = QFont()
+            shortcut_font.setPointSize(9)
+            painter.setFont(shortcut_font)
+
+            shortcut_color = QColor("#90caf9") if is_selected else QColor("#64b5f6")
+            painter.setPen(shortcut_color)
+
+            metrics = painter.fontMetrics()
+            shortcut_width = metrics.horizontalAdvance(shortcut)
+            shortcut_x = rect.right() - padding - shortcut_width
+            shortcut_y = y + (rect.height() // 2) + 4
+
+            # Draw shortcut badge background
+            badge_rect = painter.fontMetrics().boundingRect(shortcut)
+            badge_rect.moveTopLeft(
+                painter.fontMetrics().boundingRect(shortcut).topLeft()
+            )
+            badge_x = shortcut_x - 6
+            badge_y = shortcut_y - 12
+            badge_w = shortcut_width + 12
+            badge_h = 18
+
+            badge_bg = QColor(f"{ModernColors.HOVER}") if is_selected else QColor("#252525")
+            painter.setBrush(badge_bg)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(badge_x, badge_y, badge_w, badge_h, 4, 4)
+
+            painter.setPen(shortcut_color)
+            painter.drawText(shortcut_x, shortcut_y, shortcut)
+
+        painter.restore()
+
+    def _draw_category_icon(self, painter: QPainter, x: int, y: int, category: str, is_selected: bool):
+        """Draw a category icon indicator."""
+        size = self._icon_size
+
+        # Color based on category
+        category_colors = {
+            "File": "#4caf50",
+            "Edit": "#ff9800",
+            "View": "#2196f3",
+            "Tools": "#9c27b0",
+            "Analysis": "#00bcd4",
+            "Help": "#607d8b",
+            "Search": "#1976d2",
+        }
+
+        color = QColor(category_colors.get(category, "#64b5f6"))
+        if is_selected:
+            color = color.lighter(120)
+
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(x, y, size, size, 4, 4)
+
+        # Draw first letter of category
+        painter.setPen(QColor(f"{ModernColors.TEXT_PRIMARY}"))
+        font = QFont()
+        font.setPointSize(9)
+        font.setWeight(QFont.Weight.Bold)
+        painter.setFont(font)
+
+        letter = category[0].upper() if category else "?"
+        metrics = painter.fontMetrics()
+        text_x = x + (size - metrics.horizontalAdvance(letter)) // 2
+        text_y = y + (size + metrics.ascent() - metrics.descent()) // 2
+        painter.drawText(text_x, text_y, letter)
+
+    def _draw_highlighted_text(self, painter: QPainter, x: int, y: int, text: str,
+                               base_color: QColor, is_selected: bool):
+        """Draw text with search matches highlighted."""
+        if not self.search_text:
+            painter.setPen(base_color)
+            painter.drawText(x, y, text)
+            return
+
+        # Find all matches for highlighting
+        lower_text = text.lower()
+        search_terms = self.search_text.split()
+
+        # Create a list of (start, end) positions for all matches
+        highlights = []
+        for term in search_terms:
+            start = 0
+            while True:
+                pos = lower_text.find(term, start)
+                if pos == -1:
+                    break
+                highlights.append((pos, pos + len(term)))
+                start = pos + 1
+
+        # Sort and merge overlapping highlights
+        if highlights:
+            highlights.sort()
+            merged = [highlights[0]]
+            for start, end in highlights[1:]:
+                if start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            highlights = merged
+
+        # Draw text character by character with highlights
+        current_x = x
+        metrics = painter.fontMetrics()
+
+        i = 0
+        while i < len(text):
+            # Check if we're in a highlighted region
+            in_highlight = any(start <= i < end for start, end in highlights)
+
+            # Find the end of this segment (highlighted or not)
+            segment_end = i
+            while segment_end < len(text):
+                in_next = any(start <= segment_end < end for start, end in highlights)
+                if in_next != in_highlight:
+                    break
+                segment_end += 1
+
+            segment = text[i:segment_end]
+
+            if in_highlight:
+                # Draw highlighted background
+                segment_width = metrics.horizontalAdvance(segment)
+                highlight_color = QColor("#ffd54f") if is_selected else QColor("#fff59d")
+                bg_color = QColor("#5d4037") if is_selected else QColor("#3d3d1e")
+
+                painter.fillRect(current_x - 1, y - 12, segment_width + 2, 16, bg_color)
+                painter.setPen(highlight_color)
+            else:
+                painter.setPen(base_color)
+
+            painter.drawText(current_x, y, segment)
+            current_x += metrics.horizontalAdvance(segment)
+            i = segment_end
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        """Return the size hint for items."""
+        return QSize(option.rect.width(), 52)
+
+
+class ModernSearchDialog(QDialog):
+    """
+    A modern command-palette style search dialog.
+
+    Features:
+    - Real-time fuzzy search filtering
+    - Keyboard navigation (Up/Down arrows)
+    - Search match highlighting
+    - Keyboard shortcut display
+    - Category icons
+    - Modern dark theme styling
+    """
+
+    item_selected = pyqtSignal(str)
+
+    def __init__(self, items: List[Tuple[str, str]], parent: QWidget | None = None,
+                 actions: Optional[List['QAction']] = None):
+        super().__init__(parent)
+        self.items = items
+        self.actions = actions or []
+        self._action_map = {(a.text() or "").replace("&", ""): a for a in self.actions}
+        self._selection_handled = False  # Guard against multiple triggers
+
+        self.setWindowTitle("Command Palette")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setModal(True)
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(450)
+
+        self._init_ui()
+        self._apply_styling()
+        self._populate_list(self.items)
+
+        # Select first item by default
+        if self.results_list.count() > 0:
+            self.results_list.setCurrentRow(0)
+
+    def _init_ui(self):
+        """Initialize the UI components."""
+        # Main container with shadow
+        self.container = QFrame(self)
+        self.container.setObjectName("searchContainer")
+
+        # Add drop shadow effect
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 5)
+        self.container.setGraphicsEffect(shadow)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+
+        # Header with search input
+        header = QFrame()
+        header.setObjectName("searchHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 16, 16, 16)
+
+        # Search icon
+        search_icon = QLabel("🔍")
+        search_icon.setFixedWidth(24)
+        header_layout.addWidget(search_icon)
+
+        # Search Input
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("searchInput")
+        self.search_input.setPlaceholderText("Search for modules, actions, or commands...")
+        self.search_input.textChanged.connect(self._on_search_changed)
+        self.search_input.setFrame(False)
+        header_layout.addWidget(self.search_input)
+
+        # Result count badge
+        self.result_count = QLabel()
+        self.result_count.setObjectName("resultCount")
+        header_layout.addWidget(self.result_count)
+
+        container_layout.addWidget(header)
+
+        # Separator line
+        separator = QFrame()
+        separator.setFixedHeight(1)
+        separator.setObjectName("separator")
+        container_layout.addWidget(separator)
+
+        # Results List
+        self.results_list = QListWidget()
+        self.results_list.setObjectName("resultsList")
+        # Only connect itemActivated (double-click or Enter) - NOT itemClicked
+        # to prevent multiple triggers
+        self.results_list.itemDoubleClicked.connect(self._on_item_activated)
+        self.results_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.results_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.results_list.setMouseTracking(True)
+
+        # Custom delegate for rendering
+        self.delegate = SearchItemDelegate(self.results_list)
+        self.results_list.setItemDelegate(self.delegate)
+
+        container_layout.addWidget(self.results_list)
+
+        # Footer with hints
+        footer = QFrame()
+        footer.setObjectName("searchFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 12, 16, 12)
+
+        hints = [
+            ("↑↓", "Navigate"),
+            ("Enter", "Select"),
+            ("Esc", "Close"),
+        ]
+
+        for key, action in hints:
+            hint_container = QWidget()
+            hint_layout = QHBoxLayout(hint_container)
+            hint_layout.setContentsMargins(0, 0, 12, 0)
+            hint_layout.setSpacing(4)
+
+            key_label = QLabel(key)
+            key_label.setObjectName("hintKey")
+            hint_layout.addWidget(key_label)
+
+            action_label = QLabel(action)
+            action_label.setObjectName("hintAction")
+            hint_layout.addWidget(action_label)
+
+            footer_layout.addWidget(hint_container)
+
+        footer_layout.addStretch()
+
+        # GeoX branding
+        brand = QLabel("GeoX Command Palette")
+        brand.setObjectName("brand")
+        footer_layout.addWidget(brand)
+
+        container_layout.addWidget(footer)
+
+    def _apply_styling(self):
+        """Apply modern styling to the dialog."""
+        self.setStyleSheet(f"""
+            #searchContainer {{
+                background-color: {ModernColors.CARD_BG};
+                border: 1px solid #404040;
+                border-radius: 12px;
+            }}
+
+            #searchHeader {{
+                background-color: {ModernColors.CARD_BG};
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+            }}
+
+            #searchInput {{
+                background-color: transparent;
+                color: {ModernColors.TEXT_PRIMARY};
+                font-size: 14px;
+                padding: 8px;
+                border: none;
+            }}
+
+            #searchInput::placeholder {{
+                color: #757575;
+            }}
+
+            #resultCount {{
+                color: #757575;
+                font-size: 12px;
+                padding: 4px 8px;
+                background-color: {ModernColors.BORDER};
+                border-radius: 4px;
+            }}
+
+            #separator {{
+                background-color: #404040;
+            }}
+
+            #resultsList {{
+                background-color: {ModernColors.CARD_BG};
+                border: none;
+                outline: none;
+                padding: 8px;
+            }}
+
+            #resultsList::item {{
+                background-color: transparent;
+                border-radius: 8px;
+                padding: 0px;
+                margin: 2px 4px;
+            }}
+
+            #resultsList::item:selected {{
+                background-color: #1976d2;
+            }}
+
+            #resultsList::item:hover:!selected {{
+                background-color: {ModernColors.BORDER};
+            }}
+
+            #searchFooter {{
+                background-color: #252525;
+                border-bottom-left-radius: 12px;
+                border-bottom-right-radius: 12px;
+                border-top: 1px solid #404040;
+            }}
+
+            #hintKey {{
+                color: #64b5f6;
+                font-size: 11px;
+                font-weight: bold;
+                background-color: {ModernColors.HOVER};
+                padding: 2px 6px;
+                border-radius: 4px;
+            }}
+
+            #hintAction {{
+                color: #9e9e9e;
+                font-size: 11px;
+            }}
+
+            #brand {{
+                color: #5d5d5d;
+                font-size: 11px;
+                font-style: italic;
+            }}
+
+            QScrollBar:vertical {{
+                background-color: transparent;
+                width: 8px;
+                margin: 4px 2px;
+            }}
+
+            QScrollBar::handle:vertical {{
+                background-color: #5d5d5d;
+                border-radius: 4px;
+                min-height: 30px;
+            }}
+
+            QScrollBar::handle:vertical:hover {{
+                background-color: #7d7d7d;
+            }}
+
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """)
+
+    def _get_action_info(self, name: str) -> Tuple[str, str]:
+        """Get shortcut and category for an action."""
+        action = self._action_map.get(name)
+        shortcut = ""
+        category = ""
+
+        if action:
+            shortcut_seq = action.shortcut()
+            if shortcut_seq and not shortcut_seq.isEmpty():
+                shortcut = shortcut_seq.toString()
+
+            # Try to determine category from parent menu
+            parent = action.parent()
+            if parent:
+                parent_name = parent.objectName() if hasattr(parent, 'objectName') else ""
+                if "file" in parent_name.lower():
+                    category = "File"
+                elif "edit" in parent_name.lower():
+                    category = "Edit"
+                elif "view" in parent_name.lower():
+                    category = "View"
+                elif "tool" in parent_name.lower():
+                    category = "Tools"
+                elif "analysis" in parent_name.lower():
+                    category = "Analysis"
+                elif "help" in parent_name.lower():
+                    category = "Help"
+
+        # Infer category from action name if not determined
+        if not category:
+            name_lower = name.lower()
+            if any(w in name_lower for w in ["open", "save", "export", "import", "new", "close"]):
+                category = "File"
+            elif any(w in name_lower for w in ["copy", "paste", "cut", "undo", "redo"]):
+                category = "Edit"
+            elif any(w in name_lower for w in ["view", "show", "hide", "zoom", "pan"]):
+                category = "View"
+            elif any(w in name_lower for w in ["tool", "setting", "preference", "config"]):
+                category = "Tools"
+            elif any(w in name_lower for w in ["analysis", "calculate", "compute", "run"]):
+                category = "Analysis"
+            elif any(w in name_lower for w in ["help", "about", "doc", "guide"]):
+                category = "Help"
+            elif any(w in name_lower for w in ["search", "find"]):
+                category = "Search"
+            else:
+                category = "Tools"
+
+        return shortcut, category
+
+    def _on_search_changed(self, text: str):
+        """Filter the list based on the search text with fuzzy matching."""
+        self.delegate.set_search_text(text)
+
+        if not text:
+            self._populate_list(self.items)
+            return
+
+        # Fuzzy search: match items where all search terms appear
+        search_terms = text.lower().split()
+        scored_items = []
+
+        for item in self.items:
+            name_lower = item[0].lower()
+            desc_lower = item[1].lower()
+            combined = name_lower + " " + desc_lower
+
+            # Check if all terms match
+            if all(term in combined for term in search_terms):
+                # Score: prioritize name matches over description matches
+                score = 0
+                for term in search_terms:
+                    if term in name_lower:
+                        # Bonus for start match
+                        if name_lower.startswith(term):
+                            score += 100
+                        else:
+                            score += 50
+                    elif term in desc_lower:
+                        score += 10
+
+                scored_items.append((score, item))
+
+        # Sort by score (descending) then alphabetically
+        scored_items.sort(key=lambda x: (-x[0], x[1][0].lower()))
+        filtered_items = [item for _, item in scored_items]
+
+        self._populate_list(filtered_items)
+
+        # Select first item after filtering
+        if self.results_list.count() > 0:
+            self.results_list.setCurrentRow(0)
+
+    def _populate_list(self, items: List[Tuple[str, str]]):
+        """Populate the list widget with items."""
+        self.results_list.clear()
+
+        for name, description in items:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.DisplayRole, name)
+            item.setData(Qt.ItemDataRole.ToolTipRole, description)
+            item.setData(Qt.ItemDataRole.UserRole, name)  # For selection
+
+            # Get shortcut and category
+            shortcut, category = self._get_action_info(name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, shortcut)
+            item.setData(Qt.ItemDataRole.UserRole + 2, category)
+
+            item.setSizeHint(QSize(0, 52))
+            self.results_list.addItem(item)
+
+        # Update result count
+        self.result_count.setText(f"{len(items)} results")
+
+    def _on_item_activated(self, item: QListWidgetItem):
+        """Handle item activation (e.g., double-click or Enter)."""
+        # Guard against multiple triggers
+        if self._selection_handled:
+            return
+        self._selection_handled = True
+
+        selected_item_name = item.data(Qt.ItemDataRole.UserRole)
+        if selected_item_name:
+            # Store the selected name - it will be retrieved after exec() returns
+            self._selected_name = selected_item_name
+            self.accept()
+
+    def get_selected_item(self) -> Optional[str]:
+        """Return the selected item name, or None if nothing was selected."""
+        return getattr(self, '_selected_name', None)
+
+    def keyPressEvent(self, event):
+        """Handle key presses for navigation."""
+        key = event.key()
+
+        if key == Qt.Key.Key_Escape:
+            self.reject()
+        elif key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
+            current = self.results_list.currentItem()
+            if current:
+                self._on_item_activated(current)
+        elif key == Qt.Key.Key_Up:
+            current_row = self.results_list.currentRow()
+            if current_row > 0:
+                self.results_list.setCurrentRow(current_row - 1)
+                self.results_list.scrollToItem(self.results_list.currentItem())
+        elif key == Qt.Key.Key_Down:
+            current_row = self.results_list.currentRow()
+            if current_row < self.results_list.count() - 1:
+                self.results_list.setCurrentRow(current_row + 1)
+                self.results_list.scrollToItem(self.results_list.currentItem())
+        elif key == Qt.Key.Key_Tab:
+            # Tab cycles through results
+            if self.results_list.count() > 0:
+                current_row = self.results_list.currentRow()
+                next_row = (current_row + 1) % self.results_list.count()
+                self.results_list.setCurrentRow(next_row)
+        else:
+            # Forward other keys to search input
+            if not self.search_input.hasFocus():
+                self.search_input.setFocus()
+            super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        """Handle dialog show event."""
+        super().showEvent(event)
+        # Focus on search input when shown
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+
+        # Center on parent
+        if self.parent():
+            parent_geo = self.parent().geometry()
+            self.move(
+                parent_geo.x() + (parent_geo.width() - self.width()) // 2,
+                parent_geo.y() + 100  # Slightly above center for command palette feel
+            )

@@ -1,0 +1,2664 @@
+from __future__ import annotations
+
+import sys
+import logging
+import hashlib
+import json
+import pandas as pd
+import numpy as np
+from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Import economic rule system for centralized ore/waste classification
+from ..core.economic_rule import EconomicRule, EconomicRuleManager
+
+from PyQt6.QtCore import (
+    Qt,
+    QAbstractTableModel,
+    QModelIndex,
+    QSize,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QIcon,
+    QAction,
+    QFont,
+)
+from PyQt6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTabWidget,
+    QGroupBox,
+    QFormLayout,
+    QComboBox,
+    QDoubleSpinBox,
+    QCheckBox,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QLabel,
+    QFileDialog,
+    QTableView,
+    QMessageBox,
+    QSplitter,
+    QStyle,
+    QFrame,
+    QStatusBar,
+    QSizePolicy,
+    QScrollArea,
+)
+
+# Import modern status bar components
+from .drillhole_status_bar import DrillholeProcessStatusBar, StatusLevel, create_progress_callback
+
+# Import compositing backend and UI engines
+try:
+    from ..drillholes.compositing_engine import (
+        CompositingMethodEngine,
+        Composite,
+        CompositeConfig,
+        WeightingMode,
+        PartialStrategy,
+        Interval,
+    )
+    from ..drillholes.compositing_ui_engines import (
+        NumericalUIEngine,
+        LithologyUIEngine,
+        EconomicUIEngine,
+        WasteOreUIEngine,
+        NumericalUIState,
+        NumericalMode,
+        LithologyUIState,
+        EconomicUIState,
+        WasteOreUIState,
+        UIValidationResult,
+    )
+except ImportError:
+    # Fallback for UI testing if backend is missing
+    pass
+
+from .modern_styles import get_analysis_panel_stylesheet, get_theme_colors, ModernColors
+
+
+def _get_compositing_window_stylesheet() -> str:
+    """Get the stylesheet for the Compositing Window with high contrast fixes."""
+    colors = get_theme_colors()
+    base_style = get_analysis_panel_stylesheet()
+
+    # CRITICAL FIX: Ensure all labels are light-colored and spaced correctly
+    compositing_extras = f"""
+        /* Force high contrast on all labels */
+        QLabel {{
+            color: {ModernColors.TEXT_PRIMARY}; /* High contrast white */
+            background: transparent;
+        }}
+
+        /* Fix GroupBox titles which often get lost */
+        QGroupBox {{
+            font-weight: bold;
+            border: 1px solid #555555;
+            border-radius: 6px;
+            margin-top: 15px;
+            padding-top: 10px;
+        }}
+
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            left: 10px;
+            padding: 0 5px;
+            color: #3498db; /* Professional blue for titles */
+        }}
+
+        /* Give Form Layout rows breathing room */
+        QFormLayout {{
+            vertical-spacing: 12px;
+            horizontal-spacing: 20px;
+        }}
+
+        /* Fix for the invisible labels in the screenshots */
+        QFormLayout QLabel {{
+            color: #EEEEEE;
+            font-weight: 500;
+            min-width: 150px;
+        }}
+
+        /* Inputs visibility */
+        QDoubleSpinBox, QComboBox, QLineEdit {{
+            background-color: {ModernColors.PANEL_BG};
+            border: 1px solid #444444;
+            border-radius: 4px;
+            padding: 4px;
+            color: {ModernColors.TEXT_PRIMARY};
+            selection-background-color: #3498db;
+        }}
+
+        QDoubleSpinBox:focus, QComboBox:focus {{
+            border: 1px solid #3498db;
+        }}
+
+        /* Ensure checkbox text is visible with proper spacing */
+        QGroupBox QCheckBox {{
+            color: {{colors.TEXT_PRIMARY}};
+            spacing: 8px;
+            padding: 2px 0px;
+        }}
+
+        /* Disabled states with better contrast */
+        QLabel:disabled {{
+            color: {{colors.TEXT_SECONDARY}};
+        }}
+
+        QDoubleSpinBox:disabled, QSpinBox:disabled {{
+            color: {{colors.TEXT_SECONDARY}};
+            background-color: {{colors.PANEL_BG}};
+        }}
+
+        QCheckBox:disabled {{
+            color: {{colors.TEXT_SECONDARY}};
+        }}
+
+        QComboBox:disabled {{
+            color: {{colors.TEXT_SECONDARY}};
+            background-color: {{colors.PANEL_BG}};
+        }}
+    """
+
+    return base_style + compositing_extras
+
+
+# Legacy DARK_STYLESHEET for reference - now using dynamic styles
+_LEGACY_DARK_STYLESHEET = f"""
+QWidget {{
+    background-color: #2b2b2b;
+    color: {ModernColors.TEXT_PRIMARY};
+    font-family: "Segoe UI", "Roboto", sans-serif;
+    font-size: 10pt;
+}}
+
+/* Group Box */
+QGroupBox {{
+    border: 1px solid #3e3e3e;
+    border-radius: 6px;
+    margin-top: 22px;
+    font-weight: bold;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+    color: #007acc;
+}}
+
+/* Tabs */
+QTabWidget::pane {{
+    border: 1px solid #3e3e3e;
+    background-color: {ModernColors.PANEL_BG};
+}}
+QTabBar::tab {{
+    background-color: #333333;
+    color: #aaa;
+    padding: 8px 20px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background-color: {ModernColors.PANEL_BG};
+    color: white;
+    border-bottom: 2px solid #007acc;
+}}
+
+/* Inputs */
+QComboBox, QDoubleSpinBox, QSpinBox {{
+    background-color: {ModernColors.PANEL_BG};
+    border: 1px solid #3e3e3e;
+    border-radius: 3px;
+    padding: 4px 6px;
+    min-height: 24px;
+}}
+QComboBox:hover, QDoubleSpinBox:hover {{
+    border: 1px solid #555;
+}}
+QComboBox:on {{
+    padding-top: 3px;
+    padding-left: 4px;
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 15px;
+    border-left-width: 1px;
+    border-left-color: #3e3e3e;
+    border-left-style: solid;
+}}
+
+/* Table */
+QTableView {{
+    background-color: {ModernColors.PANEL_BG};
+    gridline-color: #333333;
+    border: none;
+    selection-background-color: #004578;
+    selection-color: white;
+}}
+QHeaderView::section {{
+    background-color: #333333;
+    color: #cccccc;
+    padding: 4px;
+    border: 1px solid {ModernColors.PANEL_BG};
+    font-weight: bold;
+}}
+
+/* Buttons */
+QPushButton {{
+    background-color: #333333;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 6px 12px;
+    color: white;
+}}
+QPushButton:hover {{
+    background-color: #444;
+}}
+QPushButton:pressed {{
+    background-color: #222;
+}}
+QPushButton#PrimaryButton {{
+    background-color: #005a9e;
+    border: 1px solid #005a9e;
+    font-weight: bold;
+}}
+QPushButton#PrimaryButton:hover {{
+    background-color: #0065b3;
+}}
+"""
+
+
+# =======================================================
+#  Table model for composite results
+# =======================================================
+
+
+class CompositeResultsModel(QAbstractTableModel):
+    def __init__(self, df: pd.DataFrame | None = None):
+        super().__init__()
+        self.df = df if df is not None else pd.DataFrame()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        # Table models are flat - return 0 for valid parent (hierarchical queries)
+        if parent.isValid():
+            return 0
+        return len(self.df)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        # Table models are flat - return 0 for valid parent (hierarchical queries)
+        if parent.isValid():
+            return 0
+        return len(self.df.columns)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            value = self.df.iat[index.row(), index.column()]
+            if pd.isna(value):
+                return ""
+            # Format floats nicely
+            if isinstance(value, (float, int)):
+                return f"{value:.3f}"
+            return str(value)
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            return str(self.df.columns[section])
+        return str(section + 1)
+
+    def update_data(self, df: pd.DataFrame):
+        self.beginResetModel()
+        self.df = df
+        self.endResetModel()
+
+
+# =======================================================
+#  Composite results widget (Right Panel)
+# =======================================================
+
+
+class CompositeResultsWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Tab widget for Table vs Charts (Future proofing)
+        self.tabs = QTabWidget()
+        
+        # -- Table Tab --
+        self.table_tab = QWidget()
+        t_layout = QVBoxLayout(self.table_tab)
+        t_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.table = QTableView()
+        self.model = CompositeResultsModel()
+        self.table.setModel(self.model)
+        self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        
+        t_layout.addWidget(self.table)
+        
+        # -- Preview Tab (Placeholder) --
+        self.tabs.addTab(self.table_tab, "Data Table")
+        
+        # Size policies - table expands but doesn't force parent to grow
+        # Using Ignored for vertical means widget won't request minimum height
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        layout.addWidget(self.tabs)
+
+    def update_results(self, df: pd.DataFrame):
+        self.model.update_data(df)
+        self.tabs.setCurrentIndex(0)  # Switch to table to show results
+
+
+# =======================================================
+#  Base interface for compositing tabs
+# =======================================================
+
+
+class BaseCompositingTab(QWidget):
+    def get_state(self):
+        raise NotImplementedError
+
+    def get_ui_engine(self):
+        raise NotImplementedError
+
+    def apply_validation_result(self, result):
+        """
+        Show validation errors.
+        """
+        if result.ok:
+            return True
+
+        # Collect error messages
+        errors = [f"• {m.field}: {m.message}" for m in result.errors]
+        warnings = [f"• {m.field}: {m.message}" for m in result.warnings]
+
+        text = ""
+        if errors:
+            text += "<b>Errors:</b><br>" + "<br>".join(errors) + "<br><br>"
+        if warnings:
+            text += "<b>Warnings:</b><br>" + "<br>".join(warnings)
+
+        QMessageBox.warning(self, "Validation Failed", text)
+        return False
+
+
+# =======================================================
+#  Specific Tabs
+# =======================================================
+
+
+class NumericalTab(BaseCompositingTab):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        
+        # Create layout with scroll area support if needed
+        main_layout = QVBoxLayout(self)
+        
+        # 1. Method Selection
+        gb_method = QGroupBox("Methodology")
+        l_method = QFormLayout()
+        
+        self.method_selector = QComboBox()
+        self.method_selector.addItems([
+            "Fixed Length", "Equal Mass", "Equal Volume", 
+            "True Thickness", "Bench Aligned", "Rolling Window"
+        ])
+        l_method.addRow("Algorithm:", self.method_selector)
+        
+        self.weighting = QComboBox()
+        self.weighting.addItems(["Length", "Mass", "Density"])
+        l_method.addRow("Weighting:", self.weighting)
+        
+        self.weighting_warning = QLabel("⚠️ Mass/Density weighting requires density data.")
+        self.weighting_warning.setStyleSheet("color: #e67e22; font-style: italic; font-size: 9pt;")
+        self.weighting_warning.hide()
+        l_method.addRow("", self.weighting_warning)
+        
+        gb_method.setLayout(l_method)
+        main_layout.addWidget(gb_method)
+
+        # 2. Parameters (Dynamic)
+        self.gb_params = QGroupBox("Parameters")
+        self.params_layout = QFormLayout()
+        self.gb_params.setLayout(self.params_layout)
+        
+        # Initialize inputs (hidden/shown dynamically)
+        self.comp_length = self._make_spin(1.0, 0.01, 9999, "Target length of composite intervals")
+        self.target_mass = self._make_spin(10.0, 0.1, 1e6, "Target mass per composite")
+        self.bench_height = self._make_spin(10.0, 0.1, 200, "Height of mining bench")
+        self.bench_offset = self._make_spin(0.0, -200, 200, "RL offset for bench definition")
+        self.window_length = self._make_spin(5.0, 0.1, 200, "Size of rolling window")
+        self.window_step = self._make_spin(1.0, 0.01, 200, "Step size for rolling window")
+
+        main_layout.addWidget(self.gb_params)
+
+        # 3. Handling
+        gb_handle = QGroupBox("Boundary Handling")
+        l_handle = QFormLayout()
+        
+        self.partial_strategy = QComboBox()
+        self.partial_strategy.addItems(["Discard", "Keep", "Merge", "Auto"])
+        l_handle.addRow("End of Hole:", self.partial_strategy)
+        
+        self.auto_fraction = self._make_spin(0.5, 0.0, 1.0)
+        self.auto_fraction.setSingleStep(0.1)
+        l_handle.addRow("Auto Merge Ratio:", self.auto_fraction)
+        
+        gb_handle.setLayout(l_handle)
+        main_layout.addWidget(gb_handle)
+
+        # 4. QA/QC
+        gb_qaqc = QGroupBox("Filters")
+        l_qaqc = QVBoxLayout()
+        
+        self.cb_exclude_qaqc = QCheckBox("Exclude Standards/Blanks/Duplicates")
+        l_qaqc.addWidget(self.cb_exclude_qaqc)
+        
+        self.cb_treat_null_as_zero = QCheckBox("Treat Missing Grades as Zero")
+        self.cb_treat_null_as_zero.setChecked(True)
+        self.cb_treat_null_as_zero.setToolTip(
+            "If checked, missing/NaN grades are treated as 0.0 (mining standard).\n"
+            "If unchecked, missing grades are excluded from weighting (partial sampling)."
+        )
+        l_qaqc.addWidget(self.cb_treat_null_as_zero)
+        
+        h_rec = QHBoxLayout()
+        h_rec.addWidget(QLabel("Min Recovery (%):"))
+        self.min_recovery = self._make_spin(0.0, 0.0, 100.0)
+        h_rec.addWidget(self.min_recovery)
+        h_rec.addStretch()
+        l_qaqc.addLayout(h_rec)
+        
+        gb_qaqc.setLayout(l_qaqc)
+        main_layout.addWidget(gb_qaqc)
+
+        main_layout.addStretch()
+
+        # Logic
+        self.ui_engine = NumericalUIEngine() if 'NumericalUIEngine' in globals() else None
+        
+        self.method_selector.currentIndexChanged.connect(self._update_params_ui)
+        self.weighting.currentIndexChanged.connect(self._update_weighting_warning)
+        self._update_params_ui()
+
+    def _make_spin(self, val, min_v, max_v, tooltip=""):
+        sb = QDoubleSpinBox()
+        sb.setRange(min_v, max_v)
+        sb.setValue(val)
+        sb.setToolTip(tooltip)
+        sb.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        return sb
+
+    def _update_weighting_warning(self):
+        if self.weighting.currentText() in ("Mass", "Density"):
+            self.weighting_warning.show()
+        else:
+            self.weighting_warning.hide()
+
+    def _update_params_ui(self):
+        # Clear layout rows
+        while self.params_layout.rowCount() > 0:
+            self.params_layout.removeRow(0)
+
+        method = self.method_selector.currentText()
+
+        if method in ["Fixed Length", "Equal Volume", "True Thickness"]:
+            label = "Target Length (m):"
+            if method == "True Thickness":
+                label = "True Thickness (m):"
+            self.params_layout.addRow(label, self.comp_length)
+            
+        elif method == "Equal Mass":
+            self.params_layout.addRow("Target Mass (t):", self.target_mass)
+
+        elif method == "Bench Aligned":
+            self.params_layout.addRow("Bench Height (m):", self.bench_height)
+            self.params_layout.addRow("RL Offset (m):", self.bench_offset)
+
+        elif method == "Rolling Window":
+            self.params_layout.addRow("Window Length (m):", self.window_length)
+            self.params_layout.addRow("Step Size (m):", self.window_step)
+
+    def get_ui_engine(self):
+        return self.ui_engine
+
+    def get_state(self):
+        if 'NumericalUIState' not in globals() or not self.ui_engine:
+            return None
+        
+        state = NumericalUIState()
+        
+        # Map method selector to NumericalMode
+        method_map = {
+            "Fixed Length": NumericalMode.FIXED_LENGTH,
+            "Equal Mass": NumericalMode.EQUAL_MASS,
+            "Equal Volume": NumericalMode.EQUAL_VOLUME,
+            "True Thickness": NumericalMode.TRUE_THICKNESS,
+            "Bench Aligned": NumericalMode.BENCH_ALIGNED,
+            "Rolling Window": NumericalMode.ROLLING_WINDOW,
+        }
+        state.mode = method_map.get(self.method_selector.currentText(), NumericalMode.FIXED_LENGTH)
+        
+        # Map weighting
+        weighting_map = {
+            "Length": WeightingMode.LENGTH,
+            "Mass": WeightingMode.MASS,
+            "Density": WeightingMode.DENSITY,
+        }
+        state.weighting_mode = weighting_map.get(self.weighting.currentText(), WeightingMode.LENGTH)
+        
+        # Parameters
+        state.composite_length = self.comp_length.value()
+        state.target_mass = self.target_mass.value() if state.mode == NumericalMode.EQUAL_MASS else None
+        state.bench_height = self.bench_height.value() if state.mode == NumericalMode.BENCH_ALIGNED else None
+        state.bench_offset = self.bench_offset.value() if state.mode == NumericalMode.BENCH_ALIGNED else 0.0
+        state.rolling_window_length = self.window_length.value() if state.mode == NumericalMode.ROLLING_WINDOW else None
+        state.rolling_step = self.window_step.value() if state.mode == NumericalMode.ROLLING_WINDOW else None
+        
+        # Partial strategy
+        partial_map = {
+            "Discard": PartialStrategy.DISCARD,
+            "Keep": PartialStrategy.KEEP,
+            "Merge": PartialStrategy.MERGE,
+            "Auto": PartialStrategy.AUTO,
+        }
+        state.partial_strategy = partial_map.get(self.partial_strategy.currentText(), PartialStrategy.AUTO)
+        state.auto_partial_fraction = self.auto_fraction.value()
+        
+        # QA/QC
+        state.exclude_qaqc = self.cb_exclude_qaqc.isChecked()
+        state.treat_null_as_zero = self.cb_treat_null_as_zero.isChecked()
+        recovery_val = self.min_recovery.value()
+        state.min_recovery = recovery_val if recovery_val > 0 else None
+        
+        return state
+
+
+class LithologyTab(BaseCompositingTab):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        
+        gb = QGroupBox("Configuration")
+        form = QFormLayout()
+        
+        self.weighting = QComboBox()
+        self.weighting.addItems(["Length", "Mass", "Density"])
+        form.addRow("Weighting:", self.weighting)
+        
+        self.min_ore = QDoubleSpinBox()
+        self.min_ore.setRange(0, 1000)
+        form.addRow("Min Ore Thickness (m):", self.min_ore)
+        
+        self.min_width = QDoubleSpinBox()
+        self.min_width.setRange(0, 1000)
+        form.addRow("Min Mining Width (m):", self.min_width)
+        
+        gb.setLayout(form)
+        layout.addWidget(gb)
+        
+        # QA/QC Filters (H-05 fix: add missing checkbox)
+        gb_qaqc = QGroupBox("Filters")
+        l_qaqc = QVBoxLayout()
+        
+        self.cb_exclude_qaqc = QCheckBox("Exclude Standards/Blanks/Duplicates")
+        l_qaqc.addWidget(self.cb_exclude_qaqc)
+        
+        self.cb_treat_null_as_zero = QCheckBox("Treat Missing Grades as Zero")
+        self.cb_treat_null_as_zero.setChecked(True)
+        self.cb_treat_null_as_zero.setToolTip(
+            "If checked, missing/NaN grades are treated as 0.0 (mining standard).\n"
+            "If unchecked, missing grades are excluded from weighting (partial sampling)."
+        )
+        l_qaqc.addWidget(self.cb_treat_null_as_zero)
+        
+        gb_qaqc.setLayout(l_qaqc)
+        layout.addWidget(gb_qaqc)
+        
+        layout.addStretch()
+        
+        self.ui_engine = LithologyUIEngine() if 'LithologyUIEngine' in globals() else None
+
+    def get_ui_engine(self):
+        return self.ui_engine
+
+    def get_state(self):
+        if 'LithologyUIState' not in globals() or not self.ui_engine:
+            return None
+        
+        state = LithologyUIState()
+        
+        # Map weighting
+        weighting_map = {
+            "Length": WeightingMode.LENGTH,
+            "Mass": WeightingMode.MASS,
+            "Density": WeightingMode.DENSITY,
+        }
+        state.weighting_mode = weighting_map.get(self.weighting.currentText(), WeightingMode.LENGTH)
+        
+        # Thickness filters
+        min_ore_val = self.min_ore.value()
+        state.min_ore_thickness = min_ore_val if min_ore_val > 0 else None
+        
+        min_width_val = self.min_width.value()
+        state.min_mining_width = min_width_val if min_width_val > 0 else None
+        
+        # QA/QC filters (H-05 fix)
+        state.exclude_qaqc = self.cb_exclude_qaqc.isChecked()
+        state.treat_null_as_zero = self.cb_treat_null_as_zero.isChecked()
+        
+        return state
+
+
+class EconomicTab(BaseCompositingTab):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+
+        # Economic Rule Definition (SINGLE SOURCE OF TRUTH)
+        gb_cut = QGroupBox("Economic Rule Definition (Source of Truth)")
+        cut_layout = QVBoxLayout()
+
+        # Rule input row
+        h = QHBoxLayout()
+        self.cutoff_field = QComboBox()
+        self.cutoff_field.setEditable(True)
+        self.cutoff_field.addItems(["Fe", "Au", "Cu", "Ag"])
+        h.addWidget(self.cutoff_field)
+
+        self.op = QComboBox()
+        self.op.addItems([">=", ">", "<", "<="])
+        self.op.setFixedWidth(60)
+        h.addWidget(self.op)
+
+        self.val = QDoubleSpinBox()
+        self.val.setRange(0, 100000)
+        self.val.setValue(0.0)
+        self.val.setToolTip("Enter cutoff value for compositing (commodity-dependent)")
+        h.addWidget(self.val)
+        cut_layout.addLayout(h)
+
+        # Rule signature display (JORC/SAMREC audit trail)
+        self.rule_signature_label = QLabel("")
+        self.rule_signature_label.setStyleSheet(
+            "QLabel { "
+            f"background-color: {ModernColors.CARD_BG}; "
+            "border: 1px solid #555; "
+            "padding: 4px; "
+            "font-family: 'Courier New', monospace; "
+            "color: #4CAF50; "
+            "}"
+        )
+        self.rule_signature_label.setWordWrap(True)
+        cut_layout.addWidget(self.rule_signature_label)
+
+        # Connect signals to update signature on change
+        self.cutoff_field.currentTextChanged.connect(self._update_rule_signature)
+        self.op.currentTextChanged.connect(self._update_rule_signature)
+        self.val.valueChanged.connect(self._update_rule_signature)
+
+        gb_cut.setLayout(cut_layout)
+        layout.addWidget(gb_cut)
+
+        # Initial signature update
+        self._update_rule_signature()
+        
+        # Weighting
+        gb_weight = QGroupBox("Weighting")
+        f_weight = QFormLayout()
+        f_weight.setVerticalSpacing(12)
+        f_weight.setContentsMargins(15, 15, 15, 15)
+        f_weight.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        f_weight.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.weighting = QComboBox()
+        self.weighting.addItems(["Length", "Mass", "Density"])
+        f_weight.addRow("Mode:", self.weighting)
+        gb_weight.setLayout(f_weight)
+        layout.addWidget(gb_weight)
+        
+        # Economic compositing parameters (NOT "mining constraints")
+        gb_econ = QGroupBox("Economic Compositing Parameters")
+        gb_econ.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)  # Allow vertical expansion
+
+        f = QFormLayout()
+        # CHANGE: Use standard row policy and fixed alignment
+        f.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        f.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        f.setVerticalSpacing(12)  # Increased spacing
+        f.setContentsMargins(15, 15, 15, 15)
+
+        # Dilution rule
+        self.dilution_rule = QComboBox()
+        self.dilution_rule.addItems(["Basic", "Advanced", "Advanced+"])
+        self.dilution_rule.setCurrentText("Basic")
+        self.dilution_rule.setToolTip(
+            "Dilution algorithm:\n"
+            "• Basic: Simple ore/waste classification\n"
+            "• Advanced: Includes internal waste limits\n"
+            "• Advanced+: Adds waste composite length constraints"
+        )
+        f.addRow("Dilution Rule:", self.dilution_rule)
+
+        # Min ore composite length
+        self.min_ore_composite_length = QDoubleSpinBox()
+        self.min_ore_composite_length.setRange(0, 1000)
+        self.min_ore_composite_length.setValue(0)
+        self.min_ore_composite_length.setSpecialValueText("None")
+        self.min_ore_composite_length.setToolTip("Minimum length for ore composites (meters)")
+        f.addRow("Min Ore Length (m):", self.min_ore_composite_length)  # Shortened
+
+        # Max included waste
+        self.max_included_waste = QDoubleSpinBox()
+        self.max_included_waste.setRange(0, 1000)
+        self.max_included_waste.setValue(0)
+        self.max_included_waste.setSpecialValueText("None")
+        self.max_included_waste.setToolTip("Maximum total internal waste that can be included in ore composites (meters)")
+        f.addRow("Max Internal Waste (m):", self.max_included_waste)  # Shortened
+
+        # Max consecutive waste
+        self.max_consecutive_waste = QDoubleSpinBox()
+        self.max_consecutive_waste.setRange(0, 1000)
+        self.max_consecutive_waste.setValue(0)
+        self.max_consecutive_waste.setSpecialValueText("None")
+        self.max_consecutive_waste.setToolTip("Maximum length of consecutive waste within ore composites (meters)")
+        f.addRow("Max Consecutive Waste (m):", self.max_consecutive_waste)
+
+        # Min linear grade (for short high-grade composites)
+        self.keep_short_high_grade = QCheckBox("Keep short high-grade intervals")
+        self.keep_short_high_grade.setToolTip(
+            "Preserve short intervals with very high grades, "
+            "even if they don't meet minimum length requirements"
+        )
+        f.addRow("", self.keep_short_high_grade)
+
+        self.min_linear_grade = QDoubleSpinBox()
+        self.min_linear_grade.setRange(0, 10000)
+        self.min_linear_grade.setValue(0)
+        self.min_linear_grade.setSpecialValueText("None")
+        self.min_linear_grade.setEnabled(False)
+        self.min_linear_grade.setToolTip("Minimum linear grade (grade × length) to preserve short intervals")
+        self.keep_short_high_grade.toggled.connect(self.min_linear_grade.setEnabled)
+        f.addRow("Min Linear Grade:", self.min_linear_grade)
+
+        # Min waste composite length (Advanced/Advanced+ only)
+        self.min_waste_composite_length = QDoubleSpinBox()
+        self.min_waste_composite_length.setRange(0, 1000)
+        self.min_waste_composite_length.setValue(0)
+        self.min_waste_composite_length.setSpecialValueText("None")
+        self.min_waste_composite_length.setEnabled(False)
+        self.min_waste_composite_length.setToolTip("Minimum length for waste composites (Advanced/Advanced+ only)")
+        self.dilution_rule.currentTextChanged.connect(self._on_dilution_rule_changed)
+        f.addRow("Min Waste Length (m):", self.min_waste_composite_length)  # Shortened
+        
+        gb_econ.setLayout(f)
+        layout.addWidget(gb_econ)
+        
+        # Advanced options
+        gb_advanced = QGroupBox("Advanced Options")
+        f_adv = QFormLayout()
+        f_adv.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        f_adv.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        f_adv.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        f_adv.setVerticalSpacing(12)
+        f_adv.setContentsMargins(15, 15, 15, 15)
+
+        # Two-pass compositing
+        self.composite_twice = QCheckBox("Composite twice (two-pass)")
+        self.composite_twice.setToolTip(
+            "Run compositing twice: first pass creates initial composites, "
+            "second pass recomposes to ensure consistency"
+        )
+        f_adv.addRow("", self.composite_twice)
+
+        # True thickness
+        self.use_true_thickness = QCheckBox("Use true thickness")
+        self.use_true_thickness.setToolTip(
+            "Calculate true thickness by projecting composite intervals "
+            "perpendicular to specified dip/azimuth orientation"
+        )
+        f_adv.addRow("", self.use_true_thickness)
+
+        self.true_thickness_dip = QDoubleSpinBox()
+        self.true_thickness_dip.setRange(-90, 90)
+        self.true_thickness_dip.setValue(0)
+        self.true_thickness_dip.setSpecialValueText("None")
+        self.true_thickness_dip.setEnabled(False)
+        self.true_thickness_dip.setToolTip("Dip angle for true thickness calculation (-90° to 90°)")
+        self.use_true_thickness.toggled.connect(self._on_true_thickness_toggled)
+        f_adv.addRow("True Thickness Dip (°):", self.true_thickness_dip)
+
+        self.true_thickness_dip_azimuth = QDoubleSpinBox()
+        self.true_thickness_dip_azimuth.setRange(0, 360)
+        self.true_thickness_dip_azimuth.setValue(0)
+        self.true_thickness_dip_azimuth.setSpecialValueText("None")
+        self.true_thickness_dip_azimuth.setEnabled(False)
+        self.true_thickness_dip_azimuth.setToolTip("Azimuth angle for true thickness calculation (0° to 360°, where 0° = North)")
+        self.use_true_thickness.toggled.connect(self._on_true_thickness_toggled)
+        f_adv.addRow("Dip Azimuth (°):", self.true_thickness_dip_azimuth)  # Shortened label
+        
+        gb_advanced.setLayout(f_adv)
+        layout.addWidget(gb_advanced)
+
+        # QA/QC
+        gb_qaqc = QGroupBox("Filters")
+        l_qaqc = QVBoxLayout()
+        l_qaqc.setSpacing(8)
+        l_qaqc.setContentsMargins(12, 10, 12, 12)
+
+        self.cb_exclude_qaqc = QCheckBox("Exclude Standards/Blanks/Duplicates")
+        self.cb_exclude_qaqc.setToolTip(
+            "Exclude QA/QC samples (standards, blanks, duplicates) from compositing. "
+            "These samples are typically flagged in the database and should not be "
+            "included in resource estimation."
+        )
+        l_qaqc.addWidget(self.cb_exclude_qaqc)
+
+        self.cb_treat_null_as_zero = QCheckBox("Treat Missing Grades as Zero")
+        self.cb_treat_null_as_zero.setToolTip(
+            "Treat NULL/missing grade values as zero during compositing. "
+            "WARNING: Only use if missing values represent true zeros, not unassayed intervals."
+        )
+        self.cb_treat_null_as_zero.setChecked(True)
+        self.cb_treat_null_as_zero.setToolTip(
+            "If checked, missing/NaN grades are treated as 0.0 (mining standard).\n"
+            "If unchecked, missing grades are excluded from weighting (partial sampling)."
+        )
+        l_qaqc.addWidget(self.cb_treat_null_as_zero)
+        
+        gb_qaqc.setLayout(l_qaqc)
+        layout.addWidget(gb_qaqc)
+        
+        layout.addStretch()
+        self.ui_engine = EconomicUIEngine() if 'EconomicUIEngine' in globals() else None
+
+    def _update_rule_signature(self, *args):
+        """Update the rule signature display (JORC/SAMREC audit trail)."""
+        try:
+            rule = EconomicRule(
+                field=self.cutoff_field.currentText(),
+                operator=self.op.currentText(),
+                cutoff=self.val.value()
+            )
+            signature = rule.get_signature()
+            display_text = f"Rule: {rule.format_for_display()} | Signature: {signature}"
+            self.rule_signature_label.setText(display_text)
+            self.rule_signature_label.setToolTip(
+                f"JORC/SAMREC Audit Signature\n\n"
+                f"This signature uniquely identifies the economic rule.\n"
+                f"All composites generated with this rule will reference: {signature}\n\n"
+                f"Rule: {rule.format_with_codes()}"
+            )
+        except Exception as e:
+            self.rule_signature_label.setText(f"Invalid rule: {e}")
+            logger.debug(f"Could not generate rule signature: {e}")
+
+    def get_economic_rule(self) -> Optional[EconomicRule]:
+        """
+        Get the current economic rule definition.
+
+        Returns:
+            EconomicRule object or None if rule is invalid
+        """
+        try:
+            return EconomicRule(
+                field=self.cutoff_field.currentText(),
+                operator=self.op.currentText(),
+                cutoff=self.val.value(),
+                name=f"{self.cutoff_field.currentText()} Economic Rule"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create economic rule: {e}")
+            return None
+
+    def _on_dilution_rule_changed(self, rule_text: str):
+        """Enable/disable min_waste_composite_length based on dilution rule."""
+        is_advanced = rule_text in ("Advanced", "Advanced+")
+        self.min_waste_composite_length.setEnabled(is_advanced)
+    
+    def _on_true_thickness_toggled(self, checked: bool):
+        """Enable/disable true thickness parameters."""
+        self.true_thickness_dip.setEnabled(checked)
+        self.true_thickness_dip_azimuth.setEnabled(checked)
+
+    def get_ui_engine(self):
+        return self.ui_engine
+
+    def get_state(self):
+        if 'EconomicUIState' not in globals() or not self.ui_engine:
+            return None
+        
+        state = EconomicUIState()
+        
+        state.cutoff_field = self.cutoff_field.currentText()
+        state.cutoff_grade = self.val.value()
+        state.cutoff_operator = self.op.currentText()
+        
+        # Weighting
+        weighting_map = {
+            "Length": WeightingMode.LENGTH,
+            "Mass": WeightingMode.MASS,
+            "Density": WeightingMode.DENSITY,
+        }
+        state.weighting_mode = weighting_map.get(self.weighting.currentText(), WeightingMode.LENGTH)
+        
+        # Economic compositing parameters
+        dilution_rule_text = self.dilution_rule.currentText().lower().replace("+", "_plus")
+        state.dilution_rule = dilution_rule_text
+        
+        min_ore_comp_val = self.min_ore_composite_length.value()
+        state.min_ore_composite_length = min_ore_comp_val if min_ore_comp_val > 0 else None
+        
+        max_inc_waste_val = self.max_included_waste.value()
+        state.max_included_waste = max_inc_waste_val if max_inc_waste_val > 0 else None
+        
+        max_cons_waste_val = self.max_consecutive_waste.value()
+        state.max_consecutive_waste = max_cons_waste_val if max_cons_waste_val > 0 else None
+        
+        state.keep_short_high_grade = self.keep_short_high_grade.isChecked()
+        min_linear_val = self.min_linear_grade.value()
+        state.min_linear_grade = min_linear_val if min_linear_val > 0 else None
+        
+        min_waste_comp_val = self.min_waste_composite_length.value()
+        state.min_waste_composite_length = min_waste_comp_val if min_waste_comp_val > 0 else None
+        
+        # Advanced options
+        state.composite_twice = self.composite_twice.isChecked()
+        state.use_true_thickness = self.use_true_thickness.isChecked()
+        
+        true_thick_dip_val = self.true_thickness_dip.value()
+        state.true_thickness_dip = true_thick_dip_val if abs(true_thick_dip_val) > 1e-8 else None
+        
+        true_thick_az_val = self.true_thickness_dip_azimuth.value()
+        state.true_thickness_dip_azimuth = true_thick_az_val if abs(true_thick_az_val) > 1e-8 else None
+        
+        state.exclude_qaqc = self.cb_exclude_qaqc.isChecked()
+        state.treat_null_as_zero = self.cb_treat_null_as_zero.isChecked()
+        
+        return state
+
+
+class WasteOreTab(BaseCompositingTab):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+
+        # WARNING: Rule Divergence Detection
+        self.mismatch_banner = QLabel("")
+        self.mismatch_banner.setStyleSheet(
+            "QLabel { "
+            "background-color: #8B0000; "  # Dark red
+            "border: 2px solid #FF0000; "
+            "padding: 8px; "
+            "font-weight: bold; "
+            "color: white; "
+            "}"
+        )
+        self.mismatch_banner.setWordWrap(True)
+        self.mismatch_banner.setVisible(False)
+        layout.addWidget(self.mismatch_banner)
+
+        # Economic Rule Reference (READ-ONLY)
+        gb_rule = QGroupBox("Economic Rule (from Economic Tab)")
+        rule_layout = QVBoxLayout()
+        rule_layout.setSpacing(8)
+        rule_layout.setContentsMargins(12, 10, 12, 12)
+
+        # Make the rule display look like a "Read Only" info box
+        self.rule_display_label = QLabel("No economic rule defined")
+        self.rule_display_label.setStyleSheet("""
+            QLabel {
+                background-color: #1a1a1a;
+                border-left: 4px solid #3498db;
+                padding: 10px;
+                color: #3498db;
+                font-family: 'Consolas', monospace;
+            }
+        """)
+        self.rule_display_label.setWordWrap(True)
+        rule_layout.addWidget(self.rule_display_label)
+
+        # Make the Sync button smaller and secondary
+        btn_sync = QPushButton("Sync from Economic Tab")
+        btn_sync.setFixedWidth(180)
+        btn_sync.setStyleSheet("background-color: #2c3e50; border: 1px solid #34495e;")
+        btn_sync.setToolTip("Copy the economic rule from Economic tab to ensure consistency")
+        btn_sync.clicked.connect(self._sync_from_economic_tab)
+        rule_layout.addWidget(btn_sync)
+
+        gb_rule.setLayout(rule_layout)
+        layout.addWidget(gb_rule)
+
+        # Description
+        l = QLabel(
+            "IMPORTANT: Cutoff criteria should match the Economic tab to maintain JORC/SAMREC compliance. "
+            "Use 'Sync from Economic Tab' to ensure consistency."
+        )
+        l.setWordWrap(True)
+        l.setStyleSheet("QLabel { color: #FFA500; font-style: italic; }")  # Orange warning
+        layout.addWidget(l)
+
+        # Indicator field (kept for backwards compatibility / manual override)
+        gb_ind = QGroupBox("Indicator Field (Verify Against Economic Rule)")
+        f_ind = QFormLayout()
+        f_ind.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        f_ind.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        f_ind.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        f_ind.setVerticalSpacing(12)
+        f_ind.setContentsMargins(15, 15, 15, 15)
+
+        self.indicator_field = QComboBox()
+        self.indicator_field.setEditable(True)
+        self.indicator_field.addItems(["Fe", "Au", "Cu", "Ag"])
+        self.indicator_field.currentTextChanged.connect(self._check_rule_mismatch)
+        f_ind.addRow("Field:", self.indicator_field)
+
+        self.cutoff_op = QComboBox()
+        self.cutoff_op.addItems([">=", ">", "<", "<="])
+        self.cutoff_op.setFixedWidth(60)
+        self.cutoff_op.currentTextChanged.connect(self._check_rule_mismatch)
+        f_ind.addRow("Operator:", self.cutoff_op)
+
+        self.cutoff_grade = QDoubleSpinBox()
+        self.cutoff_grade.setRange(0, 100000)
+        self.cutoff_grade.setValue(0.0)
+        self.cutoff_grade.setToolTip("Enter cutoff grade for ore/waste classification (commodity-dependent)")
+        self.cutoff_grade.valueChanged.connect(self._check_rule_mismatch)
+        f_ind.addRow("Cutoff Grade:", self.cutoff_grade)
+        gb_ind.setLayout(f_ind)
+        layout.addWidget(gb_ind)
+        
+        # Codes
+        gb_codes = QGroupBox("Codes")
+        f_codes = QFormLayout()
+        f_codes.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        f_codes.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        f_codes.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        f_codes.setVerticalSpacing(12)
+        f_codes.setContentsMargins(15, 15, 15, 15)
+
+        self.ore_code = QDoubleSpinBox()
+        self.ore_code.setRange(-1000, 1000)
+        self.ore_code.setValue(1.0)
+        f_codes.addRow("Ore Code:", self.ore_code)
+        
+        self.waste_code = QDoubleSpinBox()
+        self.waste_code.setRange(-1000, 1000)
+        self.waste_code.setValue(0.0)
+        f_codes.addRow("Waste Code:", self.waste_code)
+        gb_codes.setLayout(f_codes)
+        layout.addWidget(gb_codes)
+        
+        # Composite length
+        gb_comp = QGroupBox("Composite Settings")
+        f_comp = QFormLayout()
+        f_comp.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        f_comp.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        f_comp.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        f_comp.setVerticalSpacing(12)
+        f_comp.setContentsMargins(15, 15, 15, 15)
+
+        self.comp_length = QDoubleSpinBox()
+        self.comp_length.setRange(0.01, 9999)
+        self.comp_length.setValue(1.0)
+        f_comp.addRow("Composite Length (m):", self.comp_length)
+        
+        self.weighting = QComboBox()
+        self.weighting.addItems(["Length", "Mass", "Density"])
+        f_comp.addRow("Weighting:", self.weighting)
+        
+        self.partial_strategy = QComboBox()
+        self.partial_strategy.addItems(["Discard", "Keep", "Merge", "Auto"])
+        f_comp.addRow("Partial Strategy:", self.partial_strategy)
+        
+        self.auto_fraction = QDoubleSpinBox()
+        self.auto_fraction.setRange(0.0, 1.0)
+        self.auto_fraction.setValue(0.5)
+        self.auto_fraction.setSingleStep(0.1)
+        f_comp.addRow("Auto Fraction:", self.auto_fraction)
+        gb_comp.setLayout(f_comp)
+        layout.addWidget(gb_comp)
+
+        # QA/QC
+        gb_qaqc = QGroupBox("Filters")
+        l_qaqc = QVBoxLayout()
+        l_qaqc.setSpacing(8)
+        l_qaqc.setContentsMargins(12, 10, 12, 12)
+
+        self.cb_exclude_qaqc = QCheckBox("Exclude Standards/Blanks/Duplicates")
+        self.cb_exclude_qaqc.setChecked(True)
+        l_qaqc.addWidget(self.cb_exclude_qaqc)
+        
+        self.cb_treat_null_as_zero = QCheckBox("Treat Missing Grades as Zero")
+        self.cb_treat_null_as_zero.setChecked(True)
+        self.cb_treat_null_as_zero.setToolTip(
+            "If checked, missing/NaN grades are treated as 0.0 (mining standard).\n"
+            "If unchecked, missing grades are excluded from weighting (partial sampling)."
+        )
+        l_qaqc.addWidget(self.cb_treat_null_as_zero)
+        
+        gb_qaqc.setLayout(l_qaqc)
+        layout.addWidget(gb_qaqc)
+        
+        layout.addStretch()
+        self.ui_engine = WasteOreUIEngine() if 'WasteOreUIEngine' in globals() else None
+
+        # Store reference to parent window for accessing Economic tab
+        self._parent_window = None
+
+    def set_parent_window(self, parent_window):
+        """Set reference to parent CompositingWindow for accessing Economic tab."""
+        self._parent_window = parent_window
+
+    def update_economic_rule_display(self, economic_rule: Optional[EconomicRule]):
+        """
+        Update the read-only economic rule display.
+
+        Args:
+            economic_rule: EconomicRule from Economic tab, or None
+        """
+        if economic_rule:
+            display_text = f"📋 {economic_rule.format_with_codes()}\n" \
+                           f"Signature: {economic_rule.get_signature()}"
+            self.rule_display_label.setText(display_text)
+            self.rule_display_label.setStyleSheet(
+                "QLabel { "
+                f"background-color: {ModernColors.CARD_BG}; "
+                "border: 1px solid #4CAF50; "  # Green border = good
+                "padding: 8px; "
+                "font-size: 12pt; "
+                "font-weight: bold; "
+                "color: #4CAF50; "
+                "}"
+            )
+            self._check_rule_mismatch()
+        else:
+            self.rule_display_label.setText("⚠️ No economic rule defined in Economic tab")
+            self.rule_display_label.setStyleSheet(
+                "QLabel { "
+                f"background-color: {ModernColors.CARD_BG}; "
+                "border: 1px solid #FFA500; "  # Orange border = warning
+                "padding: 8px; "
+                "font-size: 12pt; "
+                "font-weight: bold; "
+                "color: #FFA500; "
+                "}"
+            )
+
+    def _sync_from_economic_tab(self):
+        """Copy economic rule from Economic tab to this tab's fields."""
+        if not self._parent_window:
+            QMessageBox.warning(
+                self,
+                "Cannot Sync",
+                "Parent window reference not set. Cannot sync from Economic tab."
+            )
+            return
+
+        # Get economic rule from Economic tab
+        economic_rule = self._parent_window.tab_economic.get_economic_rule()
+
+        if not economic_rule:
+            QMessageBox.warning(
+                self,
+                "No Rule Defined",
+                "Economic tab does not have a valid rule defined.\n\n"
+                "Please define cutoff criteria in the Economic tab first."
+            )
+            return
+
+        # Copy rule to this tab's fields
+        self.indicator_field.setCurrentText(economic_rule.field)
+        self.cutoff_op.setCurrentText(economic_rule.operator)
+        self.cutoff_grade.setValue(economic_rule.cutoff)
+
+        # Update display
+        self.update_economic_rule_display(economic_rule)
+
+        # Log the sync
+        logger.info(f"Synced economic rule to Waste/Ore tab: {economic_rule.format_for_display()}")
+
+        QMessageBox.information(
+            self,
+            "Rule Synced",
+            f"Economic rule synced successfully:\n\n{economic_rule.format_with_codes()}"
+        )
+
+    def _check_rule_mismatch(self, *args):
+        """Detect and warn if Waste/Ore fields diverge from Economic tab rule."""
+        if not self._parent_window:
+            return
+
+        # Get economic rule from Economic tab
+        economic_rule = self._parent_window.tab_economic.get_economic_rule()
+        if not economic_rule:
+            return
+
+        # Get current values from this tab
+        current_field = self.indicator_field.currentText()
+        current_op = self.cutoff_op.currentText()
+        current_cutoff = self.cutoff_grade.value()
+
+        # Detect mismatch
+        mismatch_msg = EconomicRuleManager.detect_mismatch(
+            economic_rule,
+            current_field,
+            current_op,
+            current_cutoff
+        )
+
+        if mismatch_msg:
+            # Show mismatch warning
+            self.mismatch_banner.setText(f"⚠️ {mismatch_msg}")
+            self.mismatch_banner.setVisible(True)
+            logger.warning(f"Economic rule mismatch detected: {mismatch_msg}")
+        else:
+            # Hide mismatch banner (rules match)
+            self.mismatch_banner.setVisible(False)
+
+    def get_ui_engine(self):
+        return self.ui_engine
+
+    def get_state(self):
+        if 'WasteOreUIState' not in globals() or not self.ui_engine:
+            return None
+        
+        state = WasteOreUIState()
+        
+        state.indicator_field = self.indicator_field.currentText()
+        state.cutoff_grade = self.cutoff_grade.value()
+        state.cutoff_operator = self.cutoff_op.currentText()
+        state.ore_code = int(self.ore_code.value())
+        state.waste_code = int(self.waste_code.value())
+        
+        # Weighting
+        weighting_map = {
+            "Length": WeightingMode.LENGTH,
+            "Mass": WeightingMode.MASS,
+            "Density": WeightingMode.DENSITY,
+        }
+        state.weighting_mode = weighting_map.get(self.weighting.currentText(), WeightingMode.LENGTH)
+        
+        state.composite_length = self.comp_length.value()
+        
+        # Partial strategy
+        partial_map = {
+            "Discard": PartialStrategy.DISCARD,
+            "Keep": PartialStrategy.KEEP,
+            "Merge": PartialStrategy.MERGE,
+            "Auto": PartialStrategy.AUTO,
+        }
+        state.partial_strategy = partial_map.get(self.partial_strategy.currentText(), PartialStrategy.AUTO)
+        state.auto_partial_fraction = self.auto_fraction.value()
+        
+        state.exclude_qaqc = self.cb_exclude_qaqc.isChecked()
+        state.treat_null_as_zero = self.cb_treat_null_as_zero.isChecked()
+        
+        return state
+
+
+# =======================================================
+#  Unified CompositingWindow
+# =======================================================
+
+
+class CompositingWindow(QDialog):
+    """
+    Unified compositing window:
+    - Left: Configuration Tabs
+    - Right: Results Table & Preview
+    """
+
+    def __init__(
+        self,
+        intervals,
+        compositing_engine,
+        parent: QWidget | None = None,
+        controller=None,
+    ):
+        super().__init__(parent)
+
+        self.setWindowTitle("Drillhole Compositing")
+        self.resize(1300, 750)
+        self.setStyleSheet(_get_compositing_window_stylesheet())
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        self.intervals = intervals
+        self.compositing_engine = compositing_engine
+        self.controller = controller
+        
+        # Store last composites for registry application
+        self._last_composites_df = None
+        self._last_composites = None
+        self._last_config = None  # Store config for audit trail
+
+        # Cancellation flag for compositing operations
+        self._cancel_requested = False
+
+        # Main Layout - Simple: Splitter (stretch=1) + Action Bar (fixed)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # --- Splitter (Left: Settings, Right: Results) ---
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setHandleWidth(1)
+        self.splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {ModernColors.PANEL_BG}; }}")
+        # Important: Splitter should expand but allow shrinking
+        self.splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.splitter, 1)  # Stretch factor 1 = takes remaining space after action bar
+
+        # 1. Left Panel (Settings) with ScrollArea
+        left_container = QWidget()
+        left_container.setMinimumWidth(500)
+        left_container_layout = QVBoxLayout(left_container)
+        left_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
+
+        left_content = QWidget()
+        left_layout = QVBoxLayout(left_content)
+        left_layout.setContentsMargins(10, 10, 5, 10)
+
+        self.tabs = QTabWidget()
+        self.tab_numerical = NumericalTab()
+        self.tab_lithology = LithologyTab()
+        self.tab_economic = EconomicTab()
+        self.tab_waste_ore = WasteOreTab()
+
+        # Wire up Economic Rule synchronization
+        self.tab_waste_ore.set_parent_window(self)
+
+        # Icons (Standard Qt icons)
+        style = self.style()
+        self.tabs.addTab(self.tab_numerical, style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "Numerical")
+        self.tabs.addTab(self.tab_lithology, style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "Lithology")
+        self.tabs.addTab(self.tab_economic, style.standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton), "Economic")
+        self.tabs.addTab(self.tab_waste_ore, style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon), "Waste/Ore")
+
+        # Connect tab change to update economic rule display in Waste/Ore tab
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+        left_layout.addWidget(self.tabs)
+
+        scroll.setWidget(left_content)
+        left_container_layout.addWidget(scroll)
+        self.splitter.addWidget(left_container)
+
+        # 2. Right Panel (Results)
+        right_widget = QWidget()
+        # Use Ignored for vertical so it doesn't force splitter to expand
+        right_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(5, 10, 10, 10)
+        right_layout.setSpacing(0)
+        
+        self.results_widget = CompositeResultsWidget()
+        # Results widget should fill available space, not request more
+        self.results_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        right_layout.addWidget(self.results_widget, 1)  # Stretch factor 1
+        
+        self.splitter.addWidget(right_widget)
+        
+        # Set initial sizes (40% left, 60% right)
+        self.splitter.setSizes([550, 750])
+
+        # --- Bottom Action Bar ---
+        action_bar = QFrame()
+        action_bar.setObjectName("ActionBar")  # For debugging
+        action_bar.setStyleSheet("background-color: #333; border-top: 1px solid #444;")
+        # CRITICAL: Fixed size policy to prevent disappearing when table has many rows
+        action_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        action_bar.setMinimumHeight(55)
+        action_bar.setMaximumHeight(70)  # Slightly larger to fit validation override
+        ab_layout = QHBoxLayout(action_bar)
+        ab_layout.setContentsMargins(15, 10, 15, 10)
+
+        # Validation status indicator
+        self.validation_status_label = QLabel("⚪ Validation: Not Checked")
+        self.validation_status_label.setStyleSheet("font-size: 9pt; color: #888;")
+        ab_layout.addWidget(self.validation_status_label)
+        
+        # Validation override checkbox (for running on unvalidated/failed data)
+        self.cb_validation_override = QCheckBox("Override")
+        self.cb_validation_override.setToolTip(
+            "Check to run compositing even if validation failed or was not run.\n"
+            "WARNING: This may produce invalid results. For JORC/SAMREC compliance,\n"
+            "always run validation first and fix errors before compositing."
+        )
+        self.cb_validation_override.setStyleSheet("font-size: 9pt; color: #e67e22;")
+        self.cb_validation_override.setVisible(False)  # Hidden by default
+        ab_layout.addWidget(self.cb_validation_override)
+        
+        # Spacer
+        ab_layout.addWidget(QLabel(" | "))
+
+        # Status label
+        self.status_label = QLabel("Ready")
+        ab_layout.addWidget(self.status_label)
+        
+        ab_layout.addStretch()
+
+        # Export Buttons
+        btn_export_csv = QPushButton("CSV")
+        btn_export_csv.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        btn_export_csv.clicked.connect(self.export_csv)
+        
+        btn_export_excel = QPushButton("Excel")
+        btn_export_excel.clicked.connect(self.export_excel)
+        
+        ab_layout.addWidget(QLabel("Export:"))
+        ab_layout.addWidget(btn_export_csv)
+        ab_layout.addWidget(btn_export_excel)
+
+        # Divider
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        ab_layout.addWidget(line)
+
+        # Apply to Registry Button - Prominent action for geostatistics workflow
+        self.btn_apply_registry = QPushButton("✅ Apply to Registry")
+        self.btn_apply_registry.setToolTip(
+            "Apply composites to the Data Registry.\n"
+            "This makes composited data available for:\n"
+            "• Variogram Analysis\n"
+            "• Kriging Estimation\n"
+            "• Geostatistical Simulation"
+        )
+        self.btn_apply_registry.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 140px;
+            }
+            QPushButton:hover {
+                background-color: #43A047;
+            }
+            QPushButton:disabled {
+                background-color: #555;
+                color: #888;
+            }
+        """)
+        self.btn_apply_registry.setEnabled(False)  # Disabled until composites are generated
+        self.btn_apply_registry.clicked.connect(self._on_apply_to_registry_clicked)
+        ab_layout.addWidget(self.btn_apply_registry)
+
+        # Divider
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.VLine)
+        line2.setFrameShadow(QFrame.Shadow.Sunken)
+        ab_layout.addWidget(line2)
+
+        # Main Actions
+        self.btn_close = QPushButton("Close")
+        self.btn_close.clicked.connect(self.reject)
+        ab_layout.addWidget(self.btn_close)
+
+        self.btn_run = QPushButton("Run Compositing")
+        self.btn_run.setObjectName("PrimaryButton")  # Styled blue
+        self.btn_run.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
+        self.btn_run.clicked.connect(self.on_run_clicked)
+        ab_layout.addWidget(self.btn_run)
+
+        # Add action bar with stretch=0 to ensure it stays fixed at bottom
+        layout.addWidget(action_bar, 0)  # Stretch factor 0 = fixed size
+        action_bar.show()  # Ensure visibility
+        
+        # Modern Status Bar for compositing progress
+        self.modern_status_bar = DrillholeProcessStatusBar.create_for_compositing(self)
+        self.modern_status_bar.cancel_requested.connect(self._on_cancel_compositing)
+        layout.addWidget(self.modern_status_bar, 0)  # Fixed size
+        
+        # Store reference to ensure it's not garbage collected
+        self._action_bar = action_bar
+        
+        # Ensure minimum window height includes the action bar
+        self.setMinimumHeight(500)
+        
+        # Initialize validation status on creation
+        self._update_validation_status_indicator()
+    
+    def showEvent(self, event):
+        """Update validation status when window is shown."""
+        super().showEvent(event)
+        self._update_validation_status_indicator()
+
+    # ====== Logic ======
+    
+    def _on_cancel_compositing(self):
+        """Handle cancel request from the modern status bar."""
+        self._cancel_requested = True
+        self.modern_status_bar.update_status("Cancellation requested", StatusLevel.WARNING)
+        self.status_label.setText("Compositing cancelled by user")
+        logger.info("User requested compositing cancellation")
+
+    def on_run_clicked(self):
+        # Reset cancellation flag
+        self._cancel_requested = False
+
+        # Start modern status bar progress
+        self.modern_status_bar.start_process(cancellable=True)
+        self.modern_status_bar.update_status("Starting compositing process", StatusLevel.INFO)
+        
+        self.status_label.setText("Checking validation status...")
+        QApplication.processEvents()
+        
+        # Step 1: Validation Check
+        self.modern_status_bar.advance_step()
+        self.modern_status_bar.update_status("Checking data validation status")
+        QApplication.processEvents()
+        
+        # VALIDATION GATE: Check drillhole validation state before compositing
+        validation_blocked, validation_msg = self._check_validation_gate()
+        if validation_blocked:
+            self.modern_status_bar.set_step_error("Validation check failed")
+            return
+
+        self.status_label.setText("Running compositing...")
+        QApplication.processEvents()
+
+        tab = self.tabs.currentWidget()
+        if not isinstance(tab, BaseCompositingTab):
+            return
+
+        if not self.compositing_engine:
+            # Demo mode
+            self._generate_dummy_results()
+            self.modern_status_bar.finish_process(success=True, message="Compositing complete (DEMO MODE)")
+            self.status_label.setText("Compositing complete (DEMO MODE).")
+            return
+
+        # Step 2: Data Preparation
+        self.modern_status_bar.advance_step()
+        self.modern_status_bar.update_status("Preparing intervals for compositing")
+        QApplication.processEvents()
+
+        # Production Logic
+        ui_engine = tab.get_ui_engine()
+        state = tab.get_state()
+
+        if not ui_engine or not state:
+            QMessageBox.warning(self, "Error", "UI engine or state not available.")
+            self.modern_status_bar.set_step_error("Missing backend components")
+            self.status_label.setText("Error: Missing backend.")
+            return
+
+        # Validate UI parameters
+        result = ui_engine.validate(state)
+        if not tab.apply_validation_result(result):
+            self.modern_status_bar.set_step_error("Configuration validation failed")
+            self.status_label.setText("Validation failed.")
+            return
+
+        # Step 3: Composite Calculation
+        self.modern_status_bar.advance_step()
+        self.modern_status_bar.update_status("Computing composite intervals")
+        QApplication.processEvents()
+
+        # Run with progress reporting
+        try:
+            cfg = ui_engine.to_config(state)
+            
+            # Progress callback to update both status bars
+            def progress_callback(percent: int, message: str):
+                # Check for cancellation request
+                if self._cancel_requested:
+                    raise InterruptedError("Compositing cancelled by user")
+
+                self.status_label.setText(f"[{percent}%] {message}")
+                # Update modern status bar step progress
+                if percent > 0:
+                    self.modern_status_bar.advance_step(percent / 100.0)
+                QApplication.processEvents()  # Keep UI responsive
+            
+            self.status_label.setText("Starting compositing...")
+            QApplication.processEvents()
+            
+            composites = self.compositing_engine.composite(
+                self.intervals, 
+                cfg, 
+                progress_callback=progress_callback
+            )
+            
+            # Step 4: Grade Calculation
+            self.modern_status_bar.advance_step()
+            self.modern_status_bar.update_status("Calculating weighted averages")
+            QApplication.processEvents()
+            
+            df = self._composites_to_dataframe(composites)
+            
+            # Step 5: Quality Check
+            self.modern_status_bar.advance_step()
+            self.modern_status_bar.update_status("Validating composite results")
+            QApplication.processEvents()
+            
+            self.results_widget.update_results(df)
+            
+            # Store results for later registry application
+            self._last_composites_df = df
+            self._last_composites = composites
+            self._last_config = cfg  # Store config for audit trail
+            
+            # Enable the Apply to Registry button
+            self.btn_apply_registry.setEnabled(True)
+            
+            # Log compositing run to audit trail
+            self._log_compositing_run(cfg, len(df), validation_msg)
+            
+            # Step 6: Output Generation - Final step
+            self.modern_status_bar.advance_step()
+            success_msg = f"Done. Generated {len(df)} composites. Click 'Apply to Registry' to use in Variograms/Kriging."
+            self.modern_status_bar.finish_process(success=True, message=success_msg)
+            self.modern_status_bar.update_status("Compositing completed successfully", StatusLevel.SUCCESS)
+            self.status_label.setText(success_msg)
+        
+        # C-03, C-04, C-05 FIX: Catch specific ValueError exceptions with user-friendly messages
+        except ValueError as e:
+            error_msg = str(e)
+            logger.error(f"Compositing configuration error: {e}", exc_info=True)
+            
+            # Provide user-friendly messages for common errors
+            if "density" in error_msg.lower():
+                user_msg = (
+                    "Missing Density Data\n\n"
+                    f"The selected compositing method requires density values, but some intervals "
+                    f"are missing density data.\n\n"
+                    f"Solutions:\n"
+                    f"• Switch to 'Length' weighting mode\n"
+                    f"• Ensure all intervals have density values in your data\n"
+                    f"• Use a different compositing method\n\n"
+                    f"Technical details: {error_msg}"
+                )
+            elif "true_thickness" in error_msg.lower():
+                user_msg = (
+                    "Missing True Thickness Data\n\n"
+                    f"True thickness compositing requires true_thickness values on all intervals.\n\n"
+                    f"Solutions:\n"
+                    f"• Calculate true thickness from survey data first\n"
+                    f"• Use 'Fixed Length' compositing instead\n\n"
+                    f"Technical details: {error_msg}"
+                )
+            elif "target_mass" in error_msg.lower() or "equal_mass" in error_msg.lower():
+                user_msg = (
+                    "Invalid Equal Mass Configuration\n\n"
+                    f"Equal mass compositing requires a valid target mass and density data.\n\n"
+                    f"Solutions:\n"
+                    f"• Set a target mass value > 0\n"
+                    f"• Ensure weighting mode is MASS or DENSITY\n"
+                    f"• Ensure all intervals have density values\n\n"
+                    f"Technical details: {error_msg}"
+                )
+            elif "composite_length" in error_msg.lower():
+                user_msg = (
+                    "Invalid Composite Length\n\n"
+                    f"Composite length must be greater than 0.\n\n"
+                    f"Solution: Set a valid composite length (e.g., 1.0, 2.0, 5.0 metres)\n\n"
+                    f"Technical details: {error_msg}"
+                )
+            elif "cutoff" in error_msg.lower():
+                user_msg = (
+                    "Missing Cutoff Configuration\n\n"
+                    f"Economic/Indicator compositing requires cutoff field and grade.\n\n"
+                    f"Solutions:\n"
+                    f"• Select a grade field (e.g., Fe, Au, Cu)\n"
+                    f"• Set a cutoff grade value\n\n"
+                    f"Technical details: {error_msg}"
+                )
+            else:
+                user_msg = (
+                    f"Compositing Configuration Error\n\n"
+                    f"{error_msg}\n\n"
+                    f"Please check your compositing parameters and try again."
+                )
+            
+            QMessageBox.warning(self, "Configuration Error", user_msg)
+            self.modern_status_bar.update_status("Configuration error", StatusLevel.ERROR)
+            self.modern_status_bar.set_step_error(error_msg)
+            self.status_label.setText("Configuration error - see message.")
+
+        except InterruptedError:
+            # User cancelled the operation
+            logger.info("Compositing cancelled by user")
+            self.modern_status_bar.finish_process(success=False, message="Compositing cancelled")
+            self.modern_status_bar.update_status("Cancelled by user", StatusLevel.WARNING)
+            self.status_label.setText("Compositing cancelled by user.")
+
+        except Exception as e:
+            logger.error(f"Compositing error: {e}", exc_info=True)
+            QMessageBox.critical(self, "Execution Error", str(e))
+            self.modern_status_bar.update_status("Execution error occurred", StatusLevel.ERROR)
+            self.modern_status_bar.set_step_error(str(e))
+            self.status_label.setText("Error occurred.")
+
+    def refresh_intervals(self, new_intervals):
+        """Refresh the intervals used for compositing.
+
+        This should be called when drillhole data changes to ensure
+        compositing uses the latest data instead of stale cached intervals.
+
+        M-04 FIX: Also clears stale composite results to prevent confusion.
+        """
+        if new_intervals is not None:
+            self.intervals = new_intervals
+            logger.info(f"Refreshed compositing intervals: {len(self.intervals)} intervals")
+
+            # Check for excluded rows and show info
+            registry = self.get_registry()
+            excluded_info = ""
+            if registry:
+                state = registry.get_drillholes_validation_state()
+                if state:
+                    excluded_rows = state.get("excluded_rows", {})
+                    excluded_count = sum(len(rows) for rows in excluded_rows.values())
+                    if excluded_count > 0:
+                        excluded_info = f" ({excluded_count} rows with errors excluded)"
+
+            self.status_label.setText(f"Data refreshed: {len(self.intervals)} intervals available{excluded_info}")
+
+            # M-04 FIX: Clear stale composite results when data changes
+            self._clear_stale_composites()
+
+            # Update validation status indicator
+            self._update_validation_status_indicator()
+        else:
+            logger.warning("Attempted to refresh with None intervals")
+            self.status_label.setText("Warning: No intervals available")
+    
+    def _check_validation_gate(self) -> tuple:
+        """
+        Check drillhole validation state before allowing compositing.
+        
+        AUDIT: This is a critical gate to ensure JORC/SAMREC compliance.
+        Compositing should NOT run on unvalidated or failed data by default.
+        
+        Returns:
+            Tuple of (blocked: bool, message: str)
+            blocked=True means compositing should NOT proceed
+        """
+        override_checked = self.cb_validation_override.isChecked()
+        
+        # Get registry
+        registry = self.get_registry()
+        if registry is None:
+            # No registry available - allow compositing (backward compatibility)
+            logger.warning("No registry available - skipping validation gate")
+            return (False, "")
+        
+        # Get validation state
+        validation_state = registry.get_drillholes_validation_state()
+        
+        if validation_state is None:
+            # Never validated
+            self._update_validation_status_indicator("NOT_RUN")
+            
+            if override_checked:
+                logger.warning("Compositing on unvalidated data (override enabled)")
+                return (False, "override_not_run")
+            
+            QMessageBox.warning(
+                self,
+                "Validation Required",
+                "Drillhole data has NOT been validated.\n\n"
+                "Please open the QC Window and run validation before compositing.\n\n"
+                "If you must proceed without validation, check the 'Override' checkbox.\n"
+                "WARNING: This may produce invalid results and is not JORC/SAMREC compliant."
+            )
+            self.status_label.setText("Blocked: Validation required")
+            self.cb_validation_override.setVisible(True)
+            return (True, "Validation not run")
+        
+        status = validation_state.get("status", "NOT_RUN")
+        fatal_count = validation_state.get("fatal_count", 0)
+        warn_count = validation_state.get("warn_count", 0)
+        
+        self._update_validation_status_indicator(status)
+        
+        if status == "FAIL":
+            if override_checked:
+                # Log override with audit trail
+                logger.warning(
+                    f"Compositing on FAILED validation (override enabled): "
+                    f"{fatal_count} errors, {warn_count} warnings"
+                )
+                self._log_validation_override(validation_state, "FAIL")
+                return (False, "override_fail")
+            
+            QMessageBox.warning(
+                self,
+                "Validation Failed",
+                f"Drillhole validation FAILED with {fatal_count} error(s).\n\n"
+                "Please open the QC Window and fix the errors before compositing.\n\n"
+                "If you must proceed with invalid data, check the 'Override' checkbox.\n"
+                "WARNING: This may produce invalid results and is not JORC/SAMREC compliant."
+            )
+            self.status_label.setText(f"Blocked: {fatal_count} validation errors")
+            self.cb_validation_override.setVisible(True)
+            return (True, f"Validation failed: {fatal_count} errors")
+        
+        if status == "WARN":
+            # Warnings are allowed but logged
+            logger.info(
+                f"Compositing with validation warnings: {warn_count} warning(s)"
+            )
+            return (False, "warn")
+        
+        # PASS - all good
+        return (False, "pass")
+    
+    def _update_validation_status_indicator(self, status: Optional[str] = None):
+        """Update the validation status indicator in the action bar.
+
+        Also shows info about excluded rows (rows with ERROR violations that are
+        filtered out of compositing even if 'ignored' in QC UI).
+        """
+        excluded_count = 0
+        if status is None:
+            # Fetch from registry
+            registry = self.get_registry()
+            if registry:
+                state = registry.get_drillholes_validation_state()
+                status = state.get("status", "NOT_RUN") if state else "NOT_RUN"
+                # Count excluded rows
+                if state:
+                    excluded_rows = state.get("excluded_rows", {})
+                    excluded_count = sum(len(rows) for rows in excluded_rows.values())
+            else:
+                status = "NOT_RUN"
+
+        # Build status text with excluded rows info
+        excluded_suffix = f" ({excluded_count} rows excluded)" if excluded_count > 0 else ""
+
+        if status == "PASS":
+            self.validation_status_label.setText(f"✅ Validation: PASS{excluded_suffix}")
+            self.validation_status_label.setStyleSheet("font-size: 9pt; color: #4CAF50; font-weight: bold;")
+            self.cb_validation_override.setVisible(False)
+        elif status == "WARN":
+            self.validation_status_label.setText(f"⚠️ Validation: WARN{excluded_suffix}")
+            self.validation_status_label.setStyleSheet("font-size: 9pt; color: #e67e22; font-weight: bold;")
+            self.cb_validation_override.setVisible(False)
+        elif status == "FAIL":
+            self.validation_status_label.setText(f"❌ Validation: FAIL{excluded_suffix}")
+            self.validation_status_label.setStyleSheet("font-size: 9pt; color: #e74c3c; font-weight: bold;")
+            self.cb_validation_override.setVisible(True)
+        else:  # NOT_RUN
+            self.validation_status_label.setText("⚪ Validation: Not Run")
+            self.validation_status_label.setStyleSheet("font-size: 9pt; color: #888;")
+            self.cb_validation_override.setVisible(True)
+    
+    def _log_validation_override(self, validation_state: dict, override_status: str):
+        """Log validation override to audit trail for JORC/SAMREC compliance."""
+        try:
+            from ..core.audit_manager import AuditManager
+            audit = AuditManager()
+            audit.log_event(
+                module="compositing",
+                action="validation_override",
+                parameters={
+                    "override_status": override_status,
+                    "validation_timestamp": validation_state.get("timestamp", ""),
+                    "validation_config_hash": validation_state.get("config_hash", ""),
+                },
+                result_summary={
+                    "fatal_count": validation_state.get("fatal_count", 0),
+                    "warn_count": validation_state.get("warn_count", 0),
+                    "reason": "User override of validation gate",
+                }
+            )
+            logger.info("Validation override logged to audit trail")
+        except Exception as e:
+            logger.debug(f"Audit logging failed (non-critical): {e}")
+    
+    def _log_compositing_run(self, cfg, composite_count: int, validation_status: str):
+        """Log compositing run to audit trail for JORC/SAMREC compliance."""
+        try:
+            from ..core.audit_manager import AuditManager
+            audit = AuditManager()
+            
+            # Compute config hash for reproducibility
+            config_dict = {
+                "method": cfg.method.value if hasattr(cfg.method, 'value') else str(cfg.method),
+                "composite_length": cfg.composite_length,
+                "weighting_mode": cfg.weighting_mode.value if hasattr(cfg.weighting_mode, 'value') else str(cfg.weighting_mode),
+                "partial_strategy": cfg.partial_strategy.value if hasattr(cfg.partial_strategy, 'value') else str(cfg.partial_strategy),
+                "treat_null_as_zero": cfg.treat_null_as_zero,
+                "exclude_qaqc": cfg.exclude_qaqc,
+            }
+            config_hash = hashlib.sha256(
+                json.dumps(config_dict, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            
+            audit.log_event(
+                module="compositing",
+                action="compositing_run",
+                parameters=config_dict,
+                input_data_hash=config_hash,
+                result_summary={
+                    "composite_count": composite_count,
+                    "input_interval_count": len(self.intervals) if self.intervals else 0,
+                    "validation_status": validation_status,
+                    "config_hash": config_hash,
+                }
+            )
+            logger.info(f"Compositing run logged to audit trail: {composite_count} composites, config_hash={config_hash}")
+        except Exception as e:
+            logger.debug(f"Audit logging failed (non-critical): {e}")
+    
+    def _clear_stale_composites(self):
+        """Clear stale composite results from previous runs.
+        
+        M-04 FIX: Ensures old composites don't persist when data changes.
+        """
+        if self._last_composites_df is not None or self._last_composites is not None:
+            logger.info("Clearing stale composite results due to data refresh")
+            self._last_composites_df = None
+            self._last_composites = None
+            self.btn_apply_registry.setEnabled(False)
+            # Clear results display
+            self.results_widget.update_results(pd.DataFrame())
+
+    def _on_apply_to_registry_clicked(self):
+        """Apply composites to the Data Registry for use in Variograms/Kriging/Simulations."""
+        if not hasattr(self, '_last_composites_df') or self._last_composites_df is None:
+            QMessageBox.warning(self, "No Composites", "Please run compositing first.")
+            return
+        
+        try:
+            df = self._last_composites_df
+            composites = getattr(self, '_last_composites', None)
+            
+            # Save to registry
+            self._save_composites_to_registry(df, composites)
+            
+            # Update status
+            self.status_label.setText(f"✅ Applied {len(df)} composites to Registry. Variogram/Kriging panels will now use composited data.")
+            self.status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            
+            # Show confirmation
+            QMessageBox.information(
+                self,
+                "Composites Applied",
+                f"Successfully applied {len(df)} composites to the Data Registry.\n\n"
+                "The following panels will now use composited data:\n"
+                "• Variogram Analysis\n"
+                "• Simple Kriging\n"
+                "• Universal Kriging\n"
+                "• SGSIM / CoSGSIM\n"
+                "• Declustering Analysis\n\n"
+                "Look for '✅ Composited data' indicator in these panels."
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to apply composites to registry: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Failed to apply composites to registry:\n{e}")
+
+    def _generate_dummy_results(self):
+        """For testing visual output without backend."""
+        data = {
+            "HoleID": ["DDH001"]*5 + ["DDH002"]*5,
+            "From": [0, 1, 2, 3, 4, 0, 1, 2, 3, 4],
+            "To": [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
+            "Length": [1.0]*10,
+            "Au_ppm": [0.1, 0.5, 2.3, 1.2, 0.05, 0.2, 0.2, 0.1, 5.0, 4.2],
+            "Lith": ["OX", "OX", "FR", "FR", "FR", "OX", "OX", "FR", "FR", "FR"]
+        }
+        df = pd.DataFrame(data)
+        self.results_widget.update_results(df)
+
+    def _composites_to_dataframe(self, composites) -> pd.DataFrame:
+        # Map composite objects to DF
+        rows = []
+        for c in composites:
+            row = {
+                "HoleID": c.hole_id,
+                "From": c.from_depth,
+                "To": c.to_depth,
+            }
+            row.update(c.grades)
+            # Add metadata fields as separate columns
+            for key, value in c.metadata.items():
+                if key not in row:
+                    row[key] = value
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        
+        # Add X, Y, Z coordinates if not present
+        # Get drillhole data from registry to compute coordinates
+        if 'X' not in df.columns or 'Y' not in df.columns or 'Z' not in df.columns:
+            try:
+                from ..utils.coordinate_utils import ensure_xyz_columns
+                
+                registry = self.get_registry()
+                if registry:
+                    drillhole_data = registry.get_drillhole_data()
+                    if drillhole_data and isinstance(drillhole_data, dict):
+                        # Get assays with coordinates (they should have X, Y, Z from desurveying)
+                        assays = drillhole_data.get('assays')
+                        if assays is not None and not assays.empty:
+                            # Check if assays have coordinates
+                            has_coords = any(col.upper() in ['X', 'Y', 'Z'] for col in assays.columns)
+                            
+                            coords_assigned = False
+                            if has_coords:
+                                # Merge coordinates from assays based on HoleID and depth
+                                # For each composite, find the closest assay point
+                                df['X'] = 0.0
+                                df['Y'] = 0.0
+                                df['Z'] = 0.0
+
+                                # Standardize column names
+                                hole_col = next((c for c in ['HOLEID', 'hole_id', 'HoleID'] if c in assays.columns), None)
+                                from_col = next((c for c in ['FROM', 'from', 'From', 'DEPTH_FROM'] if c in assays.columns), None)
+                                x_col = next((c for c in ['X', 'x'] if c in assays.columns), None)
+                                y_col = next((c for c in ['Y', 'y'] if c in assays.columns), None)
+                                z_col = next((c for c in ['Z', 'z'] if c in assays.columns), None)
+
+                                if hole_col and from_col and x_col and y_col and z_col:
+                                    # OPTIMIZED: Vectorized coordinate assignment
+                                    # Pre-build lookup dict for O(1) access per hole
+                                    from scipy.spatial import cKDTree
+
+                                    df['mid_depth'] = (df['From'] + df['To']) / 2.0
+
+                                    # Group assays by hole for efficient lookup
+                                    for hole_id in df['HoleID'].unique():
+                                        hole_mask = df['HoleID'] == hole_id
+                                        hole_assays = assays[assays[hole_col] == hole_id]
+
+                                        if not hole_assays.empty:
+                                            # Build KDTree on depths for fast nearest lookup
+                                            assay_depths = hole_assays[from_col].values.reshape(-1, 1)
+                                            tree = cKDTree(assay_depths)
+
+                                            comp_depths = df.loc[hole_mask, 'mid_depth'].values.reshape(-1, 1)
+                                            _, nearest_idx = tree.query(comp_depths, k=1)
+
+                                            # Get coordinates using iloc for fast indexing
+                                            df.loc[hole_mask, 'X'] = hole_assays[x_col].iloc[nearest_idx].values
+                                            df.loc[hole_mask, 'Y'] = hole_assays[y_col].iloc[nearest_idx].values
+                                            df.loc[hole_mask, 'Z'] = hole_assays[z_col].iloc[nearest_idx].values
+                                            coords_assigned = True
+
+                                    df.drop('mid_depth', axis=1, inplace=True, errors='ignore')
+
+                            # If no coordinates assigned from assays, try collars (simple vertical assumption)
+                            if not coords_assigned:
+                                collars = drillhole_data.get('collars')
+                                if collars is not None and not collars.empty:
+                                    df['X'] = 0.0
+                                    df['Y'] = 0.0
+                                    df['Z'] = 0.0
+                                    
+                                    collar_hole_col = next((c for c in ['HOLEID', 'hole_id', 'HoleID'] if c in collars.columns), None)
+                                    x_col = next((c for c in ['X', 'x', 'EASTING', 'easting'] if c in collars.columns), None)
+                                    y_col = next((c for c in ['Y', 'y', 'NORTHING', 'northing'] if c in collars.columns), None)
+                                    z_col = next((c for c in ['Z', 'z', 'ELEVATION', 'elevation'] if c in collars.columns), None)
+                                    
+                                    if collar_hole_col and x_col and y_col and z_col:
+                                        # OPTIMIZED: Vectorized collar lookup using merge
+                                        df['mid_depth'] = (df['From'] + df['To']) / 2.0
+                                        
+                                        # Create collar lookup dict
+                                        collar_dict = collars.set_index(collar_hole_col)[[x_col, y_col, z_col]].to_dict('index')
+                                        
+                                        # Vectorized assignment
+                                        df['X'] = df['HoleID'].map(lambda h: collar_dict.get(h, {}).get(x_col, 0.0))
+                                        df['Y'] = df['HoleID'].map(lambda h: collar_dict.get(h, {}).get(y_col, 0.0))
+                                        collar_z = df['HoleID'].map(lambda h: collar_dict.get(h, {}).get(z_col, 0.0))
+                                        df['Z'] = collar_z - df['mid_depth']  # Simple vertical assumption
+                                        
+                                        df.drop('mid_depth', axis=1, inplace=True, errors='ignore')
+                                
+                        # Ensure X, Y, Z columns are standardized
+                        df = ensure_xyz_columns(df)
+            except Exception as e:
+                logger.warning(f"Could not add coordinates to composites: {e}")
+        
+        return df
+    
+    def get_registry(self):
+        """
+        Get DataRegistry instance via dependency injection.
+        
+        Tries to get registry from:
+        1. Controller (if bound) -> controller.registry
+        2. MainWindow parent -> main_window.controller.registry
+        3. Falls back to singleton for backward compatibility
+        
+        Returns:
+            DataRegistry instance
+        """
+        # Try controller first (preferred - dependency injection)
+        if self.controller and hasattr(self.controller, 'registry'):
+            return self.controller.registry
+        
+        # Try MainWindow parent
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'controller') and parent.controller:
+                if hasattr(parent.controller, 'registry'):
+                    return parent.controller.registry
+            # Check if parent is MainWindow
+            if hasattr(parent, '_registry') and parent._registry:
+                return parent._registry
+            parent = parent.parent()
+        
+        # Fallback to singleton (backward compatibility)
+        from ..core.data_registry import DataRegistry
+        return DataRegistry.instance()
+    
+    def _save_composites_to_registry(self, df: pd.DataFrame, composites):
+        """Save composited results to DataRegistry via controller if available.
+        
+        H-03 FIX: Uses copy of existing data to avoid mutation of original dict.
+        """
+        try:
+            # Prefer controller.save_composites() if available
+            if self.controller and hasattr(self.controller, 'save_composites'):
+                try:
+                    self.controller.save_composites(df, composites)
+                    logger.info(f"Saved {len(df)} composites via controller")
+                    return
+                except AttributeError:
+                    # Controller doesn't have save_composites method, fall through to direct registry
+                    pass
+            
+            # Fallback to direct registry access
+            registry = self.get_registry()
+            if registry is None:
+                logger.warning("DataRegistry not available for saving composites")
+                return
+            
+            # H-03 FIX: Get existing drillhole data and create a COPY to avoid mutation
+            existing_data = registry.get_drillhole_data(copy_data=True)  # Request a copy
+            if existing_data is None:
+                existing_data = {}
+            else:
+                # Ensure we have a proper copy even if copy_data wasn't supported
+                existing_data = dict(existing_data)
+            
+            # Add composited data to the copy
+            existing_data['composites'] = df.copy()
+            
+            # Build metadata for audit trail with full lineage
+            composite_method = 'unknown'
+            if composites and len(composites) > 0:
+                composite_method = composites[0].metadata.get('method', 'unknown')
+            
+            # Get validation state for lineage tracking
+            validation_state = registry.get_drillholes_validation_state() or {}
+            
+            metadata = {
+                'composite_count': len(df),
+                'composite_method': composite_method,
+                'source': 'CompositingWindow',
+                'action': 'composites_added',
+                # LINEAGE PROVENANCE - Critical for audit trail
+                'parent_data_key': 'assays',  # Composites are derived from assays
+                'transformation_type': 'compositing',
+                'transformation_params': {
+                    'method': composite_method,
+                    'count': len(df),
+                },
+                'validation_status': validation_state.get('status', 'NOT_RUN'),
+                'validation_config_hash': validation_state.get('config_hash', ''),
+                'validation_timestamp': validation_state.get('timestamp', ''),
+                'override_used': self.cb_validation_override.isChecked(),
+            }
+            
+            # Register updated data (registry will store a new version)
+            registry.register_drillhole_data(
+                existing_data,
+                source_panel="Compositing Window",
+                metadata=metadata
+            )
+            
+            logger.info(f"Saved {len(df)} composites to DataRegistry (method={composite_method})")
+            
+        except Exception as e:
+            logger.error(f"Error saving composites to DataRegistry: {e}", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Save Warning",
+                f"Composited data was generated but could not be saved to DataRegistry:\n{e}\n\n"
+                "You can still export the results manually."
+            )
+
+    def export_csv(self):
+        if self.results_widget.model.df.empty:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV (*.csv)")
+        if path:
+            try:
+                self.results_widget.model.df.to_csv(path, index=False)
+            except PermissionError:
+                QMessageBox.warning(self, "Export Error", f"Permission denied. The file may be open in another program:\n{path}")
+            except Exception as e:
+                QMessageBox.warning(self, "Export Error", f"Failed to export CSV file:\n{e}")
+
+    def export_excel(self):
+        if self.results_widget.model.df.empty:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Excel", "", "Excel (*.xlsx)")
+        if path:
+            try:
+                self.results_widget.model.df.to_excel(path, index=False)
+            except ImportError:
+                QMessageBox.warning(self, "Export Error", "openpyxl is required for Excel export. Install with: pip install openpyxl")
+            except PermissionError:
+                QMessageBox.warning(self, "Export Error", f"Permission denied. The file may be open in another program:\n{path}")
+            except Exception as e:
+                QMessageBox.warning(self, "Export Error", f"Failed to export Excel file:\n{e}")
+
+    # ============================================================================
+    # PROJECT SAVE/RESTORE - Settings Serialization
+    # ============================================================================
+    def get_settings_state(self) -> dict:
+        """
+        Serialize all compositing settings for project save.
+        
+        Returns a dictionary containing all tab settings that can be
+        JSON-serialized and saved to the project file.
+        """
+        try:
+            settings = {
+                'active_tab': self.tabs.currentIndex(),
+                'numerical': self._serialize_numerical_state(),
+                'lithology': self._serialize_lithology_state(),
+                'economic': self._serialize_economic_state(),
+                'waste_ore': self._serialize_waste_ore_state(),
+            }
+            logger.info("Serialized compositing settings for project save")
+            return settings
+        except Exception as e:
+            logger.warning(f"Could not serialize compositing settings: {e}")
+            return {}
+
+    def _on_tab_changed(self, index: int):
+        """
+        Handle tab changes to update Economic Rule display in Waste/Ore tab.
+
+        When switching to Waste/Ore tab, automatically update the economic rule
+        display to show the current rule from Economic tab and detect mismatches.
+        """
+        try:
+            # Get the widget at the current tab index
+            current_tab = self.tabs.widget(index)
+
+            # If we switched to Waste/Ore tab, update the economic rule display
+            if current_tab is self.tab_waste_ore:
+                economic_rule = self.tab_economic.get_economic_rule()
+                self.tab_waste_ore.update_economic_rule_display(economic_rule)
+
+                # Validate the rule
+                if economic_rule:
+                    is_valid, warnings = EconomicRuleManager.validate_rule(economic_rule)
+                    if not is_valid:
+                        warning_text = "\n".join(warnings)
+                        logger.warning(f"Economic rule validation warnings:\n{warning_text}")
+
+        except Exception as e:
+            logger.debug(f"Error updating economic rule display on tab change: {e}")
+
+    def _serialize_numerical_state(self) -> dict:
+        """Serialize NumericalTab state."""
+        try:
+            tab = self.tab_numerical
+            return {
+                'method': tab.method_selector.currentText() if hasattr(tab, 'method_selector') else 'Fixed Length',
+                'weighting': tab.weighting.currentText() if hasattr(tab, 'weighting') else 'Length',
+                'composite_length': tab.comp_length.value() if hasattr(tab, 'comp_length') else 1.0,
+                'target_mass': tab.target_mass.value() if hasattr(tab, 'target_mass') else 10.0,
+                'bench_height': tab.bench_height.value() if hasattr(tab, 'bench_height') else 10.0,
+                'bench_offset': tab.bench_offset.value() if hasattr(tab, 'bench_offset') else 0.0,
+                'rolling_window_length': tab.window_length.value() if hasattr(tab, 'window_length') else 5.0,
+                'rolling_step': tab.window_step.value() if hasattr(tab, 'window_step') else 1.0,
+                'partial_strategy': tab.partial_strategy.currentText() if hasattr(tab, 'partial_strategy') else 'Auto',
+                'auto_partial_fraction': tab.auto_fraction.value() if hasattr(tab, 'auto_fraction') else 0.5,
+                'exclude_qaqc': tab.cb_exclude_qaqc.isChecked() if hasattr(tab, 'cb_exclude_qaqc') else False,
+                'min_recovery': tab.min_recovery.value() if hasattr(tab, 'min_recovery') else 0.0,
+                'treat_null_as_zero': tab.cb_treat_null_as_zero.isChecked() if hasattr(tab, 'cb_treat_null_as_zero') else True,
+            }
+        except Exception as e:
+            logger.debug(f"Could not serialize numerical state: {e}")
+            return {}
+    
+    def _serialize_lithology_state(self) -> dict:
+        """Serialize LithologyTab state."""
+        try:
+            tab = self.tab_lithology
+            return {
+                'weighting': tab.weighting.currentText() if hasattr(tab, 'weighting') else 'Length',
+                'min_ore_thickness': tab.min_ore.value() if hasattr(tab, 'min_ore') else 0.0,
+                'min_mining_width': tab.min_width.value() if hasattr(tab, 'min_width') else 0.0,
+                'exclude_qaqc': tab.cb_exclude_qaqc.isChecked() if hasattr(tab, 'cb_exclude_qaqc') else False,
+                'treat_null_as_zero': tab.cb_treat_null_as_zero.isChecked() if hasattr(tab, 'cb_treat_null_as_zero') else True,
+            }
+        except Exception as e:
+            logger.debug(f"Could not serialize lithology state: {e}")
+            return {}
+    
+    def _serialize_economic_state(self) -> dict:
+        """Serialize EconomicTab state."""
+        try:
+            tab = self.tab_economic
+            return {
+                'cutoff_field': tab.cutoff_field.currentText() if hasattr(tab, 'cutoff_field') else '',
+                'cutoff_value': tab.val.value() if hasattr(tab, 'val') else 0.0,
+                'cutoff_operator': tab.op.currentText() if hasattr(tab, 'op') else '>=',
+                'weighting': tab.weighting.currentText() if hasattr(tab, 'weighting') else 'Length',
+                'dilution_rule': tab.dilution_rule.currentText() if hasattr(tab, 'dilution_rule') else 'Basic',
+                'min_ore_composite_length': tab.min_ore_composite_length.value() if hasattr(tab, 'min_ore_composite_length') else 0.0,
+                'max_included_waste': tab.max_included_waste.value() if hasattr(tab, 'max_included_waste') else 0.0,
+                'max_consecutive_waste': tab.max_consecutive_waste.value() if hasattr(tab, 'max_consecutive_waste') else 0.0,
+                'keep_short_high_grade': tab.keep_short_high_grade.isChecked() if hasattr(tab, 'keep_short_high_grade') else False,
+                'min_linear_grade': tab.min_linear_grade.value() if hasattr(tab, 'min_linear_grade') else 0.0,
+                'min_waste_composite_length': tab.min_waste_composite_length.value() if hasattr(tab, 'min_waste_composite_length') else 0.0,
+                'composite_twice': tab.composite_twice.isChecked() if hasattr(tab, 'composite_twice') else False,
+                'use_true_thickness': tab.use_true_thickness.isChecked() if hasattr(tab, 'use_true_thickness') else False,
+                'true_thickness_dip': tab.true_thickness_dip.value() if hasattr(tab, 'true_thickness_dip') else 0.0,
+                'true_thickness_dip_azimuth': tab.true_thickness_dip_azimuth.value() if hasattr(tab, 'true_thickness_dip_azimuth') else 0.0,
+                'exclude_qaqc': tab.cb_exclude_qaqc.isChecked() if hasattr(tab, 'cb_exclude_qaqc') else False,
+                'treat_null_as_zero': tab.cb_treat_null_as_zero.isChecked() if hasattr(tab, 'cb_treat_null_as_zero') else True,
+            }
+        except Exception as e:
+            logger.debug(f"Could not serialize economic state: {e}")
+            return {}
+    
+    def _serialize_waste_ore_state(self) -> dict:
+        """Serialize WasteOreTab state."""
+        try:
+            tab = self.tab_waste_ore
+            return {
+                'indicator_field': tab.indicator_field.currentText() if hasattr(tab, 'indicator_field') else '',
+                'cutoff_grade': tab.cutoff_grade.value() if hasattr(tab, 'cutoff_grade') else 0.0,
+                'cutoff_operator': tab.cutoff_op.currentText() if hasattr(tab, 'cutoff_op') else '>=',
+                'ore_code': int(tab.ore_code.value()) if hasattr(tab, 'ore_code') else 1,
+                'waste_code': int(tab.waste_code.value()) if hasattr(tab, 'waste_code') else 0,
+                'weighting': tab.weighting.currentText() if hasattr(tab, 'weighting') else 'Length',
+                'composite_length': tab.comp_length.value() if hasattr(tab, 'comp_length') else 1.0,
+                'partial_strategy': tab.partial_strategy.currentText() if hasattr(tab, 'partial_strategy') else 'Auto',
+                'auto_fraction': tab.auto_fraction.value() if hasattr(tab, 'auto_fraction') else 0.5,
+                'exclude_qaqc': tab.cb_exclude_qaqc.isChecked() if hasattr(tab, 'cb_exclude_qaqc') else True,
+                'treat_null_as_zero': tab.cb_treat_null_as_zero.isChecked() if hasattr(tab, 'cb_treat_null_as_zero') else True,
+            }
+        except Exception as e:
+            logger.debug(f"Could not serialize waste/ore state: {e}")
+            return {}
+    
+    def apply_settings_state(self, settings: dict):
+        """
+        Restore compositing settings from project load.
+        
+        Args:
+            settings: Dictionary containing saved settings from get_settings_state()
+        """
+        try:
+            if not settings:
+                return
+            
+            # Restore active tab
+            if 'active_tab' in settings:
+                self.tabs.setCurrentIndex(settings['active_tab'])
+            
+            # Restore each tab's settings
+            if 'numerical' in settings:
+                self._restore_numerical_state(settings['numerical'])
+            if 'lithology' in settings:
+                self._restore_lithology_state(settings['lithology'])
+            if 'economic' in settings:
+                self._restore_economic_state(settings['economic'])
+            if 'waste_ore' in settings:
+                self._restore_waste_ore_state(settings['waste_ore'])
+            
+            logger.info("Restored compositing settings from project")
+        except Exception as e:
+            logger.warning(f"Could not restore compositing settings: {e}")
+    
+    def _restore_numerical_state(self, state: dict):
+        """Restore NumericalTab state."""
+        try:
+            tab = self.tab_numerical
+            if not state:
+                return
+
+            if 'method' in state and hasattr(tab, 'method_selector'):
+                idx = tab.method_selector.findText(state['method'])
+                if idx >= 0:
+                    tab.method_selector.setCurrentIndex(idx)
+
+            if 'weighting' in state and hasattr(tab, 'weighting'):
+                idx = tab.weighting.findText(state['weighting'])
+                if idx >= 0:
+                    tab.weighting.setCurrentIndex(idx)
+
+            if 'composite_length' in state and hasattr(tab, 'comp_length'):
+                tab.comp_length.setValue(state['composite_length'])
+
+            if 'target_mass' in state and hasattr(tab, 'target_mass'):
+                tab.target_mass.setValue(state['target_mass'])
+
+            if 'bench_height' in state and hasattr(tab, 'bench_height'):
+                tab.bench_height.setValue(state['bench_height'])
+
+            if 'bench_offset' in state and hasattr(tab, 'bench_offset'):
+                tab.bench_offset.setValue(state['bench_offset'])
+
+            if 'rolling_window_length' in state and hasattr(tab, 'window_length'):
+                tab.window_length.setValue(state['rolling_window_length'])
+
+            if 'rolling_step' in state and hasattr(tab, 'window_step'):
+                tab.window_step.setValue(state['rolling_step'])
+
+            if 'partial_strategy' in state and hasattr(tab, 'partial_strategy'):
+                idx = tab.partial_strategy.findText(state['partial_strategy'])
+                if idx >= 0:
+                    tab.partial_strategy.setCurrentIndex(idx)
+
+            if 'auto_partial_fraction' in state and hasattr(tab, 'auto_fraction'):
+                tab.auto_fraction.setValue(state['auto_partial_fraction'])
+
+            if 'exclude_qaqc' in state and hasattr(tab, 'cb_exclude_qaqc'):
+                tab.cb_exclude_qaqc.setChecked(state['exclude_qaqc'])
+
+            if 'min_recovery' in state and hasattr(tab, 'min_recovery'):
+                tab.min_recovery.setValue(state['min_recovery'])
+
+            if 'treat_null_as_zero' in state and hasattr(tab, 'cb_treat_null_as_zero'):
+                tab.cb_treat_null_as_zero.setChecked(state['treat_null_as_zero'])
+
+        except Exception as e:
+            logger.debug(f"Could not restore numerical state: {e}")
+    
+    def _restore_lithology_state(self, state: dict):
+        """Restore LithologyTab state."""
+        try:
+            tab = self.tab_lithology
+            if not state:
+                return
+
+            if 'weighting' in state and hasattr(tab, 'weighting'):
+                idx = tab.weighting.findText(state['weighting'])
+                if idx >= 0:
+                    tab.weighting.setCurrentIndex(idx)
+
+            if 'min_ore_thickness' in state and hasattr(tab, 'min_ore'):
+                tab.min_ore.setValue(state['min_ore_thickness'])
+
+            if 'min_mining_width' in state and hasattr(tab, 'min_width'):
+                tab.min_width.setValue(state['min_mining_width'])
+
+            if 'exclude_qaqc' in state and hasattr(tab, 'cb_exclude_qaqc'):
+                tab.cb_exclude_qaqc.setChecked(state['exclude_qaqc'])
+
+            if 'treat_null_as_zero' in state and hasattr(tab, 'cb_treat_null_as_zero'):
+                tab.cb_treat_null_as_zero.setChecked(state['treat_null_as_zero'])
+
+        except Exception as e:
+            logger.debug(f"Could not restore lithology state: {e}")
+    
+    def _restore_economic_state(self, state: dict):
+        """Restore EconomicTab state."""
+        try:
+            tab = self.tab_economic
+            if not state:
+                return
+
+            if 'cutoff_field' in state and hasattr(tab, 'cutoff_field'):
+                idx = tab.cutoff_field.findText(state['cutoff_field'])
+                if idx >= 0:
+                    tab.cutoff_field.setCurrentIndex(idx)
+
+            if 'cutoff_value' in state and hasattr(tab, 'val'):
+                tab.val.setValue(state['cutoff_value'])
+
+            if 'cutoff_operator' in state and hasattr(tab, 'op'):
+                idx = tab.op.findText(state['cutoff_operator'])
+                if idx >= 0:
+                    tab.op.setCurrentIndex(idx)
+
+            if 'weighting' in state and hasattr(tab, 'weighting'):
+                idx = tab.weighting.findText(state['weighting'])
+                if idx >= 0:
+                    tab.weighting.setCurrentIndex(idx)
+
+            if 'dilution_rule' in state and hasattr(tab, 'dilution_rule'):
+                idx = tab.dilution_rule.findText(state['dilution_rule'])
+                if idx >= 0:
+                    tab.dilution_rule.setCurrentIndex(idx)
+
+            if 'min_ore_composite_length' in state and hasattr(tab, 'min_ore_composite_length'):
+                tab.min_ore_composite_length.setValue(state['min_ore_composite_length'])
+
+            if 'max_included_waste' in state and hasattr(tab, 'max_included_waste'):
+                tab.max_included_waste.setValue(state['max_included_waste'])
+
+            if 'max_consecutive_waste' in state and hasattr(tab, 'max_consecutive_waste'):
+                tab.max_consecutive_waste.setValue(state['max_consecutive_waste'])
+
+            if 'keep_short_high_grade' in state and hasattr(tab, 'keep_short_high_grade'):
+                tab.keep_short_high_grade.setChecked(state['keep_short_high_grade'])
+
+            if 'min_linear_grade' in state and hasattr(tab, 'min_linear_grade'):
+                tab.min_linear_grade.setValue(state['min_linear_grade'])
+
+            if 'min_waste_composite_length' in state and hasattr(tab, 'min_waste_composite_length'):
+                tab.min_waste_composite_length.setValue(state['min_waste_composite_length'])
+
+            if 'composite_twice' in state and hasattr(tab, 'composite_twice'):
+                tab.composite_twice.setChecked(state['composite_twice'])
+
+            if 'use_true_thickness' in state and hasattr(tab, 'use_true_thickness'):
+                tab.use_true_thickness.setChecked(state['use_true_thickness'])
+
+            if 'true_thickness_dip' in state and hasattr(tab, 'true_thickness_dip'):
+                tab.true_thickness_dip.setValue(state['true_thickness_dip'])
+
+            if 'true_thickness_dip_azimuth' in state and hasattr(tab, 'true_thickness_dip_azimuth'):
+                tab.true_thickness_dip_azimuth.setValue(state['true_thickness_dip_azimuth'])
+
+            if 'exclude_qaqc' in state and hasattr(tab, 'cb_exclude_qaqc'):
+                tab.cb_exclude_qaqc.setChecked(state['exclude_qaqc'])
+
+            if 'treat_null_as_zero' in state and hasattr(tab, 'cb_treat_null_as_zero'):
+                tab.cb_treat_null_as_zero.setChecked(state['treat_null_as_zero'])
+
+        except Exception as e:
+            logger.debug(f"Could not restore economic state: {e}")
+    
+    def _restore_waste_ore_state(self, state: dict):
+        """Restore WasteOreTab state."""
+        try:
+            tab = self.tab_waste_ore
+            if not state:
+                return
+
+            if 'indicator_field' in state and hasattr(tab, 'indicator_field'):
+                idx = tab.indicator_field.findText(state['indicator_field'])
+                if idx >= 0:
+                    tab.indicator_field.setCurrentIndex(idx)
+
+            if 'cutoff_grade' in state and hasattr(tab, 'cutoff_grade'):
+                tab.cutoff_grade.setValue(state['cutoff_grade'])
+
+            if 'cutoff_operator' in state and hasattr(tab, 'cutoff_op'):
+                idx = tab.cutoff_op.findText(state['cutoff_operator'])
+                if idx >= 0:
+                    tab.cutoff_op.setCurrentIndex(idx)
+
+            if 'ore_code' in state and hasattr(tab, 'ore_code'):
+                tab.ore_code.setValue(state['ore_code'])
+
+            if 'waste_code' in state and hasattr(tab, 'waste_code'):
+                tab.waste_code.setValue(state['waste_code'])
+
+            if 'weighting' in state and hasattr(tab, 'weighting'):
+                idx = tab.weighting.findText(state['weighting'])
+                if idx >= 0:
+                    tab.weighting.setCurrentIndex(idx)
+
+            if 'composite_length' in state and hasattr(tab, 'comp_length'):
+                tab.comp_length.setValue(state['composite_length'])
+
+            if 'partial_strategy' in state and hasattr(tab, 'partial_strategy'):
+                idx = tab.partial_strategy.findText(state['partial_strategy'])
+                if idx >= 0:
+                    tab.partial_strategy.setCurrentIndex(idx)
+
+            if 'auto_fraction' in state and hasattr(tab, 'auto_fraction'):
+                tab.auto_fraction.setValue(state['auto_fraction'])
+
+            if 'exclude_qaqc' in state and hasattr(tab, 'cb_exclude_qaqc'):
+                tab.cb_exclude_qaqc.setChecked(state['exclude_qaqc'])
+
+            if 'treat_null_as_zero' in state and hasattr(tab, 'cb_treat_null_as_zero'):
+                tab.cb_treat_null_as_zero.setChecked(state['treat_null_as_zero'])
+
+        except Exception as e:
+            logger.debug(f"Could not restore waste/ore state: {e}")
+
+    def refresh_theme(self):
+        """Refresh styles when theme changes."""
+        self.setStyleSheet(_get_compositing_window_stylesheet())
+        colors = get_theme_colors()
+        self.splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {colors.PANEL_BG}; }}")
+

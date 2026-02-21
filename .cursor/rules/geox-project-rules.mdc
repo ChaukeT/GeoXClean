@@ -1,0 +1,13 @@
+---
+alwaysApply: true
+---
+
+This is the GeoX codebase.
+
+Rules:
+- Follow PRD.md, design_geostats.md, design_drillholes.md, and design_rendering.md.
+- Do not refactor unrelated files.
+- Do not modify data schemas without explicit instruction.
+- Do not cross UI ↔ engine boundaries.
+- Preserve determinism and auditability.
+- Prefer minimal, surgical changes over rewrites.

@@ -1,0 +1,831 @@
+"""
+Column Mapping Dialog for Drillhole Data - Clean, Functional Design.
+Allows users to map their CSV columns to required fields.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional, Dict
+import pandas as pd
+
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QScrollArea, QWidget, QFrame
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
+from .modern_styles import get_theme_colors, ModernColors
+
+logger = logging.getLogger(__name__)
+
+
+class MappingRow(QFrame):
+    """Clean row for mapping a single field."""
+    
+    def __init__(self, field_key: str, field_label: str, required: bool, 
+                 columns: list, auto_match: Optional[str] = None, parent=None):
+        super().__init__(parent)
+        self.field_key = field_key
+        self.field_label = field_label
+        self.required = required
+        
+        self._setup_ui(columns, auto_match)
+    
+
+
+    def refresh_theme(self):
+        """Update colors when theme changes."""
+        colors = get_theme_colors()
+        # Re-apply stylesheet with new theme colors
+        if hasattr(self, "setStyleSheet"):
+            self.setStyleSheet(self.styleSheet())
+        # Refresh child widgets
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "refresh_theme"):
+                child.refresh_theme()
+    def _setup_ui(self, columns: list, auto_match: Optional[str]):
+        self.setFixedHeight(28)
+        self.setObjectName("MappingRow")
+        
+        # Solid color styling
+        self.setStyleSheet(f"""
+            #MappingRow {{
+                background-color: {ModernColors.BORDER};
+                border: 1px solid {ModernColors.TEXT_HINT};
+                border-radius: 4px;
+            }}
+            #MappingRow:hover {{
+                background-color: #526278;
+                border-color: {ModernColors.TEXT_SECONDARY};
+            }}
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(8)
+        
+        # Status indicator
+        self.status_indicator = QFrame()
+        self.status_indicator.setFixedSize(6, 6)
+        self.status_indicator.setStyleSheet(f"border-radius: 3px; background-color: {ModernColors.ERROR};")
+        layout.addWidget(self.status_indicator)
+        
+        # Field name with badge
+        name_layout = QHBoxLayout()
+        name_layout.setSpacing(4)
+        
+        clean_label = self.field_label.replace(" (required)", "").replace(" (optional - LITHO/ZONE/etc.)", "")
+        name_label = QLabel(clean_label)
+        name_label.setStyleSheet("QLabel { color: white; background: transparent; font-size: 10pt; font-weight: bold; }")
+        name_layout.addWidget(name_label)
+        
+        if self.required:
+            badge = QLabel("REQ")
+            badge.setStyleSheet(f"QLabel {{ font-size: 7pt; font-weight: bold; padding: 2px 5px; background-color: {ModernColors.ERROR}; color: white; border-radius: 2px; }}")
+            name_layout.addWidget(badge)
+        else:
+            badge = QLabel("OPT")
+            badge.setStyleSheet(f"QLabel {{ font-size: 7pt; font-weight: bold; padding: 2px 5px; background-color: {ModernColors.TEXT_HINT}; color: white; border-radius: 2px; }}")
+            name_layout.addWidget(badge)
+        
+        name_layout.addStretch()
+        layout.addLayout(name_layout, 1)
+        
+        # Combo box
+        self.combo = QComboBox()
+        self.combo.setMinimumWidth(160)
+        self.combo.setFixedHeight(22)
+        self.combo.addItems(['— Select Column —'] + columns)
+        self.combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {ModernColors.PANEL_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.TEXT_HINT};
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 9pt;
+                font-weight: 500;
+            }}
+            QComboBox:hover {{
+                background-color: {ModernColors.CARD_BG};
+                border-color: {ModernColors.TEXT_SECONDARY};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {ModernColors.PANEL_BG};
+                color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.TEXT_HINT};
+                selection-background-color: {ModernColors.ACCENT_PRIMARY};
+            }}
+        """)
+        
+        if auto_match:
+            try:
+                self.combo.setCurrentText(auto_match)
+            except:
+                pass
+        
+        layout.addWidget(self.combo)
+        
+        self.combo.currentTextChanged.connect(self._update_status)
+        self._update_status()
+    
+    def _update_status(self):
+        selected = self.combo.currentText()
+        if selected == '— Select Column —':
+            color = f"{ModernColors.ERROR}" if self.required else f"{ModernColors.TEXT_HINT}"
+        else:
+            color = f"{ModernColors.SUCCESS}"
+        self.status_indicator.setStyleSheet(f"border-radius: 4px; background-color: {color};")
+    
+    def get_selected(self) -> Optional[str]:
+        selected = self.combo.currentText()
+        return None if selected == '— Select Column —' else selected
+    
+    def set_column(self, column: str):
+        self.combo.setCurrentText(column)
+
+
+class GradeCard(QFrame):
+    """Clean card for selecting a grade/numeric column."""
+    
+    toggled = pyqtSignal(str, bool)
+    
+    def __init__(self, column_name: str, series: pd.Series, parent=None):
+        super().__init__(parent)
+        self.column_name = column_name
+        self._is_selected = True
+        self.count = len(series.dropna())
+        self._setup_ui()
+        self._apply_style()
+    
+    def _setup_ui(self):
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(32)
+        self.setObjectName("GradeCard")
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+        
+        # Selection indicator
+        self.indicator = QFrame()
+        self.indicator.setFixedSize(12, 12)
+        layout.addWidget(self.indicator)
+        
+        # Column info
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(0)
+        
+        self.name_label = QLabel(self.column_name)
+        info_layout.addWidget(self.name_label)
+        
+        self.type_label = QLabel(f"{self.count:,} values")
+        self.type_label.setStyleSheet(f"font-size: 7pt; color: {ModernColors.TEXT_SECONDARY};")
+        info_layout.addWidget(self.type_label)
+        
+        layout.addLayout(info_layout, 1)
+    
+    def _apply_style(self):
+        if self._is_selected:
+            self.setStyleSheet(f"""
+                #GradeCard {{
+                    background-color: {ModernColors.ELEVATED_BG};
+                    border: 2px solid {ModernColors.ACCENT_PRIMARY};
+                    border-radius: 4px;
+                }}
+                #GradeCard:hover {{ background-color: {ModernColors.CARD_HOVER}; }}
+            """)
+            self.indicator.setStyleSheet(f"background-color: {ModernColors.ACCENT_PRIMARY}; border-radius: 6px;")
+            self.name_label.setStyleSheet(f"color: {ModernColors.ACCENT_PRIMARY}; font-size: 9pt; font-weight: 700;")
+        else:
+            self.setStyleSheet(f"""
+                #GradeCard {{
+                    background-color: {ModernColors.CARD_BG};
+                    border: 2px solid {ModernColors.BORDER};
+                    border-radius: 4px;
+                }}
+                #GradeCard:hover {{ background-color: {ModernColors.CARD_HOVER}; }}
+            """)
+            self.indicator.setStyleSheet(f"background-color: {ModernColors.TEXT_HINT}; border-radius: 6px;")
+            self.name_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; font-size: 9pt; font-weight: 600;")
+    
+    def mousePressEvent(self, event):
+        self._is_selected = not self._is_selected
+        self._apply_style()
+        self.toggled.emit(self.column_name, self._is_selected)
+        super().mousePressEvent(event)
+    
+    def setSelected(self, selected: bool):
+        self._is_selected = selected
+        self._apply_style()
+    
+    def isSelected(self) -> bool:
+        return self._is_selected
+
+
+class ColumnMappingDialog(QDialog):
+    """Clean, functional dialog for mapping CSV columns."""
+    
+    TYPE_CONFIG = {
+        "collar": {"icon": "📍", "color": f"{ModernColors.ACCENT_PRIMARY}", "title": "Collar"},
+        "survey": {"icon": "🧭", "color": f"{ModernColors.INFO}", "title": "Survey"},
+        "assay": {"icon": "🧪", "color": f"{ModernColors.SUCCESS}", "title": "Assay"},
+        "lithology": {"icon": "🪨", "color": f"{ModernColors.WARNING}", "title": "Lithology"},
+        "structures": {"icon": "📐", "color": "#e11d48", "title": "Structural"},
+    }
+    
+    def __init__(self, df: pd.DataFrame, data_type: str, parent=None):
+        super().__init__(parent)
+        self.df = df
+        self.data_type = data_type
+        self.column_mapping: Dict[str, str] = {}
+        self.selected_grade_columns: set = set()
+        self.mapping_rows: Dict[str, MappingRow] = {}
+        
+        config = self.TYPE_CONFIG.get(data_type, {"icon": "📄", "color": "#6b7280", "title": data_type.capitalize()})
+        self.type_icon = config["icon"]
+        self.type_color = config["color"]
+        self.type_title = config["title"]
+        
+        self.setWindowTitle(f"Map {data_type.capitalize()} Columns")
+        self.setModal(True)
+        self.resize(800, 600)
+        self.setMaximumHeight(614)  # 80% of 768px screen
+        
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        colors = get_theme_colors()
+        self.setStyleSheet(f"QDialog {{ background-color: {colors.PANEL_BG}; }}")
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(10, 8, 10, 8)
+        
+        # Header (Fixed)
+        header = QFrame()
+        header.setStyleSheet(f"background-color: {self.type_color}; border-radius: 8px; padding: 8px;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+        header_layout.setSpacing(10)
+        
+        icon_label = QLabel(self.type_icon)
+        icon_label.setStyleSheet("font-size: 24px; background: transparent;")
+        header_layout.addWidget(icon_label)
+        
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(0)
+        title_label = QLabel(f"Map {self.type_title} Data Columns")
+        title_label.setStyleSheet("color: white; font-size: 12pt; font-weight: 700; background: transparent;")
+        title_layout.addWidget(title_label)
+        
+        info_label = QLabel(f"{len(self.df):,} rows  •  {len(self.df.columns)} columns")
+        info_label.setStyleSheet("color: rgba(255,255,255,0.9); font-size: 9pt; background: transparent;")
+        title_layout.addWidget(info_label)
+        header_layout.addLayout(title_layout, 1)
+        
+        auto_btn = QPushButton("✨ Auto-Detect")
+        auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        auto_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: white; color: {ModernColors.PANEL_BG};
+                border: none; border-radius: 5px; padding: 6px 14px;
+                font-size: 9pt; font-weight: 700;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.TEXT_PRIMARY}; }}
+        """)
+        auto_btn.clicked.connect(self._auto_detect_all)
+        header_layout.addWidget(auto_btn)
+        layout.addWidget(header)
+        
+        # Scrollable Body
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setSpacing(6)
+        scroll_layout.setContentsMargins(0, 0, 4, 0)
+        
+        # Collapsible Preview
+        preview_header = QPushButton("📋 Data Preview ▸")
+        preview_header.setCheckable(True)
+        preview_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        preview_header.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernColors.CARD_BG}; color: {ModernColors.TEXT_PRIMARY};
+                border: 1px solid {ModernColors.BORDER}; border-radius: 4px;
+                padding: 6px 10px; text-align: left; font-weight: 600; font-size: 9pt;
+            }}
+            QPushButton:hover {{ background-color: {ModernColors.CARD_HOVER}; }}
+            QPushButton:checked {{ border-color: """ + self.type_color + """; }
+        """)
+        scroll_layout.addWidget(preview_header)
+        
+        self.preview_widget = QWidget()
+        preview_layout = QVBoxLayout(self.preview_widget)
+        preview_layout.setContentsMargins(6, 4, 6, 4)
+        preview_layout.setSpacing(4)
+        
+        max_cols = 8
+        preview_cols = list(self.df.columns[:max_cols])
+        
+        self.preview_table = QTableWidget()
+        self.preview_table.setRowCount(3)
+        self.preview_table.setColumnCount(len(preview_cols))
+        self.preview_table.setHorizontalHeaderLabels(preview_cols)
+        self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.preview_table.verticalHeader().setVisible(False)
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.setStyleSheet("""
+            QTableWidget {
+                background-color: {ModernColors.PANEL_BG}; color: #e2e8f0;
+                border: 1px solid {ModernColors.BORDER}; border-radius: 4px;
+                gridline-color: {ModernColors.BORDER_SUBTLE};
+            }
+            QTableWidget::item { padding: 4px; }
+            QTableWidget::item:alternate { background-color: {ModernColors.PANEL_BG}; }
+            QHeaderView::section {
+                background-color: {ModernColors.PANEL_BG}; color: {ModernColors.TEXT_SECONDARY};
+                padding: 6px; border: none; border-bottom: 2px solid """ + self.type_color + """;
+                font-weight: 600; font-size: 7pt;
+            }
+        f""")
+        
+        for i in range(3):
+            for j, col in enumerate(preview_cols):
+                value = str(self.df[col].iloc[i])[:20]
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.preview_table.setItem(i, j, item)
+        
+        self.preview_table.setFixedHeight(80)
+        preview_layout.addWidget(self.preview_table)
+        
+        if len(self.df.columns) > max_cols:
+            more = QLabel(f"+ {len(self.df.columns) - max_cols} more columns")
+            more.setStyleSheet(f"color: {ModernColors.TEXT_HINT}; font-size: 7pt; font-style: italic;")
+            preview_layout.addWidget(more)
+        
+        self.preview_widget.setVisible(False)  # Collapsed by default
+        scroll_layout.addWidget(self.preview_widget)
+        
+        preview_header.toggled.connect(lambda checked: (
+            self.preview_widget.setVisible(checked),
+            preview_header.setText("📋 Data Preview ▾" if checked else "📋 Data Preview ▸")
+        ))
+        
+        # Mapping
+        mapping_group = QGroupBox("🔗 Column Mapping (Required)")
+        mapping_group.setStyleSheet("""
+            QGroupBox {
+                color: {ModernColors.TEXT_PRIMARY}; font-weight: 600; font-size: 10pt;
+                background-color: {ModernColors.PANEL_BG};
+                border: 1px solid {ModernColors.TEXT_HINT}; border-radius: 4px;
+                margin-top: 6px; padding-top: 10px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 2px 6px; }
+        """)
+        mapping_layout = QVBoxLayout(mapping_group)
+        mapping_layout.setContentsMargins(6, 6, 6, 6)
+        mapping_layout.setSpacing(4)
+        
+        if self.data_type == "collar":
+            fields = {
+                'HOLEID': ('Hole ID', True),
+                'X': ('X Coordinate / Easting', True),
+                'Y': ('Y Coordinate / Northing', True),
+                'Z': ('Z Coordinate / Elevation', True),
+                'DEPTH': ('Total Hole Length', True)
+            }
+        elif self.data_type == "survey":
+            self.survey_mode = self._detect_survey_mode()
+            if self.survey_mode == "interval":
+                fields = {
+                    'HOLEID': ('Hole ID', True),
+                    'DEPTH_FROM': ('Depth From', True),
+                    'DEPTH_TO': ('Depth To', True),
+                    'AZI': ('Azimuth', True),
+                    'DIP': ('Dip / Inclination', True)
+                }
+            else:
+                fields = {
+                    'HOLEID': ('Hole ID', True),
+                    'DEPTH': ('Measured Depth', True),
+                    'AZI': ('Azimuth', True),
+                    'DIP': ('Dip / Inclination', True)
+                }
+        elif self.data_type == "assay":
+            fields = {
+                'HOLEID': ('Hole ID', True),
+                'FROM': ('From Depth', True),
+                'TO': ('To Depth', True),
+                'DOMAIN': ('Domain (Lithology/Zone)', False)
+            }
+        elif self.data_type == "structures":
+            # Detect if data has dip/dip-direction OR alpha/beta format
+            self.struct_mode = self._detect_structural_mode()
+            if self.struct_mode == "dip_dipdir":
+                fields = {
+                    'HOLEID': ('Hole ID', True),
+                    'FROM': ('From Depth', True),
+                    'TO': ('To Depth', True),
+                    'DIP': ('Dip Angle (0-90°)', True),
+                    'DIP_DIRECTION': ('Dip Direction (0-360°)', True),
+                    'FEATURE_TYPE': ('Feature Type (joint/fault/bedding)', False)
+                }
+            else:  # alpha_beta mode
+                fields = {
+                    'HOLEID': ('Hole ID', True),
+                    'FROM': ('From Depth', True),
+                    'TO': ('To Depth', True),
+                    'ALPHA': ('Alpha Angle', True),
+                    'BETA': ('Beta Angle', True),
+                    'FEATURE_TYPE': ('Feature Type (joint/fault/bedding)', False)
+                }
+        else:
+            fields = {
+                'HOLEID': ('Hole ID', True),
+                'FROM': ('From Depth', True),
+                'TO': ('To Depth', True),
+                'LITH_CODE': ('Lithology Code', True)
+            }
+        
+        self.combo_boxes = {}
+        columns = self.df.columns.tolist()
+        
+        for key, (label, req) in fields.items():
+            match = self._auto_detect_column(key)
+            row = MappingRow(key, label, req, columns, match)
+            mapping_layout.addWidget(row)
+            self.mapping_rows[key] = row
+            self.combo_boxes[key] = row.combo
+        
+        scroll_layout.addWidget(mapping_group)
+        
+        # Grade columns for assay
+        if self.data_type == "assay":
+            excluded = {'HOLEID', 'HOLE_ID', 'BHID', 'FROM', 'TO', 'DEPTH_FROM', 'DEPTH_TO', 'LENGTH', 'INTERVAL'}
+            numeric_cols = [c for c in self.df.columns 
+                           if pd.api.types.is_numeric_dtype(self.df[c]) 
+                           and c.upper() not in excluded]
+            
+            if numeric_cols:
+                grade_group = QGroupBox("🔢 Select Grade Columns")
+                grade_group.setStyleSheet("""
+                    QGroupBox {
+                        color: {ModernColors.TEXT_PRIMARY}; font-weight: 600; font-size: 10pt;
+                        background-color: {ModernColors.PANEL_BG};
+                        border: 1px solid {ModernColors.TEXT_HINT}; border-radius: 4px;
+                        margin-top: 6px; padding-top: 10px;
+                    }
+                    QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 2px 6px; }
+                f""")
+                grade_layout = QVBoxLayout(grade_group)
+                grade_layout.setSpacing(4)
+                grade_layout.setContentsMargins(6, 6, 6, 6)
+                
+                header_layout = QHBoxLayout()
+                info = QLabel("Click to toggle")
+                info.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; font-size: 8pt;")
+                header_layout.addWidget(info, 1)
+                
+                self.count_label = QLabel(f"{len(numeric_cols)}/{len(numeric_cols)}")
+                self.count_label.setStyleSheet("""
+                    color: {ModernColors.SUCCESS_LIGHT}; font-size: 8pt; font-weight: 700;
+                    background: rgba(34,197,94,0.2); padding: 3px 8px;
+                    border-radius: 8px; border: 1px solid rgba(34,197,94,0.4);
+                """)
+                header_layout.addWidget(self.count_label)
+                grade_layout.addLayout(header_layout)
+                
+                grade_scroll = QScrollArea()
+                grade_scroll.setWidgetResizable(True)
+                grade_scroll.setMinimumHeight(80)
+                grade_scroll.setMaximumHeight(120)
+                grade_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                grade_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+                
+                cards_widget = QWidget()
+                cards_layout = QVBoxLayout(cards_widget)
+                cards_layout.setSpacing(4)
+                cards_layout.setContentsMargins(0, 0, 4, 0)
+                
+                self.grade_cards = {}
+                for col in sorted(numeric_cols):
+                    card = GradeCard(col, self.df[col])
+                    card.toggled.connect(self._on_grade_toggled)
+                    cards_layout.addWidget(card)
+                    self.grade_cards[col] = card
+                    self.selected_grade_columns.add(col)
+                
+                cards_layout.addStretch()
+                grade_scroll.setWidget(cards_widget)
+                grade_layout.addWidget(grade_scroll)
+                
+                btn_layout = QHBoxLayout()
+                btn_layout.setSpacing(6)
+                
+                sel_all = QPushButton("Select All")
+                sel_all.setCursor(Qt.CursorShape.PointingHandCursor)
+                sel_all.setStyleSheet("""
+                    QPushButton {
+                        background-color: {ModernColors.CARD_HOVER}; color: {ModernColors.TEXT_SECONDARY};
+                        border: 1px solid {ModernColors.BORDER}; border-radius: 4px;
+                        padding: 4px 10px; font-weight: 600; font-size: 8pt;
+                    }
+                    QPushButton:hover { background-color: {ModernColors.BORDER}; }
+                """)
+                sel_all.clicked.connect(self._select_all_grades)
+                
+                desel_all = QPushButton("Deselect All")
+                desel_all.setCursor(Qt.CursorShape.PointingHandCursor)
+                desel_all.setStyleSheet("""
+                    QPushButton {
+                        background-color: {ModernColors.CARD_HOVER}; color: {ModernColors.TEXT_SECONDARY};
+                        border: 1px solid {ModernColors.BORDER}; border-radius: 4px;
+                        padding: 4px 10px; font-weight: 600; font-size: 8pt;
+                    }
+                    QPushButton:hover { background-color: {ModernColors.BORDER}; }
+                f""")
+                desel_all.clicked.connect(self._deselect_all_grades)
+                
+                btn_layout.addWidget(sel_all)
+                btn_layout.addWidget(desel_all)
+                btn_layout.addStretch()
+                grade_layout.addLayout(btn_layout)
+                
+                scroll_layout.addWidget(grade_group)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, 1)  # Give scroll area stretch priority
+        
+        # Footer (Fixed)
+        footer = QFrame()
+        footer.setStyleSheet(f"background-color: {ModernColors.PANEL_BG}; border-top: 1px solid {ModernColors.BORDER};")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 8, 0, 0)
+        footer_layout.setSpacing(8)
+        
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY}; font-size: 8pt;")
+        footer_layout.addWidget(self.status_label, 1)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setMinimumWidth(80)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: {ModernColors.BORDER}; color: {ModernColors.TEXT_PRIMARY};
+                border: none; border-radius: 5px;
+                padding: 8px 16px; font-size: 9pt; font-weight: 600;
+            }
+            QPushButton:hover { background-color: {ModernColors.TEXT_HINT}; }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        footer_layout.addWidget(cancel_btn)
+        
+        accept_btn = QPushButton("✓ Apply Mapping")
+        accept_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        accept_btn.setDefault(True)
+        accept_btn.setMinimumWidth(120)
+        accept_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.type_color}; color: white;
+                border: none; border-radius: 5px;
+                padding: 8px 16px; font-size: 9pt; font-weight: 700;
+            }}
+            QPushButton:hover {{ opacity: 0.9; }}
+        """)
+        accept_btn.clicked.connect(self._validate_and_accept)
+        footer_layout.addWidget(accept_btn)
+        
+        layout.addWidget(footer)
+    
+    def _detect_survey_mode(self) -> str:
+        cols_upper = [c.upper() for c in self.df.columns]
+        from_found = any(p in c for c in cols_upper for p in ["DEPTH_FROM", "FROM_DEPTH", "FROM"])
+        to_found = any(p in c for c in cols_upper for p in ["DEPTH_TO", "TO_DEPTH", "TO"])
+        return "interval" if from_found and to_found else "single"
+    
+    def _detect_structural_mode(self) -> str:
+        """Detect if structural data uses dip/dip-direction or alpha/beta format."""
+        cols_upper = [c.upper() for c in self.df.columns]
+        
+        # Check for alpha/beta (oriented core/televiewer format)
+        has_alpha = any(p in c for c in cols_upper for p in ["ALPHA", "ALPHA_ANGLE"])
+        has_beta = any(p in c for c in cols_upper for p in ["BETA", "BETA_ANGLE"])
+        
+        # Check for dip/dip-direction (standard structural format)
+        has_dip_dir = any(p in c for c in cols_upper 
+                        for p in ["DIP_DIRECTION", "DIPDIR", "DIP_DIR", "DD", "DIP_AZIMUTH", "DIPAZIMUTH"])
+        
+        if has_alpha and has_beta:
+            return "alpha_beta"
+        else:
+            return "dip_dipdir"
+    
+    def _auto_detect_column(self, key: str) -> Optional[str]:
+        """
+        Auto-detect column by fuzzy matching with normalization.
+        
+        Handles variations like:
+            - 'azimuth_deg' -> matches 'AZI'
+            - 'from_m' -> matches 'FROM'
+            - 'total_depth_m' -> matches 'DEPTH'
+        """
+        import re
+        
+        patterns = {
+            'HOLEID': ['HOLEID', 'HOLE_ID', 'BHID', 'HOLE', 'DRILLHOLE'],
+            'X': ['X', 'XCOLLAR', 'X_COLLAR', 'EASTING', 'EAST'],
+            'Y': ['Y', 'YCOLLAR', 'Y_COLLAR', 'NORTHING', 'NORTH'],
+            'Z': ['Z', 'ZCOLLAR', 'Z_COLLAR', 'ELEVATION', 'ELEV', 'RL'],
+            'DEPTH': ['DEPTH', 'TOTAL_DEPTH', 'TOTALDEPTH', 'LENGTH', 'MAX_DEPTH', 'MAXDEPTH', 'EOH'],
+            'AZI': ['AZI', 'AZ', 'AZIMUTH', 'BEARING', 'BRG'],
+            'DIP': ['DIP', 'INCLINATION', 'INC', 'INCL'],
+            'FROM': ['FROM', 'FROM_DEPTH', 'FROMDEPTH', 'DEPTH_FROM', 'DEPTHFROM', 'START'],
+            'TO': ['TO', 'TO_DEPTH', 'TODEPTH', 'DEPTH_TO', 'DEPTHTO', 'END'],
+            'DOMAIN': ['DOMAIN', 'LITHO', 'LITHOLOGY', 'ZONE', 'UNIT'],
+            'LITH_CODE': ['LITH_CODE', 'LITHCODE', 'LITHOLOGY', 'LITH', 'ROCK_TYPE', 'ROCKTYPE', 'ROCK'],
+            'DEPTH_FROM': ['DEPTH_FROM', 'DEPTHFROM', 'FROM_DEPTH', 'FROMDEPTH', 'FROM', 'START'],
+            'DEPTH_TO': ['DEPTH_TO', 'DEPTHTO', 'TO_DEPTH', 'TODEPTH', 'TO', 'END'],
+            # Structural measurement columns
+            'DIP_DIRECTION': ['DIP_DIRECTION', 'DIPDIR', 'DIP_DIR', 'DD', 'DIP_AZIMUTH', 'DIPAZIMUTH', 'DIPPING_DIRECTION'],
+            'ALPHA': ['ALPHA', 'ALPHA_ANGLE', 'APPARENT_DIP'],
+            'BETA': ['BETA', 'BETA_ANGLE', 'ROTATION'],
+            'FEATURE_TYPE': ['FEATURE_TYPE', 'TYPE', 'STRUCTURE', 'STRUCT_TYPE', 'STRUCTURE_TYPE', 'FEATURE']
+        }
+        
+        if key not in patterns:
+            return None
+        
+        # Normalize each CSV column name
+        for csv_col in self.df.columns:
+            col_normalized = self._normalize_for_matching(csv_col)
+            
+            # Check if normalized column matches any pattern
+            for pat in patterns[key]:
+                pat_normalized = pat.upper()
+                
+                # Exact match on normalized
+                if col_normalized == pat_normalized:
+                    return csv_col
+                
+                # Pattern is substring of normalized column
+                if pat_normalized in col_normalized:
+                    return csv_col
+                
+                # For single letter coordinates (X, Y, Z), be more strict
+                if key in ['X', 'Y', 'Z'] and len(pat) == 1:
+                    if col_normalized == pat or col_normalized.startswith(pat + '_') or col_normalized.endswith('_' + pat):
+                        return csv_col
+        
+        return None
+    
+    def _normalize_for_matching(self, col: str) -> str:
+        """
+        Normalize column name by removing units and standardizing format.
+        
+        Examples:
+            'azimuth_deg' -> 'AZIMUTH'
+            'from_m' -> 'FROM'
+            'total depth m' -> 'TOTALDEPTH'
+        """
+        import re
+        col = col.upper().strip()
+        
+        # Remove common unit suffixes (with separator or space)
+        unit_patterns = [
+            r'[_\s\-]+(M|METERS?|METRES?|FT|FEET|DEG|DEGREES?|PCT|PERCENT|PPM|PPB)$',
+        ]
+        for pattern in unit_patterns:
+            col = re.sub(pattern, '', col, flags=re.IGNORECASE)
+        
+        # Remove all separators and spaces
+        col = re.sub(r'[_\s\-]+', '', col)
+        
+        return col
+    
+    def _on_grade_toggled(self, col: str, selected: bool):
+        if selected:
+            self.selected_grade_columns.add(col)
+        else:
+            self.selected_grade_columns.discard(col)
+        self._update_count()
+    
+    def _update_count(self):
+        if hasattr(self, 'count_label') and hasattr(self, 'grade_cards'):
+            total = len(self.grade_cards)
+            sel = len(self.selected_grade_columns)
+            self.count_label.setText(f"{sel}/{total}")
+            if sel == 0:
+                self.count_label.setStyleSheet(f"""
+                    color: {ModernColors.ERROR_LIGHT}; background: rgba(239,68,68,0.2);
+                    padding: 3px 8px; border-radius: 8px; border: 1px solid rgba(239,68,68,0.4);
+                    font-size: 8pt; font-weight: 700;
+                """)
+            elif sel == total:
+                self.count_label.setStyleSheet(f"""
+                    color: {ModernColors.SUCCESS_LIGHT}; background: rgba(34,197,94,0.2);
+                    padding: 3px 8px; border-radius: 8px; border: 1px solid rgba(34,197,94,0.4);
+                    font-size: 8pt; font-weight: 700;
+                """)
+            else:
+                self.count_label.setStyleSheet("""
+                    color: #93c5fd; background: rgba(59,130,246,0.2);
+                    padding: 3px 8px; border-radius: 8px; border: 1px solid rgba(59,130,246,0.4);
+                    font-size: 8pt; font-weight: 700;
+                """)
+    
+    def _select_all_grades(self):
+        if hasattr(self, 'grade_cards'):
+            for col, card in self.grade_cards.items():
+                card.setSelected(True)
+                self.selected_grade_columns.add(col)
+            self._update_count()
+    
+    def _deselect_all_grades(self):
+        if hasattr(self, 'grade_cards'):
+            for card in self.grade_cards.values():
+                card.setSelected(False)
+            self.selected_grade_columns.clear()
+            self._update_count()
+    
+    def _auto_detect_all(self):
+        count = 0
+        for key, row in self.mapping_rows.items():
+            match = self._auto_detect_column(key)
+            if match:
+                row.set_column(match)
+                count += 1
+        self.status_label.setText(f"✓ Auto-detected {count}/{len(self.mapping_rows)} columns")
+        self.status_label.setStyleSheet(f"color: {ModernColors.SUCCESS}; font-size: 9pt; font-weight: 600;")
+    
+    def _validate_and_accept(self):
+        self.column_mapping = {}
+        for key, row in self.mapping_rows.items():
+            sel = row.get_selected()
+            if sel:
+                self.column_mapping[key] = sel
+        
+        if self.data_type == "assay" and hasattr(self, 'grade_cards'):
+            self.selected_grade_columns.clear()
+            for col, card in self.grade_cards.items():
+                if card.isSelected():
+                    self.selected_grade_columns.add(col)
+        
+        if self.data_type == "collar":
+            req = ['HOLEID', 'X', 'Y', 'Z', 'DEPTH']
+        elif self.data_type == "survey":
+            req = ['HOLEID', 'DEPTH_FROM', 'DEPTH_TO', 'AZI', 'DIP'] if self.survey_mode == "interval" else ['HOLEID', 'DEPTH', 'AZI', 'DIP']
+        elif self.data_type == "assay":
+            req = ['HOLEID', 'FROM', 'TO']
+        elif self.data_type == "structures":
+            if self.struct_mode == "alpha_beta":
+                req = ['HOLEID', 'FROM', 'TO', 'ALPHA', 'BETA']
+            else:
+                req = ['HOLEID', 'FROM', 'TO', 'DIP', 'DIP_DIRECTION']
+        else:
+            req = ['HOLEID', 'FROM', 'TO', 'LITH_CODE']
+        
+        missing = [f for f in req if f not in self.column_mapping]
+        if missing:
+            self.status_label.setText(f"✗ Missing required: {', '.join(missing)}")
+            self.status_label.setStyleSheet(f"color: {ModernColors.ERROR}; font-size: 9pt; font-weight: 700;")
+            return
+        
+        mapped = list(self.column_mapping.values())
+        dups = [c for c in mapped if mapped.count(c) > 1]
+        if dups:
+            self.status_label.setText(f"✗ Duplicate mappings: {', '.join(set(dups))}")
+            self.status_label.setStyleSheet(f"color: {ModernColors.ERROR}; font-size: 9pt; font-weight: 700;")
+            return
+        
+        self.accept()
+    
+    def get_mapped_dataframe(self) -> pd.DataFrame:
+        if not self.column_mapping:
+            return self.df
+        
+        rename_map = {csv_col: std for std, csv_col in self.column_mapping.items() 
+                     if std not in ['GRADE1', 'GRADE2', 'GRADE3']}
+        
+        req_cols = list(rename_map.keys())
+        mapped_df = self.df[req_cols].copy()
+        mapped_df.rename(columns=rename_map, inplace=True)
+        
+        if self.data_type == "assay":
+            for col in self.selected_grade_columns:
+                if col not in req_cols:
+                    mapped_df[col] = self.df[col]
+        
+        return mapped_df
+    
+    def get_mapping(self) -> Dict[str, str]:
+        return self.column_mapping

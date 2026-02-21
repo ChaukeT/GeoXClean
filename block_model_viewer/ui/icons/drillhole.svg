@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <g fill="none" stroke="#1f2937" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Drill rod -->
+    <path d="M14 14 L46 46" stroke="#374151" stroke-width="4"/>
+    <!-- Collar circle -->
+    <circle cx="14" cy="14" r="6" fill="#e5e7eb" stroke="#374151"/>
+    <!-- Bit -->
+    <path d="M46 46 l6 6 l-4 4 l-6 -6 z" fill="#9ca3af"/>
+    <!-- Depth ticks on rod -->
+    <path d="M22 22 l4 -4"/>
+    <path d="M30 30 l4 -4"/>
+    <path d="M38 38 l4 -4"/>
+  </g>
+</svg>

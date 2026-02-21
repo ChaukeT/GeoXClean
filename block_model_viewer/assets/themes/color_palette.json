@@ -1,0 +1,9 @@
+{
+  "geology": ["#d8b365", "#f5f5dc", "#8c510a", "#bf812d", "#dfc27d"],
+  "resource": ["#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a"],
+  "uncertainty": ["#54278f", "#756bb1", "#bcbddc", "#9e9ac8", "#807dba"],
+  "esg": ["#238b45", "#78c679", "#c2e699", "#41ab5d", "#006d2c"],
+  "pit": ["#b2182b", "#ef8a62", "#fddbc7", "#d6604d", "#67001f"],
+  "underground": ["#2c7fb8", "#7fcdbb", "#edf8b1", "#41b6c4", "#0c2c84"]
+}
+

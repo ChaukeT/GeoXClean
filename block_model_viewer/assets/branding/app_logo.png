@@ -1,0 +1,5 @@
+# Placeholder for PNG logo file
+# This file should be replaced with an actual PNG file (1024x1024 recommended)
+# Convert from app_logo.svg using a tool like Inkscape or ImageMagick:
+# inkscape app_logo.svg --export-filename=app_logo.png --export-width=1024 --export-height=1024
+
