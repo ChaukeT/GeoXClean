@@ -27,7 +27,39 @@ import hashlib
 import numpy as np
 
 # Algorithm versioning for determinism/reproducibility (GeoX invariant: determinism_rules.md)
-DATA_IO_VERSION = "1.0.0"
+DATA_IO_VERSION = "1.1.0"
+
+
+def _normalize_dip_convention(dip_values: np.ndarray, context: str = "") -> tuple:
+    """Auto-detect and normalize DIP sign convention.
+
+    GeoX convention: negative = downward (-90 = vertical down).
+    Leapfrog/some CSV convention: positive = downward (+90 = vertical down).
+
+    Detection: if >70% of non-zero DIP values are positive AND the median
+    absolute DIP > 30, assume positive-down convention and negate.
+
+    Returns:
+        (corrected_values, was_converted: bool)
+    """
+    _log = logging.getLogger(__name__)
+    finite = dip_values[np.isfinite(dip_values)]
+    nonzero = finite[finite != 0.0]
+    if len(nonzero) < 2:
+        return dip_values, False
+
+    pct_positive = float(np.sum(nonzero > 0)) / len(nonzero)
+    median_abs = float(np.median(np.abs(nonzero)))
+
+    if pct_positive > 0.7 and median_abs > 30.0:
+        _log.info(
+            "DIP convention auto-detected as positive-down (%.0f%% positive, "
+            "median |dip|=%.1f). Negating to GeoX negative-down convention. [%s]",
+            pct_positive * 100, median_abs, context,
+        )
+        return -dip_values, True
+
+    return dip_values, False
 
 
 def _compute_file_checksum(file_path: Path, algorithm: str = "sha256") -> str:
@@ -257,16 +289,56 @@ class DataIO:
         result.metadata['alias_mapping'] = applied_aliases
         if applied_mappings or applied_aliases:
             logger.info(f"Column mappings applied: {applied_mappings}, aliases: {applied_aliases}")
-        
+
+        # Drop duplicate columns that arise when CSV has both e.g. HOLEID and hole_id
+        # (both map to 'hole_id' after normalization). Prefer the column with fewer NaN
+        # values to avoid discarding data from the more complete source.
+        dup_cols = df.columns[df.columns.duplicated(keep=False)]
+        if len(dup_cols) > 0:
+            seen = {}
+            cols_to_drop = []
+            for idx, col_name in enumerate(df.columns):
+                if col_name in seen:
+                    prev_idx = seen[col_name]
+                    prev_nan = int(df.iloc[:, prev_idx].isna().sum())
+                    curr_nan = int(df.iloc[:, idx].isna().sum())
+                    if curr_nan < prev_nan:
+                        # Current column is more complete — drop the previous one
+                        cols_to_drop.append(prev_idx)
+                        seen[col_name] = idx
+                        logger.info(f"Duplicate column '{col_name}': keeping col {idx} ({curr_nan} NaN) over col {prev_idx} ({prev_nan} NaN)")
+                    else:
+                        cols_to_drop.append(idx)
+                        logger.info(f"Duplicate column '{col_name}': keeping col {prev_idx} ({prev_nan} NaN) over col {idx} ({curr_nan} NaN)")
+                else:
+                    seen[col_name] = idx
+            if cols_to_drop:
+                keep_mask = [i not in cols_to_drop for i in range(len(df.columns))]
+                df = df.loc[:, keep_mask]
+
         # 3. Clean Data
+        # For surveys, the 'DEPTH' column means measurement depth along hole
+        # but COLUMN_ALIASES maps 'depth' to 'length'. Fix this for surveys.
+        if table_type == "surveys" and "length" in df.columns and "depth" not in df.columns:
+            df.rename(columns={"length": "depth"}, inplace=True)
+            logger.info("Survey: renamed 'length' column to 'depth' (measurement depth)")
+
         # Ensure required columns exist
         required = []
         critical_columns = []  # Columns that cannot be missing (fail import if too many missing)
-        
-        if table_type == "collars": 
+
+        if table_type == "collars":
             required = ["hole_id", "x", "y", "z"]
             critical_columns = ["hole_id"]  # HOLEID is critical - cannot have phantom holes
-        elif table_type in ["surveys", "assays", "lithology"]: 
+        elif table_type == "surveys":
+            # Surveys may use single 'depth' column (point measurements) or
+            # 'depth_from'/'depth_to' (interval schema). Accept either.
+            if "depth" in df.columns and "depth_from" not in df.columns:
+                required = ["hole_id", "depth"]
+            else:
+                required = ["hole_id", "depth_from", "depth_to"]
+            critical_columns = ["hole_id"]
+        elif table_type in ["assays", "lithology"]:
             required = ["hole_id", "depth_from", "depth_to"]
             critical_columns = ["hole_id"]  # HOLEID is critical - must reference valid holes
         
@@ -387,6 +459,26 @@ class DataIO:
                         defaults_applied['dip'] = {'default_value': -90.0, 'rows_affected': int(na_count)}
                         logger.info(f"Applied default dip=-90.0 to {na_count} rows (holes: {affected_holes}{'...' if na_count > 5 else ''})")
                     df_clean['dip'] = df_clean['dip'].fillna(-90.0)
+                    # DH-04 FIX: Only auto-detect dip convention on collars if
+                    # there are enough non-default samples.  Collar tables often
+                    # have only a handful of rows; the 70% threshold can misfire
+                    # on small datasets (e.g. 3 inclined holes all at +45°).
+                    # Require at least 10 non-zero dip values for reliable detection.
+                    _collar_dips = df_clean['dip'].values
+                    _nondefault = _collar_dips[(_collar_dips != 0.0) & (_collar_dips != -90.0) & np.isfinite(_collar_dips)]
+                    if len(_nondefault) >= 10:
+                        corrected, was_converted = _normalize_dip_convention(
+                            df_clean['dip'].values, context="collars")
+                        if was_converted:
+                            df_clean['dip'] = corrected
+                            defaults_applied['dip_convention'] = {
+                                'action': 'negated', 'reason': 'positive-down detected'
+                            }
+                    else:
+                        logger.debug(
+                            "Skipping collar dip convention auto-detect: only %d non-default "
+                            "dip values (need >=10 for reliable detection)", len(_nondefault)
+                        )
                 if 'length' in df_clean.columns:
                     na_count = df_clean['length'].isna().sum()
                     if na_count > 0:
@@ -406,6 +498,18 @@ class DataIO:
                 cols = ['hole_id', 'depth_from', 'depth_to', 'azimuth', 'dip']
                 cols = [c for c in cols if c in df.columns]
                 df_clean = df[cols].copy()
+                # Auto-detect positive-down convention and negate
+                if 'dip' in df_clean.columns:
+                    corrected, was_converted = _normalize_dip_convention(
+                        df_clean['dip'].values.astype(float), context="surveys")
+                    if was_converted:
+                        df_clean['dip'] = corrected
+                        defaults_applied['dip_convention'] = {
+                            'action': 'negated', 'reason': 'positive-down detected'
+                        }
+                    # DH-01 FIX: Mark that dip normalization was already applied
+                    # so downstream desurvey does not double-negate.
+                    db.metadata['dip_normalized_by_data_io'] = True
                 if db.surveys.empty:
                     db.surveys = df_clean
                 else:
@@ -431,6 +535,24 @@ class DataIO:
                 base_cols = ['hole_id', 'depth_from', 'depth_to']
                 # All other columns are element grades
                 df_clean = df.copy()
+
+                # ── DIA-IO01 FIX: Detect overlapping intervals at import ──
+                if 'hole_id' in df_clean.columns and 'depth_from' in df_clean.columns and 'depth_to' in df_clean.columns:
+                    overlap_count = 0
+                    for _hid, _grp in df_clean.groupby('hole_id', sort=False):
+                        _sorted = _grp.sort_values('depth_from')
+                        _prev_to = None
+                        for _, _row in _sorted.iterrows():
+                            if _prev_to is not None and _row['depth_from'] < _prev_to - 1e-6:
+                                overlap_count += 1
+                            _prev_to = _row['depth_to']
+                    if overlap_count > 0:
+                        msg = (f"DIA-IO01: Detected {overlap_count} overlapping assay "
+                               f"interval(s). These may cause grade inflation during "
+                               f"compositing. Review input data.")
+                        result.warnings.append(msg)
+                        logger.warning(msg)
+
                 if db.assays.empty:
                     db.assays = df_clean
                 else:
@@ -529,9 +651,21 @@ class DataIO:
     def _import_legacy(self, path, db, table_type, skip, result, delimiter):
         """
         Fallback for systems without Pandas - uses optimized batch parsing.
-        
+
+        .. deprecated:: ISS-012
+            This legacy import path is retained only for environments where
+            Pandas is unavailable.  It is not actively tested and should be
+            removed once Pandas is a hard dependency.
+
         Performance: Collects all rows first, then does single DataFrame creation (O(n) not O(n²))
         """
+        import warnings
+        warnings.warn(
+            "ISS-012: _import_legacy() is deprecated and will be removed in a future release. "
+            "Install pandas for the supported import path.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         logger.info(f"Starting legacy CSV import: {path} ({table_type})")
         
         # GeoX invariant: Compute file checksum
@@ -769,10 +903,28 @@ class DataIO:
                     except ValueError:
                         pass  # Skip non-numeric values (expected for text columns)
 
+            depth_from = safe_float(row.get("depth_from"), "depth_from")
+            depth_to = safe_float(row.get("depth_to"), "depth_to")
+
+            # ── ISS-004 FIX: Validate depth_from < depth_to at import ──
+            if depth_from > depth_to:
+                logger.warning(
+                    "ISS-004: Reversed depth interval in hole '%s': from=%.2f > to=%.2f. "
+                    "Swapping to correct order.",
+                    hole_id, depth_from, depth_to,
+                )
+                depth_from, depth_to = depth_to, depth_from
+            elif abs(depth_from - depth_to) < 1e-9:
+                logger.debug(
+                    "Zero-length interval in hole '%s' at depth %.2f, skipping.",
+                    hole_id, depth_from,
+                )
+                return None
+
             return AssayInterval(
                 hole_id=hole_id,
-                depth_from=safe_float(row.get("depth_from"), "depth_from"),
-                depth_to=safe_float(row.get("depth_to"), "depth_to"),
+                depth_from=depth_from,
+                depth_to=depth_to,
                 values=values,
             )
         except Exception as e:
@@ -797,10 +949,21 @@ class DataIO:
                     logger.warning(f"Invalid {field_name} value '{val}' for hole {hole_id}, using {default}")
                     return default
 
+            depth_from = safe_float(row.get("depth_from"), "depth_from")
+            depth_to = safe_float(row.get("depth_to"), "depth_to")
+
+            # ── ISS-004 FIX: Validate depth_from < depth_to at import ──
+            if depth_from > depth_to:
+                logger.warning(
+                    "ISS-004: Reversed depth in lithology hole '%s': from=%.2f > to=%.2f. Swapping.",
+                    hole_id, depth_from, depth_to,
+                )
+                depth_from, depth_to = depth_to, depth_from
+
             return LithologyInterval(
                 hole_id=hole_id,
-                depth_from=safe_float(row.get("depth_from"), "depth_from"),
-                depth_to=safe_float(row.get("depth_to"), "depth_to"),
+                depth_from=depth_from,
+                depth_to=depth_to,
                 lith_code=row.get("lith_code", "").strip(),
             )
         except Exception as e:
@@ -1072,14 +1235,26 @@ def load_from_csv(
     """
     db = DrillholeDatabase()
     io = get_data_io()
-    
+
+    # Coerce string paths to Path objects for consistent API
+    if collar_file is not None and not isinstance(collar_file, Path):
+        collar_file = Path(collar_file)
+    if survey_file is not None and not isinstance(survey_file, Path):
+        survey_file = Path(survey_file)
+    if assay_file is not None and not isinstance(assay_file, Path):
+        assay_file = Path(assay_file)
+    if lithology_file is not None and not isinstance(lithology_file, Path):
+        lithology_file = Path(lithology_file)
+    if structures_file is not None and not isinstance(structures_file, Path):
+        structures_file = Path(structures_file)
+
     # GeoX invariant: Track all source files and import metadata
     import_provenance = {
         'import_timestamp': datetime.now().isoformat(),
         'algorithm_version': DATA_IO_VERSION,
         'source_files': {}
     }
-    
+
     # Load each file type using the fast DataIO engine
     if collar_file and collar_file.exists():
         result = io.import_from_csv(collar_file, database=db, table_type="collars", **kwargs)

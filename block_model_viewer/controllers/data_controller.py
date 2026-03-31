@@ -173,13 +173,36 @@ class DataController:
                     original_cols = list(df.columns)
                     df.columns = [c.upper().strip() for c in df.columns]
                     rename_map = {
-                        'HOLE_ID': 'HOLEID', 'BHID': 'HOLEID', 
+                        'HOLE_ID': 'HOLEID', 'BHID': 'HOLEID',
                         'DEPTH_FROM': 'FROM', 'DEPTH_TO': 'TO',
                         'X': 'X', 'EAST': 'X', 'EASTING': 'X',
                         'Y': 'Y', 'NORTH': 'Y', 'NORTHING': 'Y',
                         'Z': 'Z', 'ELEV': 'Z', 'RL': 'Z'
                     }
                     df.rename(columns=rename_map, inplace=True)
+                    # Drop duplicate columns that arise when CSV has both
+                    # e.g. HOLEID and hole_id (both become HOLEID after uppercase).
+                    # Prefer the column with fewer NaN values.
+                    dup_cols = df.columns[df.columns.duplicated(keep=False)]
+                    if len(dup_cols) > 0:
+                        seen = {}
+                        cols_to_drop = []
+                        for idx, col_name in enumerate(df.columns):
+                            if col_name in seen:
+                                prev_idx = seen[col_name]
+                                prev_nan = int(df.iloc[:, prev_idx].isna().sum())
+                                curr_nan = int(df.iloc[:, idx].isna().sum())
+                                if curr_nan < prev_nan:
+                                    cols_to_drop.append(prev_idx)
+                                    seen[col_name] = idx
+                                else:
+                                    cols_to_drop.append(idx)
+                            else:
+                                seen[col_name] = idx
+                        if cols_to_drop:
+                            keep_mask = [i not in cols_to_drop for i in range(len(df.columns))]
+                            df = df.loc[:, keep_mask]
+                            logger.info(f"  {df_name}: dropped {len(cols_to_drop)} duplicate columns (kept more complete)")
                     logger.debug(f"  {df_name} cleaned: {list(df.columns)}")
                     return df
                 except Exception as e:
@@ -190,6 +213,27 @@ class DataController:
                 collar_df = clean_cols(collar_df, "Collars")
             if survey_df is not None:
                 survey_df = clean_cols(survey_df, "Surveys")
+                # Normalize DIP convention: Leapfrog uses positive-down (+90 = vertical down)
+                # but GeoX desurvey expects negative-down (-90 = vertical down)
+                dip_col_name = None
+                for candidate in ['DIP', 'INCLINATION', 'INC']:
+                    if candidate in survey_df.columns:
+                        dip_col_name = candidate
+                        break
+                if dip_col_name is not None:
+                    dip_vals = pd.to_numeric(survey_df[dip_col_name], errors='coerce').values
+                    finite = dip_vals[np.isfinite(dip_vals)]
+                    nonzero = finite[finite != 0.0]
+                    if len(nonzero) >= 2:
+                        pct_positive = float(np.sum(nonzero > 0)) / len(nonzero)
+                        median_abs = float(np.median(np.abs(nonzero)))
+                        if pct_positive > 0.7 and median_abs > 30.0:
+                            logger.info(
+                                "DIP convention auto-detected as positive-down "
+                                "(%.0f%% positive, median |dip|=%.1f). "
+                                "Negating to GeoX negative-down convention.",
+                                pct_positive * 100, median_abs)
+                            survey_df[dip_col_name] = -survey_df[dip_col_name].astype(float)
             if lithology_df is not None:
                 lithology_df = clean_cols(lithology_df, "Lithology")
         
@@ -336,9 +380,107 @@ class DataController:
             else:
                 logger.info("No assay data to process")
             
+            # Desurvey structural measurements to add 3D XYZ coordinates
+            if structures_df is not None and not structures_df.empty:
+                try:
+                    if progress_callback:
+                        progress_callback(70, "Desurveying structural measurements...")
+
+                    structures_df = clean_cols(structures_df.copy(), "Structures")
+
+                    # Rename depth columns if needed
+                    for old, new in [('DEPTH_FROM', 'FROM'), ('DEPTH_TO', 'TO'), ('HOLE_ID', 'HOLEID')]:
+                        if old in structures_df.columns and new not in structures_df.columns:
+                            structures_df.rename(columns={old: new}, inplace=True)
+
+                    structures_df['X'] = 0.0
+                    structures_df['Y'] = 0.0
+                    structures_df['Z'] = 0.0
+                    from_col = 'FROM' if 'FROM' in structures_df.columns else 'DEPTH_FROM'
+                    to_col = 'TO' if 'TO' in structures_df.columns else 'DEPTH_TO'
+                    structures_df['_MID'] = (
+                        structures_df[from_col].astype(float)
+                        + structures_df[to_col].astype(float)
+                    ) / 2.0
+
+                    collar_idx_s = (
+                        collar_df.set_index('HOLEID')
+                        if collar_df is not None and not collar_df.empty
+                        else pd.DataFrame()
+                    )
+                    if not collar_idx_s.empty:
+                        collar_idx_s.index = collar_idx_s.index.astype(str)
+
+                    struct_results = []
+                    id_col = 'HOLEID' if 'HOLEID' in structures_df.columns else 'HOLE_ID'
+                    for hid, grp in structures_df.groupby(id_col):
+                        grp = grp.copy()
+                        hid_str = str(hid)
+                        if collar_idx_s.empty or hid_str not in collar_idx_s.index:
+                            struct_results.append(grp)
+                            continue
+                        collar = collar_idx_s.loc[hid_str]
+                        x0, y0, z0 = float(collar['X']), float(collar['Y']), float(collar['Z'])
+                        hole_surveys = (
+                            survey_df[survey_df['HOLEID'].astype(str) == hid_str]
+                            if survey_df is not None and not survey_df.empty else pd.DataFrame()
+                        )
+                        if not hole_surveys.empty:
+                            depths, xs, ys, zs = minimum_curvature_desurvey(x0, y0, z0, hole_surveys)
+                            if depths is not None:
+                                mids = grp['_MID'].values
+                                ix, iy, iz = interpolate_at_depths(depths, xs, ys, zs, mids)
+                                grp['X'], grp['Y'], grp['Z'] = ix, iy, iz
+                            else:
+                                grp['X'] = x0; grp['Y'] = y0
+                                grp['Z'] = z0 - grp['_MID']
+                        else:
+                            grp['X'] = x0; grp['Y'] = y0
+                            grp['Z'] = z0 - grp['_MID']
+                        struct_results.append(grp)
+
+                    if struct_results:
+                        structures_df = pd.concat(struct_results, ignore_index=True)
+                        structures_df.drop(columns=['_MID'], inplace=True, errors='ignore')
+                        logger.info(
+                            "Desurveyed %d structural measurements with XYZ coordinates",
+                            len(structures_df)
+                        )
+                except Exception as exc:
+                    logger.warning("Structural measurement desurveying failed: %s", exc, exc_info=True)
+
             if progress_callback:
-                progress_callback(80, "Packaging datasets...")
-            
+                progress_callback(75, "Running auto-fix (orphans, zero-length, intervals)...")
+
+            # Auto-fix: remove orphans, zero-length intervals, swap negative from/to, etc.
+            try:
+                from ..drillholes.drillhole_autofix import run_drillhole_autofix
+                af = run_drillhole_autofix(
+                    collars=collar_df if collar_df is not None else pd.DataFrame(),
+                    surveys=survey_df if survey_df is not None else pd.DataFrame(),
+                    assays=assays_with_coords if assays_with_coords is not None else pd.DataFrame(),
+                    lithology=lithology_df if lithology_df is not None else pd.DataFrame(),
+                )
+                n_fixes = len(af.fixes)
+                if n_fixes > 0:
+                    logger.info(f"Auto-fix applied {n_fixes} fixes during import")
+                    for fix in af.fixes[:10]:
+                        logger.info(f"  [{fix.rule_code}] {fix.hole_id}: {fix.reason}")
+                    if n_fixes > 10:
+                        logger.info(f"  ... and {n_fixes - 10} more fixes")
+                collar_df = af.collars
+                survey_df = af.surveys
+                assays_with_coords = af.assays
+                lithology_df = af.lithology
+                v_before = len(af.violations_before)
+                v_after = len(af.violations_after)
+                logger.info(f"Validation: {v_before} issues before -> {v_after} after auto-fix")
+            except Exception as e:
+                logger.warning(f"Auto-fix during import failed (non-fatal): {e}")
+
+            if progress_callback:
+                progress_callback(85, "Packaging datasets...")
+
             logger.debug("STEP 5: Packaging data")
             # Package data
             drillhole_data = {
@@ -1737,11 +1879,11 @@ class DataController:
         """
         import pandas as pd
         from ..drillholes.compositing_engine import (
-            CompositingMethod, CompositeConfig, WeightingMode,
+            BreakMode, CompositingMethod, CompositeConfig, WeightingMode,
             PartialStrategy, Composite
         )
         from ..drillholes.compositing_utils import get_intervals_from_registry
-        from ..drillholes.compositing_ui_engines import CompositingMethodEngine
+        from ..drillholes.compositing_engine import CompositingMethodEngine
         
         if progress_callback:
             progress_callback(5, "Loading drillhole data...")
@@ -1794,7 +1936,10 @@ class DataController:
         
         if progress_callback:
             progress_callback(35, f"Compositing with length {composite_length:.1f}m...")
-        
+
+        has_lithology = isinstance(drillhole_data.get("lithology"), pd.DataFrame) and not drillhole_data.get("lithology").empty
+        has_domain = any(str(col).strip().lower() in {"domain", "geological_domain"} for col in assays_df.columns)
+
         # Create config
         weighting_mode = WeightingMode.LENGTH
         weighting_str = params.get("weighting", "length")
@@ -1807,13 +1952,16 @@ class DataController:
             composite_length=composite_length,
             weighting_mode=weighting_mode,
             partial_strategy=PartialStrategy.KEEP,
+            break_mode=BreakMode.HARD if (has_lithology or has_domain) else BreakMode.NONE,
+            hard_break_lithology=has_lithology,
+            hard_break_domain=has_domain,
             treat_null_as_zero=True,
         )
         
         # Run compositing
         engine = CompositingMethodEngine()
         try:
-            composites = engine.run(intervals, config)
+            composites = engine.composite(intervals, config)
         except Exception as e:
             logger.error(f"Compositing failed: {e}", exc_info=True)
             return {
@@ -1892,10 +2040,10 @@ class DataController:
         
         try:
             validation_result = run_drillhole_validation(
-                collars_df=drillhole_data.get('collars'),
-                assays_df=drillhole_data.get('assays'),
-                surveys_df=drillhole_data.get('surveys'),
-                lithology_df=drillhole_data.get('lithology'),
+                collars=drillhole_data.get('collars'),
+                surveys=drillhole_data.get('surveys'),
+                assays=drillhole_data.get('assays'),
+                lithology=drillhole_data.get('lithology'),
             )
             
             if progress_callback:
@@ -2014,7 +2162,12 @@ class DataController:
             # SEDIMENTARY MODE CHECK
             # =====================================================================
             mode = domain_model.get("mode", "default") if isinstance(domain_model, dict) else "default"
-            
+
+            # Extract params needed by fallback path (must be before the try block)
+            auto_resolution = params.get("auto_resolution", True)
+            resolution = params.get("resolution", 50)
+            kernel = params.get("kernel", "linear")
+
             # Use new modeling dispatcher that routes to appropriate engine
             logger.info("Step 2: Importing modeling dispatcher...")
             try:
