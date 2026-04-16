@@ -28,6 +28,9 @@ from .ml_menu import build_ml_menu
 from .dashboards_menu import build_dashboards_menu
 from .workbench_menu import build_workbench_menu
 from .workflows_menu import build_workflows_menu
+from .modelling_menu import build_modelling_menu
+from .planning_menu import build_planning_menu
+from .window_menu import build_window_menu
 from .help_menu import build_help_menu
 from .layout_menu import build_layout_menu
 
@@ -53,6 +56,9 @@ __all__ = [
     'build_dashboards_menu',
     'build_workbench_menu',
     'build_workflows_menu',
+    'build_modelling_menu',
+    'build_planning_menu',
+    'build_window_menu',
     'build_help_menu',
     'build_layout_menu',
 ]

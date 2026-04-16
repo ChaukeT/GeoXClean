@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "total_panels": 30,
+  "total_panels": 26,
   "description": "Panel metadata for GeoX Clean debugging (representative sample of 30 critical panels)",
   "panels": [
     {
@@ -9,13 +9,23 @@
       "module": "block_model_viewer.ui.drillhole_control_panel",
       "category": "Drillhole",
       "base_class": "BaseDockPanel",
-      "dependencies": ["drillhole_data"],
-      "signals_emitted": ["plot_drillholes", "clear_drillholes", "hole_visibility_changed"],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "dependencies": [
+        "drillhole_data"
+      ],
+      "signals_emitted": [
+        "plot_drillholes",
+        "clear_drillholes",
+        "hole_visibility_changed"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false,
       "critical": true,
-      "known_issues": ["Silent exception at line 255"]
+      "known_issues": [
+        "Silent exception at line 255"
+      ]
     },
     {
       "panel_id": "DrillholeImportPanel",
@@ -24,7 +34,9 @@
       "category": "Data Import",
       "base_class": "BaseAnalysisPanel",
       "dependencies": [],
-      "signals_emitted": ["request_visualization"],
+      "signals_emitted": [
+        "request_visualization"
+      ],
       "signals_consumed": [],
       "requires_renderer": false,
       "requires_gpu": false,
@@ -36,13 +48,24 @@
       "module": "block_model_viewer.ui.property_panel",
       "category": "Visualization",
       "base_class": "QWidget",
-      "dependencies": ["drillhole_data", "block_model"],
-      "signals_emitted": ["property_changed", "colormap_changed", "color_mode_changed"],
-      "signals_consumed": ["layer_changed"],
+      "dependencies": [
+        "drillhole_data",
+        "block_model"
+      ],
+      "signals_emitted": [
+        "property_changed",
+        "colormap_changed",
+        "color_mode_changed"
+      ],
+      "signals_consumed": [
+        "layer_changed"
+      ],
       "requires_renderer": true,
       "requires_gpu": false,
       "critical": true,
-      "known_issues": ["Block model properties not loading (fixed in MEMORY.md)"]
+      "known_issues": [
+        "Block model properties not loading (fixed in MEMORY.md)"
+      ]
     },
     {
       "panel_id": "GeologicalExplorerPanel",
@@ -50,9 +73,16 @@
       "module": "block_model_viewer.ui.geological_explorer_panel",
       "category": "Geology",
       "base_class": "BaseDockPanel",
-      "dependencies": ["geological_surfaces", "geological_solids"],
+      "dependencies": [
+        "geological_surfaces",
+        "geological_solids"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["geologicalModelUpdated", "geologicalSurfacesLoaded", "geologicalSolidsLoaded"],
+      "signals_consumed": [
+        "geologicalModelUpdated",
+        "geologicalSurfacesLoaded",
+        "geologicalSolidsLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false,
       "critical": false,
@@ -65,7 +95,9 @@
       "category": "Data Import",
       "base_class": "BaseAnalysisPanel",
       "dependencies": [],
-      "signals_emitted": ["request_visualization"],
+      "signals_emitted": [
+        "request_visualization"
+      ],
       "signals_consumed": [],
       "requires_renderer": false,
       "requires_gpu": false
@@ -76,9 +108,16 @@
       "module": "block_model_viewer.ui.variogram_panel",
       "category": "Geostats",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data", "composites"],
-      "signals_emitted": ["variogramResultsLoaded"],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "dependencies": [
+        "drillhole_data",
+        "composites"
+      ],
+      "signals_emitted": [
+        "variogramResultsLoaded"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -88,9 +127,18 @@
       "module": "block_model_viewer.ui.kriging_panel",
       "category": "Geostats",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data", "variogram_results"],
-      "signals_emitted": ["krigingResultsLoaded", "request_visualization"],
-      "signals_consumed": ["drillholeDataLoaded", "variogramResultsLoaded"],
+      "dependencies": [
+        "drillhole_data",
+        "variogram_results"
+      ],
+      "signals_emitted": [
+        "krigingResultsLoaded",
+        "request_visualization"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded",
+        "variogramResultsLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false
     },
@@ -100,12 +148,24 @@
       "module": "block_model_viewer.ui.sgsim_panel",
       "category": "Geostats",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data", "variogram_results", "drillholes_validation_state"],
-      "signals_emitted": ["sgsimResultsLoaded", "request_visualization"],
-      "signals_consumed": ["drillholeDataLoaded", "variogramResultsLoaded"],
+      "dependencies": [
+        "drillhole_data",
+        "variogram_results",
+        "drillholes_validation_state"
+      ],
+      "signals_emitted": [
+        "sgsimResultsLoaded",
+        "request_visualization"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded",
+        "variogramResultsLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false,
-      "known_issues": ["Requires validation state (fixed in MEMORY.md)"]
+      "known_issues": [
+        "Requires validation state (fixed in MEMORY.md)"
+      ]
     },
     {
       "panel_id": "JORCClassificationPanel",
@@ -113,25 +173,22 @@
       "module": "block_model_viewer.ui.jorc_classification_panel",
       "category": "Resource Classification",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["block_model", "drillhole_data"],
-      "signals_emitted": ["blockModelClassified"],
-      "signals_consumed": ["blockModelLoaded", "drillholeDataLoaded"],
+      "dependencies": [
+        "block_model",
+        "drillhole_data"
+      ],
+      "signals_emitted": [
+        "blockModelClassified"
+      ],
+      "signals_consumed": [
+        "blockModelLoaded",
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false,
-      "known_issues": ["Coordinate mismatch in suggest_thresholds (fixed in MEMORY.md)"]
-    },
-    {
-      "panel_id": "GradeStatisticsPanel",
-      "panel_class": "GradeStatisticsPanel",
-      "module": "block_model_viewer.ui.grade_stats_panel",
-      "category": "Statistics",
-      "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data", "composites"],
-      "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded"],
-      "requires_renderer": false,
-      "requires_gpu": false,
-      "known_issues": ["Boolean identity bug (fixed in MEMORY.md)"]
+      "known_issues": [
+        "Coordinate mismatch in suggest_thresholds (fixed in MEMORY.md)"
+      ]
     },
     {
       "panel_id": "GradeTransformationPanel",
@@ -139,9 +196,15 @@
       "module": "block_model_viewer.ui.grade_transformation_panel",
       "category": "Statistics",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
-      "signals_emitted": ["transformationMetadataLoaded"],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "dependencies": [
+        "drillhole_data"
+      ],
+      "signals_emitted": [
+        "transformationMetadataLoaded"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -152,7 +215,11 @@
       "category": "Visualization",
       "base_class": "BaseDisplayPanel",
       "dependencies": [],
-      "signals_emitted": ["opacity_changed", "lighting_toggled", "legend_visibility_toggled"],
+      "signals_emitted": [
+        "opacity_changed",
+        "lighting_toggled",
+        "legend_visibility_toggled"
+      ],
       "signals_consumed": [],
       "requires_renderer": true,
       "requires_gpu": false
@@ -187,9 +254,13 @@
       "module": "block_model_viewer.ui.drillhole_plotting_panel",
       "category": "Drillhole",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
+      "dependencies": [
+        "drillhole_data"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -199,24 +270,18 @@
       "module": "block_model_viewer.ui.drillhole_reporting_panel",
       "category": "Drillhole",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
+      "dependencies": [
+        "drillhole_data"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false,
-      "known_issues": ["Blank display (fixed in MEMORY.md)"]
-    },
-    {
-      "panel_id": "BlockInfoPanel",
-      "panel_class": "BlockInfoPanel",
-      "module": "block_model_viewer.ui.block_info_panel",
-      "category": "Block Model",
-      "base_class": "BaseAnalysisPanel",
-      "dependencies": ["block_model"],
-      "signals_emitted": [],
-      "signals_consumed": ["blockModelLoaded"],
-      "requires_renderer": true,
-      "requires_gpu": false
+      "known_issues": [
+        "Blank display (fixed in MEMORY.md)"
+      ]
     },
     {
       "panel_id": "DataViewerPanel",
@@ -224,22 +289,16 @@
       "module": "block_model_viewer.ui.data_viewer_panel",
       "category": "Utility",
       "base_class": "BaseDockPanel",
-      "dependencies": ["drillhole_data", "block_model"],
+      "dependencies": [
+        "drillhole_data",
+        "block_model"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded", "blockModelLoaded"],
+      "signals_consumed": [
+        "drillholeDataLoaded",
+        "blockModelLoaded"
+      ],
       "requires_renderer": false,
-      "requires_gpu": false
-    },
-    {
-      "panel_id": "CrossSectionPanel",
-      "panel_class": "CrossSectionPanel",
-      "module": "block_model_viewer.ui.cross_section_panel",
-      "category": "Cross Section",
-      "base_class": "BaseAnalysisPanel",
-      "dependencies": ["block_model", "drillhole_data"],
-      "signals_emitted": ["section_updated"],
-      "signals_consumed": ["blockModelLoaded", "drillholeDataLoaded"],
-      "requires_renderer": true,
       "requires_gpu": false
     },
     {
@@ -248,9 +307,13 @@
       "module": "block_model_viewer.ui.swath_panel",
       "category": "Swath Analysis",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
+      "dependencies": [
+        "drillhole_data"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -260,9 +323,13 @@
       "module": "block_model_viewer.ui.grade_tonnage_panel",
       "category": "Grade Tonnage",
       "base_class": "BasePanel",
-      "dependencies": ["block_model"],
+      "dependencies": [
+        "block_model"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["blockModelLoaded"],
+      "signals_consumed": [
+        "blockModelLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -272,9 +339,15 @@
       "module": "block_model_viewer.ui.declustering_panel",
       "category": "QC & Validation",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
-      "signals_emitted": ["declusteringResultsLoaded"],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "dependencies": [
+        "drillhole_data"
+      ],
+      "signals_emitted": [
+        "declusteringResultsLoaded"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -284,9 +357,13 @@
       "module": "block_model_viewer.ui.structural_panel",
       "category": "Geology",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
+      "dependencies": [
+        "drillhole_data"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -296,9 +373,15 @@
       "module": "block_model_viewer.ui.loopstructural_panel",
       "category": "Geology",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
-      "signals_emitted": ["loopstructuralModelLoaded"],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "dependencies": [
+        "drillhole_data"
+      ],
+      "signals_emitted": [
+        "loopstructuralModelLoaded"
+      ],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false
     },
@@ -308,9 +391,15 @@
       "module": "block_model_viewer.ui.pit_optimisation_panel",
       "category": "Mining Optimization",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["block_model"],
-      "signals_emitted": ["pitOptimizationResultsLoaded"],
-      "signals_consumed": ["blockModelLoaded"],
+      "dependencies": [
+        "block_model"
+      ],
+      "signals_emitted": [
+        "pitOptimizationResultsLoaded"
+      ],
+      "signals_consumed": [
+        "blockModelLoaded"
+      ],
       "requires_renderer": true,
       "requires_gpu": false
     },
@@ -320,9 +409,13 @@
       "module": "block_model_viewer.ui.geotech_panel",
       "category": "Geotech",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["drillhole_data"],
+      "dependencies": [
+        "drillhole_data"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["drillholeDataLoaded"],
+      "signals_consumed": [
+        "drillholeDataLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -332,9 +425,13 @@
       "module": "block_model_viewer.ui.uncertainty_panel",
       "category": "Risk & Uncertainty",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["sgsim_results"],
+      "dependencies": [
+        "sgsim_results"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["sgsimResultsLoaded"],
+      "signals_consumed": [
+        "sgsimResultsLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -344,9 +441,13 @@
       "module": "block_model_viewer.ui.esg_dashboard_panel",
       "category": "Dashboard",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["block_model"],
+      "dependencies": [
+        "block_model"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["blockModelLoaded"],
+      "signals_consumed": [
+        "blockModelLoaded"
+      ],
       "requires_renderer": false,
       "requires_gpu": false
     },
@@ -356,22 +457,15 @@
       "module": "block_model_viewer.ui.resource_reporting_panel",
       "category": "Reporting",
       "base_class": "BaseAnalysisPanel",
-      "dependencies": ["block_model"],
+      "dependencies": [
+        "block_model"
+      ],
       "signals_emitted": [],
-      "signals_consumed": ["blockModelLoaded", "blockModelClassified"],
+      "signals_consumed": [
+        "blockModelLoaded",
+        "blockModelClassified"
+      ],
       "requires_renderer": false,
-      "requires_gpu": false
-    },
-    {
-      "panel_id": "SelectionPanel",
-      "panel_class": "SelectionPanel",
-      "module": "block_model_viewer.ui.selection_panel",
-      "category": "Utility",
-      "base_class": "QWidget",
-      "dependencies": [],
-      "signals_emitted": [],
-      "signals_consumed": [],
-      "requires_renderer": true,
       "requires_gpu": false
     }
   ]

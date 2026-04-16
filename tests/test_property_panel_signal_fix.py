@@ -50,29 +50,29 @@ def test_handler_method_exists():
 
 
 def test_signal_connection_in_connect_signals():
-    """Verify that signal connection code exists in _connect_signals method."""
+    """Verify that signal connection code exists in SignalCoordinator._connect_panel_signals."""
     print("\n" + "="*70)
     print("TEST 2: Verifying signal connection code exists")
     print("="*70)
 
-    from block_model_viewer.ui.main_window import MainWindow
+    from block_model_viewer.ui.coordinators.signal_coordinator import SignalCoordinator
     import inspect
 
-    # Get source code of _connect_signals method
-    method = getattr(MainWindow, '_connect_signals')
-    source = inspect.getsource(method)
+    # Signal connection is in SignalCoordinator._connect_panel_signals()
+    # (MainWindow._connect_signals delegates to coordinator.connect_all()
+    #  which calls _connect_panel_signals())
+    coordinator_source = inspect.getsource(SignalCoordinator._connect_panel_signals)
 
-    # Check for signal connection
-    assert 'request_visualization.connect' in source, \
-        "[FAIL] Signal connection code not found in _connect_signals"
+    assert 'request_visualization.connect' in coordinator_source, \
+        "[FAIL] Signal connection code not found in SignalCoordinator._connect_panel_signals"
 
-    assert '_handle_property_panel_visualization_request' in source, \
-        "[FAIL] Handler reference not found in _connect_signals"
+    assert '_handle_property_panel_visualization_request' in coordinator_source, \
+        "[FAIL] Handler reference not found in SignalCoordinator._connect_panel_signals"
 
-    print("[PASS] Signal connection code found in _connect_signals method")
+    print("[PASS] Signal connection code found in SignalCoordinator._connect_panel_signals method")
 
     # Print relevant lines
-    lines = source.split('\n')
+    lines = coordinator_source.split('\n')
     print("\n   Relevant code:")
     for i, line in enumerate(lines):
         if 'request_visualization' in line or '_handle_property_panel_visualization_request' in line:
@@ -88,7 +88,10 @@ def test_property_panel_has_signal():
     print("="*70)
 
     from block_model_viewer.ui.property_panel import PropertyPanel
-    from PyQt5.QtCore import pyqtSignal
+    try:
+        from PyQt6.QtCore import pyqtSignal
+    except ImportError:
+        from PyQt5.QtCore import pyqtSignal
 
     # Check signal exists
     assert hasattr(PropertyPanel, 'request_visualization'), \

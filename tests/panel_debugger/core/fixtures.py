@@ -273,7 +273,7 @@ class MockRenderer:
         """Mock drillhole layer addition"""
         self.method_calls.append(('add_drillhole_layer', args, kwargs))
 
-        # Extract coordinates for transformation
+        # Extract coordinates and apply local precision transform (mirrors real renderer)
         coords = None
         if isinstance(drillhole_data, dict):
             if 'trajectories' in drillhole_data:
@@ -282,6 +282,9 @@ class MockRenderer:
                     coords = traj.points
                 elif isinstance(traj, np.ndarray):
                     coords = traj
+
+        if coords is not None:
+            coords = self._to_local_precision(np.asarray(coords))
 
         # Simulate layer creation
         self.active_layers['drillholes'] = {

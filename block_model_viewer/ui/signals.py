@@ -68,6 +68,11 @@ class UISignals(QObject):
     drillholeColorModeChanged = pyqtSignal(str)  # color_mode
     drillholeAssayFieldChanged = pyqtSignal(str)  # assay_field
     drillholeShowIdsToggled = pyqtSignal(bool)  # show_ids
+    drillholeCollarToggled = pyqtSignal(bool)  # show/hide collars
+    drillholePbrToggled = pyqtSignal(bool)  # PBR rendering toggle
+    drillholeSsaoToggled = pyqtSignal(bool)  # SSAO toggle
+    drillholeEdlToggled = pyqtSignal(bool)  # Edge glow (EDL) toggle
+    drillholeHideBarrenToggled = pyqtSignal(bool)  # hide barren intervals toggle
     drillholeVisibilityChanged = pyqtSignal(str, bool)  # hole_id, visible
     drillholeFocusRequested = pyqtSignal()  # Focus on selected holes
     drillholeLithFilterChanged = pyqtSignal(list)  # List of lithology codes to show (empty = show all)

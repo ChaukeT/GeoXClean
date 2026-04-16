@@ -146,10 +146,15 @@ class TestBlankPanelFixes:
             # Get __init__ source
             init_source = inspect.getsource(panel_class.__init__)
 
-            # Verify _build_ui() is called in __init__
-            assert "_build_ui()" in init_source, (
-                f"{panel_name}.__init__() does NOT call _build_ui()!\n"
-                f"The fix was not applied correctly."
+            # Verify UI gets built: either via explicit call in __init__, OR
+            # by having setup_ui() defined (base class calls it during __init__)
+            explicit_call = "_build_ui()" in init_source or "_setup_ui()" in init_source
+            has_setup_ui = hasattr(panel_class, 'setup_ui') and callable(
+                getattr(panel_class, 'setup_ui', None)
+            )
+            assert explicit_call or has_setup_ui, (
+                f"{panel_name} has no UI build mechanism!\n"
+                f"Add _build_ui()/_setup_ui() call in __init__() or define setup_ui()."
             )
 
             # Verify _init_registry() is called in __init__
@@ -158,7 +163,7 @@ class TestBlankPanelFixes:
                 f"The fix was not applied correctly."
             )
 
-            logger.info(f"✅ {panel_name}.__init__() correctly calls _build_ui() and _init_registry()")
+            logger.info(f"✅ {panel_name}.__init__() correctly sets up UI and registry")
 
         logger.info("\n✅ All 3 panels have correct __init__() implementation")
 

@@ -294,8 +294,8 @@ class MockDataFactory:
 
         # Create grid
         if PYVISTA_AVAILABLE:
-            # Create uniform grid
-            grid = pv.UniformGrid()
+            # Create uniform grid (pv.ImageData replaces deprecated pv.UniformGrid)
+            grid = pv.ImageData()
             grid.dimensions = (nx + 1, ny + 1, nz + 1)
             grid.origin = origin
             grid.spacing = cell_size

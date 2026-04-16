@@ -35,7 +35,7 @@ class TestDrillholeDataFlowDiagnostic:
         import pandas as pd
 
         # Create registry and panel
-        registry = DataRegistry.create()
+        registry = DataRegistry()
 
         try:
             panel = DrillholeControlPanel(signals=mock_signals)
@@ -195,7 +195,7 @@ class TestDrillholeDataFlowDiagnostic:
         from block_model_viewer.ui.geological_explorer_panel import GeologicalExplorerPanel
         import pandas as pd
 
-        registry = DataRegistry.create()
+        registry = DataRegistry()
 
         try:
             panel = GeologicalExplorerPanel(signals=mock_signals)

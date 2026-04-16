@@ -22,6 +22,11 @@ from typing import Optional, Tuple, List, Union, Dict
 logger = logging.getLogger(__name__)
 
 
+SURVEY_DEPTH_ALIASES = ["DEPTH", "MD", "MEASURED_DEPTH", "AT"]
+SURVEY_AZIMUTH_ALIASES = ["AZI", "AZIMUTH", "AZ", "BEARING", "BRG"]
+SURVEY_DIP_ALIASES = ["DIP", "INCLINATION", "INC", "INCL"]
+
+
 def minimum_curvature_desurvey(
     collar_x: float,
     collar_y: float,
@@ -30,6 +35,7 @@ def minimum_curvature_desurvey(
     depth_col: str = None,
     azimuth_col: str = None,
     dip_col: str = None,
+    dip_already_normalized: bool = False,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Calculate 3D drillhole trajectory using the Minimum Curvature method.
@@ -64,9 +70,9 @@ def minimum_curvature_desurvey(
     
         # Auto-detect column names if not provided
         logger.debug(f"  Detecting columns from: {list(survey_df.columns)}")
-        depth_col = depth_col or _detect_column(survey_df, ["DEPTH", "MD", "MEASURED_DEPTH"])
-        azimuth_col = azimuth_col or _detect_column(survey_df, ["AZI", "AZIMUTH", "AZ", "BEARING"])
-        dip_col = dip_col or _detect_column(survey_df, ["DIP", "INCLINATION", "INC"])
+        depth_col = depth_col or _detect_column(survey_df, SURVEY_DEPTH_ALIASES)
+        azimuth_col = azimuth_col or _detect_column(survey_df, SURVEY_AZIMUTH_ALIASES)
+        dip_col = dip_col or _detect_column(survey_df, SURVEY_DIP_ALIASES)
         
         logger.debug(f"  Detected columns: depth={depth_col}, azimuth={azimuth_col}, dip={dip_col}")
         
@@ -74,11 +80,11 @@ def minimum_curvature_desurvey(
             # BUG FIX #11: Log as ERROR (not warning) for missing required columns
             missing = []
             if not depth_col:
-                missing.append("DEPTH/MD/MEASURED_DEPTH")
+                missing.append("DEPTH/MD/MEASURED_DEPTH/AT")
             if not azimuth_col:
-                missing.append("AZI/AZIMUTH/AZ/BEARING")
+                missing.append("AZI/AZIMUTH/AZ/BEARING/BRG")
             if not dip_col:
-                missing.append("DIP/INCLINATION/INC")
+                missing.append("DIP/INCLINATION/INC/INCL")
             logger.error(f"DESURVEY FAILED: Missing required columns: {missing}. "
                         f"Available columns: {list(survey_df.columns)}. "
                         f"Hole will use vertical fallback coordinates.")
@@ -105,12 +111,76 @@ def minimum_curvature_desurvey(
             dup_count = len(depths_check) - len(np.unique(depths_check))
             logger.warning(f"  Found {dup_count} duplicate depth values - removing duplicates (keeping first)")
             surveys = surveys.drop_duplicates(subset=[depth_col], keep='first')
+
+        # ── DIA-DS01 FIX: Validate strict monotonic increase AFTER
+        # duplicate removal — non-monotonic depths produce invalid paths. ──
+        _depths_sorted = surveys[depth_col].values
+        _diffs = np.diff(_depths_sorted)
+        _bad_idx = np.where(_diffs <= 0)[0]
+        if len(_bad_idx) > 0:
+            logger.warning(
+                "DIA-DS01: %d non-monotonic depth transition(s) detected "
+                "after duplicate removal. Removing offending rows.",
+                len(_bad_idx),
+            )
+            drop_rows = surveys.index[_bad_idx + 1]
+            surveys = surveys.drop(drop_rows)
         
         logger.debug(f"  Converting {len(surveys)} survey points to numeric")
         depths = pd.to_numeric(surveys[depth_col], errors='coerce').values
         azimuths_deg = pd.to_numeric(surveys[azimuth_col], errors='coerce').values
         dips_deg = pd.to_numeric(surveys[dip_col], errors='coerce').values
+
+        # Many drillhole systems store dip as positive-down (+90 = vertical down).
+        # GeoX's desurvey math uses negative-down (-90 = vertical down).
+        # DH-01 FIX: Skip auto-detection if data_io has already normalized the
+        # dip convention.  Double-negation would flip dips back to positive-down,
+        # producing upward-pointing drillholes.
+        if not dip_already_normalized:
+            finite_dips = dips_deg[np.isfinite(dips_deg)]
+            nonzero_dips = finite_dips[finite_dips != 0.0]
+            if len(nonzero_dips) >= 2:
+                pct_positive = float(np.sum(nonzero_dips > 0)) / len(nonzero_dips)
+                median_abs = float(np.median(np.abs(nonzero_dips)))
+                if pct_positive > 0.7 and median_abs > 30.0:
+                    logger.info(
+                        "DIP convention auto-detected as positive-down "
+                        "(%.0f%% positive, median |dip|=%.1f). "
+                        "Negating to GeoX negative-down convention.",
+                        pct_positive * 100,
+                        median_abs,
+                    )
+                    dips_deg = -dips_deg
+
+                    # DIA-DS03 FIX: Explicit post-negation guard — verify that
+                    # the majority of dips are now negative (downward). If not,
+                    # the auto-detection was a false positive; revert.
+                    _post_neg_pct = float(np.sum(dips_deg[dips_deg != 0.0] < 0)) / max(len(nonzero_dips), 1)
+                    if _post_neg_pct < 0.5:
+                        logger.error(
+                            "DIA-DS03: Double-negation detected — after negation "
+                            "only %.0f%% of dips are negative. Reverting negation.",
+                            _post_neg_pct * 100,
+                        )
+                        dips_deg = -dips_deg  # revert
+        else:
+            logger.debug("DIP normalization skipped (dip_already_normalized=True)")
         
+        # DIA-DS05 FIX: Warn when vertical holes have nonsensical azimuth.
+        # For dip = -90° (vertical), azimuth is mathematically undefined.
+        # Varying azimuth values among vertical stations are likely data noise.
+        _vert_mask = np.abs(dips_deg - (-90.0)) < 0.5
+        if np.any(_vert_mask):
+            _vert_az = azimuths_deg[_vert_mask]
+            if len(np.unique(np.round(_vert_az, 0))) > 1:
+                logger.warning(
+                    "DIA-DS05: Vertical hole (dip~=-90) has varying azimuth values "
+                    "(range %.1f–%.1f). Azimuth is undefined for vertical holes; "
+                    "these values will not affect the trajectory but may indicate "
+                    "data-entry issues.",
+                    float(np.min(_vert_az)), float(np.max(_vert_az)),
+                )
+
         # Check for any remaining NaN values
         if np.any(np.isnan(depths)) or np.any(np.isnan(azimuths_deg)) or np.any(np.isnan(dips_deg)):
             logger.warning("NaN values found in survey data after conversion")
@@ -159,8 +229,9 @@ def minimum_curvature_desurvey(
         # BUG FIX #10: Compute limit BEFORE division to avoid NaN/inf
         logger.debug("  Calculating ratio factors")
         F = np.ones_like(alpha)  # Initialize all to 1.0 (the limit value)
-        # Only compute for non-straight sections (alpha >= 1e-6)
-        non_straight = alpha >= 1e-6
+        # DIA-DS04 FIX: Unified numerical stability threshold (was 1e-6,
+        # single-segment path used 1e-9 — now consistent at 1e-9).
+        non_straight = alpha >= 1e-9
         if np.any(non_straight):
             half_alpha = alpha[non_straight] / 2.0
             F[non_straight] = np.tan(half_alpha) / half_alpha
@@ -246,8 +317,16 @@ def interpolate_at_depths(
     if np.any(extrapolated_below):
         count = np.sum(extrapolated_below)
         max_target = target_depths[extrapolated_below].max()
-        logger.warning(f"  {count} sample(s) extend beyond survey depth ({max_survey_depth:.1f}m). "
-                      f"Max sample depth: {max_target:.1f}m. Coordinates will be extrapolated.")
+        overshoot = max_target - max_survey_depth
+        # ── DIA-DS02 FIX: Flag extrapolated coordinates with higher
+        # severity when overshoot exceeds 20m (unreliable trajectory). ──
+        severity = "ERROR" if overshoot > 20.0 else "WARNING"
+        log_fn = logger.error if severity == "ERROR" else logger.warning
+        log_fn(
+            "DIA-DS02: %d sample(s) extend %.1fm beyond last survey "
+            "station (%.1fm). Coordinates are EXTRAPOLATED and may be "
+            "inaccurate.", count, overshoot, max_survey_depth,
+        )
 
     if np.any(extrapolated_above):
         count = np.sum(extrapolated_above)
@@ -285,7 +364,7 @@ def desurvey_hole_dataframe(
     result = survey_df.copy()
     
     # Detect depth column
-    depth_col = _detect_column(survey_df, ["DEPTH", "MD", "MEASURED_DEPTH"])
+    depth_col = _detect_column(survey_df, SURVEY_DEPTH_ALIASES)
     if not depth_col:
         return None
     
@@ -327,7 +406,21 @@ def add_coordinates_to_intervals(
     result['X'] = 0.0
     result['Y'] = 0.0
     result['Z'] = 0.0
-    
+
+    # Auto-detect column names if defaults are not present
+    if hole_id_col not in result.columns:
+        detected = _detect_column(result, ['HOLEID', 'hole_id', 'HoleID', 'HOLE_ID', 'bhid', 'BHID'])
+        if detected:
+            hole_id_col = detected
+    if from_col not in result.columns:
+        detected = _detect_column(result, ['FROM', 'depth_from', 'from_depth', 'DEPTH_FROM'])
+        if detected:
+            from_col = detected
+    if to_col not in result.columns:
+        detected = _detect_column(result, ['TO', 'depth_to', 'to_depth', 'DEPTH_TO'])
+        if detected:
+            to_col = detected
+
     # Calculate midpoint depths
     result['_MID'] = (result[from_col] + result[to_col]) / 2.0
     
@@ -584,16 +677,30 @@ def minimum_curvature_path_from_surveys(
     # Sort surveys by depth
     sorted_surveys = sorted(surveys, key=lambda s: s.get('depth_from', 0.0))
     
-    # Build station points dictionary (depth -> (azimuth, dip))
+    # DH-05 FIX: Build station points with distinct orientations at each
+    # interval endpoint.  Previously both depth_from and depth_to got the
+    # same (az, dip), which meant the minimum curvature algorithm saw zero
+    # curvature within each interval (F=1, straight line segment) and only
+    # curved at the boundaries between intervals.  For survey intervals that
+    # represent a measurement taken at depth_from with orientation applying
+    # through depth_to, the depth_to orientation should come from the NEXT
+    # survey's depth_from (if available) to allow proper curvature.
     station_points = {0.0: (sorted_surveys[0].get('azimuth', default_azimuth), sorted_surveys[0].get('dip', default_dip))}
-    
-    for survey in sorted_surveys:
+
+    for i, survey in enumerate(sorted_surveys):
         depth_from = survey.get('depth_from', 0.0)
         depth_to = survey.get('depth_to', 0.0)
         az = survey.get('azimuth', default_azimuth)
         dip = survey.get('dip', default_dip)
         station_points[depth_from] = (az, dip)
-        station_points[depth_to] = (az, dip)
+        # At depth_to, use the NEXT survey's orientation if available,
+        # otherwise carry forward this survey's orientation.
+        if i + 1 < len(sorted_surveys):
+            next_az = sorted_surveys[i + 1].get('azimuth', az)
+            next_dip = sorted_surveys[i + 1].get('dip', dip)
+            station_points[depth_to] = (next_az, next_dip)
+        else:
+            station_points[depth_to] = (az, dip)
     
     # Add total_depth if provided and beyond last survey
     if total_depth is not None and total_depth > max(station_points.keys()):

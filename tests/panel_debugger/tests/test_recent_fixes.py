@@ -2,7 +2,7 @@
 Test Recent Fixes - Validation and F-String CSS
 
 This test verifies the two critical fixes:
-1. Collar-only validation (data_registry_simple.py)
+1. Collar-only validation (data_registry.py)
 2. F-string CSS braces (drillhole_status_bar.py)
 """
 
@@ -24,9 +24,9 @@ class TestCollarOnlyValidation:
 
         This addresses the issue where user's 142 collar import was rejected.
         """
-        from block_model_viewer.core.data_registry_simple import DataRegistrySimple
+        from block_model_viewer.core.data_registry import DataRegistry
 
-        registry = DataRegistrySimple()
+        registry = DataRegistry.instance()
 
         # Create collar-only data (like the user's import)
         collars = pd.DataFrame({
@@ -108,9 +108,9 @@ class TestCollarOnlyValidation:
 
         Ensure we didn't break normal imports.
         """
-        from block_model_viewer.core.data_registry_simple import DataRegistrySimple
+        from block_model_viewer.core.data_registry import DataRegistry
 
-        registry = DataRegistrySimple()
+        registry = DataRegistry.instance()
 
         # Create full data (collars + assays)
         collars = pd.DataFrame({
@@ -236,11 +236,27 @@ class TestFStringCSSFix:
 
         registry.register_drillhole_data(drillhole_data, source_panel="Test")
 
+        # Create minimal surveys and lithology DataFrames
+        surveys = pd.DataFrame({
+            'hole_id': ['DH001'],
+            'depth': [0.0],
+            'azimuth': [0.0],
+            'dip': [-90.0]
+        })
+
+        lithology = pd.DataFrame({
+            'hole_id': ['DH001'],
+            'from_m': [0.0],
+            'to_m': [10.0],
+            'lithology': ['GRANITE']
+        })
+
         try:
             qc_window = QCWindow(
-                drillhole_data=drillhole_data,
-                registry=registry,
-                signals=mock_signals,
+                collars=collars,
+                surveys=surveys,
+                assays=assays,
+                lithology=lithology,
                 parent=None
             )
             assert qc_window is not None, "QC Window is None"
@@ -277,7 +293,7 @@ class TestRecentFixesSummary:
         print("RECENT FIXES VERIFICATION SUMMARY")
         print(f"{'='*80}")
         print(f"\nFixes tested:")
-        print(f"  1. Collar-only validation (data_registry_simple.py)")
+        print(f"  1. Collar-only validation (data_registry.py)")
         print(f"     - Allows imports with collars but no assays")
         print(f"     - Fixes user's 142 collar import issue")
         print(f"  2. F-string CSS braces (drillhole_status_bar.py)")

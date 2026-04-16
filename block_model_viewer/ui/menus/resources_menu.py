@@ -23,7 +23,10 @@ def build_resources_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     # Block Model Resources
     block_resource_action = QAction(get_menu_icon("resources", "block_resources"), "Block Model Resources", main_window)
     block_resource_action.setStatusTip("Calculate block model resources with cut-off logic")
-    block_resource_action.triggered.connect(main_window.open_block_resource_panel)
+    if hasattr(main_window, 'open_block_resource_panel'):
+        block_resource_action.triggered.connect(main_window.open_block_resource_panel)
+    else:
+        block_resource_action.setEnabled(False)
     resources_menu.addAction(block_resource_action)
     
     resources_menu.addSeparator()
@@ -31,7 +34,10 @@ def build_resources_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     # Sensitivity Analysis
     sensitivity_action = QAction(get_menu_icon("resources", "sensitivity"), "Cut-off Sensitivity Analysis", main_window)
     sensitivity_action.setStatusTip("Perform cut-off sensitivity analysis")
-    sensitivity_action.triggered.connect(main_window.open_sensitivity_panel)
+    if hasattr(main_window, 'open_sensitivity_panel'):
+        sensitivity_action.triggered.connect(main_window.open_sensitivity_panel)
+    else:
+        sensitivity_action.setEnabled(False)
     resources_menu.addAction(sensitivity_action)
     
     resources_menu.addSeparator()

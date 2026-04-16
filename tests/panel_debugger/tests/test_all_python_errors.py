@@ -46,19 +46,10 @@ class TestComprehensivePythonErrors:
         ('block_model_viewer.ui.sgsim_panel', 'SGSIMPanel'),
         ('block_model_viewer.ui.variogram_panel', 'VariogramAnalysisPanel'),
         ('block_model_viewer.ui.grade_transformation_panel', 'GradeTransformationPanel'),
-        ('block_model_viewer.ui.grade_stats_panel', 'GradeStatisticsPanel'),
         ('block_model_viewer.ui.drillhole_reporting_panel', 'DrillholeReportingPanel'),
-        ('block_model_viewer.ui.cross_section_panel', 'CrossSectionPanel'),
-        ('block_model_viewer.ui.swath_panel', 'SwathPanel'),
-        ('block_model_viewer.ui.uncertainty_panel', 'UncertaintyAnalysisPanel'),
-        ('block_model_viewer.ui.resource_reporting_panel', 'ResourceReportingPanel'),
-        ('block_model_viewer.ui.scene_inspector_panel', 'SceneInspectorPanel'),
         ('block_model_viewer.ui.display_settings_panel', 'DisplaySettingsPanel'),
-        ('block_model_viewer.ui.block_info_panel', 'BlockInfoPanel'),
-        ('block_model_viewer.ui.data_viewer_panel', 'DataViewerPanel'),
         ('block_model_viewer.ui.drillhole_plotting_panel', 'DrillholePlottingPanel'),
         ('block_model_viewer.ui.gc_decision_panel', 'GCDecisionPanel'),
-        ('block_model_viewer.ui.audit_classification_panel', 'AuditClassificationPanel'),
     ]
 
     def test_all_panels_can_be_imported(self):

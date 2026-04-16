@@ -68,12 +68,25 @@ def build_drillhole_polylines(
             hole_ids.append(hid)
 
     if not database.surveys.empty:
-        for _, row in database.surveys.iterrows():
+        survey_df = database.surveys
+        # Detect schema: single 'depth' column (point measurements) or
+        # 'depth_from'/'depth_to' (interval schema)
+        has_depth = 'depth' in survey_df.columns
+        has_interval = 'depth_from' in survey_df.columns and 'depth_to' in survey_df.columns
+        for _, row in survey_df.iterrows():
             hid = str(row['hole_id'])
+            if has_interval:
+                d_from = float(row['depth_from'])
+                d_to = float(row['depth_to'])
+            elif has_depth:
+                d_from = float(row['depth'])
+                d_to = float(row['depth'])  # Point measurement
+            else:
+                continue
             surveys.setdefault(hid, []).append(
                 {
-                    "depth_from": float(row['depth_from']),
-                    "depth_to": float(row['depth_to']),
+                    "depth_from": d_from,
+                    "depth_to": d_to,
                     "azimuth": float(row['azimuth']),
                     "dip": float(row['dip']),
                 }
@@ -110,6 +123,76 @@ def build_drillhole_polylines(
         for hole_list in holes.values():
             hole_list.sort(key=lambda interval: interval.get("from", 0.0))
 
+    # ── Composite DataFrame integration ──────────────────────────────
+    # When composite_df is provided (user selected Composites as source),
+    # merge it INTO assays_by_hole so coloured tubes use composite grades
+    # instead of raw assays.
+    if composite_df is not None and not composite_df.empty:
+        # Normalise the hole-ID column name (composites may use HoleID, HOLEID, etc.)
+        hole_col = None
+        for candidate in composite_df.columns:
+            if candidate.lower().replace('_', '') in ('holeid', 'hole_id', 'bhid', 'hole', 'dhid'):
+                hole_col = candidate
+                break
+        if hole_col is None:
+            logger.warning(
+                "[DRILLHOLE DIAG] composite_df has no recognisable hole-ID column. "
+                f"Columns: {list(composite_df.columns)}"
+            )
+        else:
+            logger.info(
+                f"[DRILLHOLE DIAG] Using composite_df ({len(composite_df)} rows) "
+                f"with hole-ID column '{hole_col}' — overriding raw assays"
+            )
+            # Detect depth columns
+            from_col = next((c for c in composite_df.columns if c.lower() in ('from', 'depth_from', 'from_depth')), None)
+            to_col = next((c for c in composite_df.columns if c.lower() in ('to', 'depth_to', 'to_depth')), None)
+            if from_col is None or to_col is None:
+                logger.warning(
+                    f"[DRILLHOLE DIAG] composite_df missing depth columns. "
+                    f"Columns: {list(composite_df.columns)}"
+                )
+            else:
+                # Replace assays_by_hole with composite data
+                composite_assays: Dict[str, list] = {}
+                meta_cols_comp = {hole_col, from_col, to_col}
+                for _, row in composite_df.iterrows():
+                    hid = str(row[hole_col])
+                    values: Dict[str, float] = {}
+                    for key, value in row.items():
+                        if key not in meta_cols_comp and pd.notna(value):
+                            try:
+                                values[key] = float(value)
+                            except (TypeError, ValueError):
+                                continue
+                    composite_assays.setdefault(hid, []).append(
+                        {"from": float(row[from_col]), "to": float(row[to_col]), "values": values}
+                    )
+                for hole_list in composite_assays.values():
+                    hole_list.sort(key=lambda interval: interval.get("from", 0.0))
+
+                # Log holes that exist in composites but NOT in collars (case mismatch detection)
+                composite_hole_ids = set(composite_assays.keys())
+                collar_hole_ids = set(hole_ids)
+                in_comp_not_collar = composite_hole_ids - collar_hole_ids
+                in_collar_not_comp = collar_hole_ids - composite_hole_ids
+                if in_comp_not_collar:
+                    logger.warning(
+                        f"[DRILLHOLE DIAG] {len(in_comp_not_collar)} holes in composites but NOT in collars "
+                        f"(possible case mismatch): {sorted(in_comp_not_collar)[:10]}"
+                    )
+                if in_collar_not_comp:
+                    logger.warning(
+                        f"[DRILLHOLE DIAG] {len(in_collar_not_comp)} holes in collars but NOT in composites: "
+                        f"{sorted(in_collar_not_comp)[:10]}"
+                    )
+
+                assays_by_hole = composite_assays
+                logger.info(
+                    f"[DRILLHOLE DIAG] Replaced assays_by_hole with {len(composite_assays)} "
+                    f"composite holes ({sum(len(v) for v in composite_assays.values())} intervals)"
+                )
+
     element_names = {
         element
         for assays in assays_by_hole.values()
@@ -143,6 +226,8 @@ def build_drillhole_polylines(
     hole_polys = {}
     hole_segment_lith = {}
     hole_segment_assay = {}
+    hole_segment_from_depth = {}
+    hole_segment_to_depth = {}
     lith_colors = {}
     lith_to_index = {}
     radii = {}
@@ -192,10 +277,17 @@ def build_drillhole_polylines(
             hole_polys[hid] = pv.PolyData()
             hole_segment_lith[hid] = []
             hole_segment_assay[hid] = []
+            hole_segment_from_depth[hid] = []
+            hole_segment_to_depth[hid] = []
             continue
 
         depth_to_point = {depth: tuple(coord) for depth, coord in zip(coord_depths, station_coords)}
-        break_depths = set(depth_to_point.keys())
+
+        # Break depths: only use data boundaries (assay/lith), collar, and TD.
+        # Survey stations are used for desurvey path shape but NOT as
+        # segment break points — including them creates many tiny segments
+        # between survey stations that have no assay data and render gray.
+        break_depths = set()
         break_depths.update(depth for lith in lithology_intervals.get(hid, []) for depth in (lith["from"], lith["to"]))
         break_depths.update(depth for assay in assays_by_hole.get(hid, []) for depth in (assay["from"], assay["to"]))
         break_depths.add(0.0)
@@ -226,6 +318,8 @@ def build_drillhole_polylines(
         lines = []
         lith_list = []
         assay_list = []
+        from_depth_list = []
+        to_depth_list = []
         for idx in range(len(sorted_depth_points) - 1):
             start_depth = sorted_depth_points[idx][0]
             end_depth = sorted_depth_points[idx + 1][0]
@@ -237,11 +331,15 @@ def build_drillhole_polylines(
             mid_depth = 0.5 * (start_depth + end_depth)
             lith_list.append(_get_lith_code(lithology_intervals.get(hid, []), mid_depth))
             assay_list.append(_get_assay_value(assays_by_hole.get(hid, []), mid_depth, assay_field_name))
+            from_depth_list.append(start_depth)
+            to_depth_list.append(end_depth)
 
         if not lines:
             hole_polys[hid] = pv.PolyData()
             hole_segment_lith[hid] = []
             hole_segment_assay[hid] = []
+            hole_segment_from_depth[hid] = []
+            hole_segment_to_depth[hid] = []
             continue
 
         poly = pv.PolyData(np.array(points, dtype=float))
@@ -249,16 +347,99 @@ def build_drillhole_polylines(
         hole_polys[hid] = poly
         hole_segment_lith[hid] = lith_list
         hole_segment_assay[hid] = assay_list
+        hole_segment_from_depth[hid] = from_depth_list
+        hole_segment_to_depth[hid] = to_depth_list
+
+    # ── Per-hole diagnostic logging ─────────────────────────────────
+    # Logs which holes are SKIPPED and WHY (no assay data, missing field, all NaN)
+    total_collars = len(hole_ids)
+    holes_with_assay_records = 0
+    holes_with_valid_field = 0
+    holes_with_coloured_segments = 0
+    holes_skipped_no_assay = []
+    holes_skipped_no_field = []
+    holes_skipped_all_nan = []
+
+    for hid in hole_ids:
+        assay_intervals = assays_by_hole.get(hid, [])
+        seg_assays = hole_segment_assay.get(hid, [])
+
+        if not assay_intervals:
+            holes_skipped_no_assay.append(hid)
+            continue
+        holes_with_assay_records += 1
+
+        # Check if the target assay field exists in ANY interval for this hole
+        field_found = any(
+            assay_field_name in interval.get("values", {})
+            for interval in assay_intervals
+        )
+        if not field_found:
+            available_fields = sorted({
+                k for interval in assay_intervals
+                for k in interval.get("values", {}).keys()
+            })
+            holes_skipped_no_field.append((hid, available_fields))
+            continue
+        holes_with_valid_field += 1
+
+        # Check if any segment produced a non-NaN value
+        valid_values = [v for v in seg_assays if v is not None and not np.isnan(v) and v > 0]
+        if not valid_values:
+            holes_skipped_all_nan.append(hid)
+            continue
+        holes_with_coloured_segments += 1
+
+    logger.info(
+        f"[DRILLHOLE DIAG] Hole count pipeline:\n"
+        f"  Total holes from collars:          {total_collars}\n"
+        f"  Holes with assay/composite records: {holes_with_assay_records}\n"
+        f"  Holes with '{assay_field_name}' field:      {holes_with_valid_field}\n"
+        f"  Holes with valid (>0) values:      {holes_with_coloured_segments}\n"
+        f"  ── Gap analysis ──\n"
+        f"  No assay data at all:              {len(holes_skipped_no_assay)}\n"
+        f"  Missing '{assay_field_name}' column:        {len(holes_skipped_no_field)}\n"
+        f"  All values NaN or zero:            {len(holes_skipped_all_nan)}"
+    )
+    if holes_skipped_no_assay:
+        logger.warning(
+            f"[DRILLHOLE DIAG] Holes with NO assay/composite data "
+            f"({len(holes_skipped_no_assay)}): {holes_skipped_no_assay[:20]}"
+        )
+    if holes_skipped_no_field:
+        for hid, avail in holes_skipped_no_field[:10]:
+            logger.warning(
+                f"[DRILLHOLE DIAG] Hole {hid}: '{assay_field_name}' column not found. "
+                f"Available: {avail}"
+            )
+    if holes_skipped_all_nan:
+        logger.warning(
+            f"[DRILLHOLE DIAG] Holes with all NaN/zero '{assay_field_name}' values "
+            f"({len(holes_skipped_all_nan)}): {holes_skipped_all_nan[:20]}"
+        )
 
     # Compute assay min/max AFTER loop completes (must be outside loop)
     all_assay_values = [
         value for values in hole_segment_assay.values() for value in values
         if value is not None and not np.isnan(value)
     ]
+    # DH-03 FIX: Use data-driven lower bound instead of hardcoded 0.0.
+    # Geophysical logs (magnetic susceptibility, density deviation, etc.)
+    # can have legitimate non-zero or negative minima.  Hardcoding 0.0
+    # compresses the useful colour range for such properties.
     assay_min = float(np.min(all_assay_values)) if all_assay_values else 0.0
+    # For concentration assays (most common case), floor at 0.0 since
+    # negative concentrations are physically impossible.
+    if assay_min > 0:
+        assay_min = 0.0
     assay_max = float(np.max(all_assay_values)) if all_assay_values else 1.0
     if assay_max == assay_min:
         assay_max = assay_min + 1.0
+    # 98th percentile of POSITIVE values for auto-clim
+    # Using max instead of p98 compresses 90%+ of grades into the dark end
+    # of the colour ramp when extreme outliers are present.
+    positive_values = [v for v in all_assay_values if v > 0 and np.isfinite(v)]
+    assay_p98 = float(np.percentile(positive_values, 98)) if positive_values else assay_max
 
     unique_codes = sorted({code for codes in hole_segment_lith.values() for code in codes if code})
     if not unique_codes:
@@ -306,11 +487,14 @@ def build_drillhole_polylines(
         "hole_polys": hole_polys,
         "hole_segment_lith": hole_segment_lith,
         "hole_segment_assay": hole_segment_assay,
+        "hole_segment_from_depth": hole_segment_from_depth,
+        "hole_segment_to_depth": hole_segment_to_depth,
         "lith_colors": lith_colors,
         "lith_to_index": lith_to_index,
         "assay_field": assay_field_name,
         "assay_min": assay_min,
         "assay_max": assay_max,
+        "assay_p98": assay_p98,
         "hole_ids": hole_ids,
         "collar_coords": collar_coords,
         "_registry": registry,  # CRITICAL: Pass registry for persistent interval IDs
@@ -318,10 +502,24 @@ def build_drillhole_polylines(
 
 
 def _get_lith_code(intervals: List[Dict[str, float]], depth: float) -> str:
-    for interval in intervals:
-        if interval["from"] <= depth < interval["to"]:
-            return interval["code"]
+    # DH-07 FIX: Use closed interval [from, to] for the last interval so
+    # the exact TD boundary doesn't fall through to "Unknown".  The half-open
+    # [from, to) convention is correct for interior intervals (prevents double-
+    # counting at shared boundaries) but the last interval needs to include
+    # its endpoint.
+    for i, interval in enumerate(intervals):
+        is_last = (i == len(intervals) - 1)
+        if is_last:
+            if interval["from"] <= depth <= interval["to"]:
+                return interval["code"]
+        else:
+            if interval["from"] <= depth < interval["to"]:
+                return interval["code"]
     return "Unknown"
+
+
+# Sentinel values used in GSQ and other drillhole databases for below-detection
+_NULL_SENTINELS = frozenset({-999, -99, -1, -5, -100})
 
 
 def _get_assay_value(intervals: List[Dict[str, Dict[str, float]]], depth: float, field: str) -> float:
@@ -329,7 +527,14 @@ def _get_assay_value(intervals: List[Dict[str, Dict[str, float]]], depth: float,
         if interval["from"] <= depth < interval["to"]:
             val = interval["values"].get(field)
             if val is not None:
-                return float(val)
+                fval = float(val)
+                # DH-02 FIX: Only reject known sentinel values, NOT all negatives.
+                # Half-detection-limit proxies (e.g. -0.5) and geophysical logs
+                # (magnetic susceptibility) can have legitimate negative values.
+                # The blanket `fval < 0` was destroying valid grade data.
+                if fval in _NULL_SENTINELS:
+                    return np.nan
+                return fval
     return np.nan
 
 
