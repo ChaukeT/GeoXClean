@@ -1,4 +1,4 @@
-﻿"""
+"""
 Drillhole Data Model - High Performance (DataFrame-centric)
 
 Stores drillhole data in Pandas DataFrames for O(1) access and vectorized math.

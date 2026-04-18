@@ -155,6 +155,7 @@ class CompositeConfig:
     # Economic / indicator parameters
     cutoff_field: Optional[str] = None      # e.g. "Fe"
     cutoff_grade: Optional[float] = None
+    cutoff_operator: str = ">="             # ">=", ">", "<=", "<"
     
     # Economic compositing parameters (not "mining constraints")
     min_ore_composite_length: Optional[float] = None  # Minimum length for ore composite
@@ -286,6 +287,9 @@ class HoleAccumulator:
         Returns (average_grade, total_length) for range [start, end].
         
         Uses binary search for O(log N) lookup, then O(1) calculation.
+        
+        BUG-C05 FIX: Handles single-interval queries correctly to avoid
+        double-subtracting the full interval.
         """
         if not self.intervals:
             return 0.0, 0.0
@@ -299,13 +303,23 @@ class HoleAccumulator:
         if idx_start >= len(self.intervals):
             return 0.0, 0.0
         
-        # Handle partial start/end intervals
-        # For speed in Economic Compositing loop, we approximate
-        # if boundaries align with raw data (which they usually do).
-        # For exact calculation, we'd need to handle partial intervals,
-        # but for economic compositing this is usually sufficient.
+        # BUG-C05 FIX: Special case — query falls within a single interval
+        if idx_start == idx_end and idx_start < len(self.intervals):
+            iv = self.intervals[idx_start]
+            actual_start = max(start, iv.from_depth)
+            actual_end = min(end, iv.to_depth)
+            partial_len = actual_end - actual_start
+            if partial_len <= 1e-8:
+                return 0.0, 0.0
+            w_partial = _interval_weight(iv, partial_len, self.cfg)
+            g = _get_grade_value(iv.grades.get(self.grade_field, 0.0), self.cfg)
+            if g is None:
+                g = 0.0
+            if w_partial > 1e-8:
+                return (g * w_partial) / w_partial, w_partial
+            return 0.0, 0.0
         
-        # Get cumulative sums
+        # Get cumulative sums for range of complete intervals
         metal_start = self.cum_metal[idx_start]
         metal_end = self.cum_metal[idx_end]
         weight_start = self.cum_weight[idx_start]
@@ -314,7 +328,7 @@ class HoleAccumulator:
         metal = metal_end - metal_start
         weight = weight_end - weight_start
         
-        # Handle partial intervals at boundaries
+        # Handle partial interval at start boundary
         if idx_start < len(self.intervals):
             iv_start = self.intervals[idx_start]
             if start > iv_start.from_depth:
@@ -331,6 +345,7 @@ class HoleAccumulator:
                     metal += g_partial * w_partial
                     weight += w_partial
         
+        # Handle partial interval at end boundary
         if idx_end < len(self.intervals):
             iv_end = self.intervals[idx_end]
             if end < iv_end.to_depth:
@@ -350,6 +365,28 @@ class HoleAccumulator:
         if weight > 1e-8:
             return metal / weight, weight
         return 0.0, 0.0
+
+
+def _apply_cutoff(grade: float, cutoff: float, operator: str = ">=") -> bool:
+    """Apply cutoff comparison using the configured operator."""
+    if operator == ">=":
+        return grade >= cutoff
+    elif operator == ">":
+        return grade > cutoff
+    elif operator == "<=":
+        return grade <= cutoff
+    elif operator == "<":
+        return grade < cutoff
+    return grade >= cutoff  # fallback
+
+
+def _meets_cutoff_tolerant(grade: float, cutoff: float, operator: str = ">=",
+                           tol: float = 1e-8) -> bool:
+    """Cutoff comparison with floating-point tolerance (for dilution checks)."""
+    if operator in (">=", ">"):
+        return grade >= cutoff - tol
+    else:  # "<=" or "<"
+        return grade <= cutoff + tol
 
 
 def _get_grade_value(grade_val: Optional[float], cfg: CompositeConfig) -> Optional[float]:
@@ -408,6 +445,28 @@ class CompositingMethodEngine:
                 pass
 
     # ---------------------------------------------------------------------
+    # Pre-filtering
+    # ---------------------------------------------------------------------
+
+    @staticmethod
+    def _pre_filter_intervals(intervals: Iterable[Interval],
+                              cfg: CompositeConfig) -> List[Interval]:
+        """Remove QAQC samples and low-recovery intervals before compositing."""
+        filtered: List[Interval] = []
+        for iv in intervals:
+            if cfg.exclude_qaqc:
+                qaqc_type = (iv.flags.get("QAQC_TYPE")
+                             or iv.flags.get("qaqc_type")
+                             or iv.sample_type)
+                if qaqc_type and qaqc_type in cfg.qaqc_flags:
+                    continue
+            if cfg.min_recovery is not None and iv.recovery is not None:
+                if iv.recovery < cfg.min_recovery:
+                    continue
+            filtered.append(iv)
+        return filtered
+
+    # ---------------------------------------------------------------------
     # Public entry point
     # ---------------------------------------------------------------------
 
@@ -418,9 +477,14 @@ class CompositingMethodEngine:
         # Set progress callback for this run
         if progress_callback:
             self.set_progress_callback(progress_callback)
-        
+
         self._report_progress(0, f"Starting {cfg.method.value} compositing...")
-        
+
+        # Pre-filter QAQC and low-recovery intervals for ALL methods
+        # (previously only ATTRIBUTE_FILTERED applied this filter)
+        if cfg.exclude_qaqc or cfg.min_recovery is not None:
+            intervals = self._pre_filter_intervals(intervals, cfg)
+
         if cfg.method == CompositingMethod.FIXED_LENGTH:
             result = self._composite_fixed_length_parallel(intervals, cfg)
         elif cfg.method == CompositingMethod.INDICATOR:
@@ -553,9 +617,10 @@ class CompositingMethodEngine:
         total_length: float = 0.0
         total_mass: float = 0.0  # length * density
         sample_count: int = 0
+        seen_intervals: set = set()  # track unique interval indices
 
         def flush_composite(end_depth: float, is_partial: bool = False):
-            nonlocal num_sums, w_sums, total_length, total_mass, sample_count, comp_start
+            nonlocal num_sums, w_sums, total_length, total_mass, sample_count, comp_start, seen_intervals
 
             if not w_sums:
                 # nothing accumulated
@@ -599,6 +664,7 @@ class CompositingMethodEngine:
             total_length = 0.0
             total_mass = 0.0
             sample_count = 0
+            seen_intervals = set()
             comp_start = end_depth
 
         prev_iv: Optional[Interval] = None
@@ -638,7 +704,9 @@ class CompositingMethodEngine:
                 if iv.density is not None:
                     total_mass += take_len * iv.density
 
-                sample_count += 1
+                if iv_idx not in seen_intervals:
+                    sample_count += 1
+                    seen_intervals.add(iv_idx)
                 curr_pos += take_len
 
                 # If we hit the composite target, flush
@@ -726,6 +794,9 @@ class CompositingMethodEngine:
                         prev_comp.metadata["support"] = new_length
                         prev_comp.metadata["merged_partial"] = True
 
+                        # BUG-C03 FIX: Update to_depth to reflect merged data extent
+                        prev_comp.to_depth = comp_start + partial_length
+
                         if new_length > 0 and new_mass > 0:
                             prev_comp.grades["density"] = new_mass / new_length
                     else:
@@ -771,6 +842,9 @@ class CompositingMethodEngine:
                             prev_comp.metadata["support"] = new_length
                             prev_comp.metadata["merged_partial_auto"] = True
 
+                            # BUG-C03 FIX: Update to_depth to reflect merged data extent
+                            prev_comp.to_depth = comp_start + partial_length
+
                             if new_length > 0 and new_mass > 0:
                                 prev_comp.grades["density"] = new_mass / new_length
                         else:
@@ -798,7 +872,7 @@ class CompositingMethodEngine:
             if g is None:
                 ind_val = None
             else:
-                ind_val = 1.0 if g >= cfg.cutoff_grade else 0.0
+                ind_val = 1.0 if _apply_cutoff(g, cfg.cutoff_grade, cfg.cutoff_operator) else 0.0
 
             # Fix #3: Use renamed field and clear other grades to avoid confusion
             new_grades = {new_field_name: ind_val}
@@ -976,10 +1050,12 @@ class CompositingMethodEngine:
                 # weight slice = mass
                 w_slice = mass_slice
 
+                # BUG-C08 FIX: Use _get_grade_value for consistent null handling
                 for k, v in iv.grades.items():
-                    if v is None:
-                        continue
-                    num_sums[k] = num_sums.get(k, 0.0) + v * w_slice
+                    grade_val = _get_grade_value(v, cfg)
+                    if grade_val is None:
+                        continue  # treat_null_as_zero=False: skip
+                    num_sums[k] = num_sums.get(k, 0.0) + grade_val * w_slice
                     w_sums[k] = w_sums.get(k, 0.0) + w_slice
 
                 total_length += take_len
@@ -1047,6 +1123,9 @@ class CompositingMethodEngine:
                     prev_comp.metadata["support"] = new_length
                     prev_comp.metadata["merged_partial"] = True
 
+                    # BUG-C03 FIX: Update to_depth to reflect merged data extent
+                    prev_comp.to_depth = comp_start + partial_length
+
                     if new_length > 0 and new_mass > 0:
                         prev_comp.grades["density"] = new_mass / new_length
                 else:
@@ -1090,6 +1169,9 @@ class CompositingMethodEngine:
                         prev_comp.metadata["element_weights"] = prev_weights
                         prev_comp.metadata["support"] = new_length
                         prev_comp.metadata["merged_partial_auto"] = True
+
+                        # BUG-C03 FIX: Update to_depth to reflect merged data extent
+                        prev_comp.to_depth = comp_start + partial_length
 
                         if new_length > 0 and new_mass > 0:
                             prev_comp.grades["density"] = new_mass / new_length
@@ -1178,9 +1260,10 @@ class CompositingMethodEngine:
         total_length: float = 0.0
         total_mass: float = 0.0
         sample_count: int = 0
+        seen_intervals: set = set()
 
         def flush_composite(end_depth: float):
-            nonlocal num_sums, w_sums, total_length, total_mass, sample_count, comp_start
+            nonlocal num_sums, w_sums, total_length, total_mass, sample_count, comp_start, seen_intervals
 
             if not w_sums:
                 comp_start = end_depth
@@ -1222,9 +1305,10 @@ class CompositingMethodEngine:
             total_length = 0.0
             total_mass = 0.0
             sample_count = 0
+            seen_intervals = set()
             comp_start = end_depth
 
-        for iv in intervals:
+        for iv_idx, iv in enumerate(intervals):
             iv_from = iv.from_depth
             iv_to = iv.to_depth
             curr_pos = iv_from
@@ -1249,26 +1333,87 @@ class CompositingMethodEngine:
 
                 w_slice = _interval_weight(iv, take_len, cfg)
 
+                # BUG-C07 FIX: Use _get_grade_value for consistent null handling
                 for k, v in iv.grades.items():
-                    if v is None:
-                        continue
-                    num_sums[k] = num_sums.get(k, 0.0) + v * w_slice
+                    grade_val = _get_grade_value(v, cfg)
+                    if grade_val is None:
+                        continue  # treat_null_as_zero=False: skip
+                    num_sums[k] = num_sums.get(k, 0.0) + grade_val * w_slice
                     w_sums[k] = w_sums.get(k, 0.0) + w_slice
 
                 total_length += take_len
                 if iv.density is not None:
                     total_mass += take_len * iv.density
 
-                sample_count += 1
+                if iv_idx not in seen_intervals:
+                    sample_count += 1
+                    seen_intervals.add(iv_idx)
                 curr_pos += take_len
 
                 if abs(curr_pos - comp_end_target) <= 1e-8:
                     flush_composite(comp_end_target)
                     comp_end_target = comp_start + bh
 
-        # final composite (partial bench at bottom)
+        # final composite (partial bench at bottom) — respect partial_strategy
         if w_sums:
-            flush_composite(comp_start + total_length)
+            is_partial = total_length < bh - 1e-6
+            if not is_partial:
+                flush_composite(comp_end_target)
+            elif cfg.partial_strategy == PartialStrategy.KEEP:
+                flush_composite(comp_start + total_length)
+            elif cfg.partial_strategy == PartialStrategy.DISCARD:
+                pass  # drop partial
+            elif cfg.partial_strategy == PartialStrategy.MERGE:
+                if composites:
+                    prev_comp = composites[-1]
+                    prev_weights = prev_comp.metadata.get("element_weights", {})
+                    for k in set(prev_comp.grades.keys()) | set(num_sums.keys()):
+                        w_prev = prev_weights.get(k, 0.0)
+                        w_part = w_sums.get(k, 0.0)
+                        if w_prev == 0 and w_part == 0:
+                            continue
+                        g_prev = prev_comp.grades.get(k)
+                        g_part = (num_sums[k] / w_sums[k]) if k in num_sums and w_sums.get(k, 0) > 0 else None
+                        n_prev = g_prev * w_prev if g_prev is not None else 0.0
+                        n_part = g_part * w_part if g_part is not None else 0.0
+                        w_tot = w_prev + w_part
+                        if w_tot > 0:
+                            prev_comp.grades[k] = (n_prev + n_part) / w_tot
+                            prev_weights[k] = w_tot
+                    prev_comp.to_depth = comp_start + total_length
+                    prev_comp.metadata["element_weights"] = prev_weights
+                    prev_comp.metadata["merged_partial"] = True
+                else:
+                    flush_composite(comp_start + total_length)
+            elif cfg.partial_strategy == PartialStrategy.AUTO:
+                frac = total_length / bh if bh > 0 else 0.0
+                if frac >= cfg.auto_partial_fraction:
+                    flush_composite(comp_start + total_length)
+                elif composites:
+                    # Merge into previous (same as MERGE logic above)
+                    prev_comp = composites[-1]
+                    prev_weights = prev_comp.metadata.get("element_weights", {})
+                    for k in set(prev_comp.grades.keys()) | set(num_sums.keys()):
+                        w_prev = prev_weights.get(k, 0.0)
+                        w_part = w_sums.get(k, 0.0)
+                        if w_prev == 0 and w_part == 0:
+                            continue
+                        g_prev = prev_comp.grades.get(k)
+                        g_part = (num_sums[k] / w_sums[k]) if k in num_sums and w_sums.get(k, 0) > 0 else None
+                        n_prev = g_prev * w_prev if g_prev is not None else 0.0
+                        n_part = g_part * w_part if g_part is not None else 0.0
+                        w_tot = w_prev + w_part
+                        if w_tot > 0:
+                            prev_comp.grades[k] = (n_prev + n_part) / w_tot
+                            prev_weights[k] = w_tot
+                    prev_comp.to_depth = comp_start + total_length
+                    prev_comp.metadata["element_weights"] = prev_weights
+                    prev_comp.metadata["merged_partial_auto"] = True
+                else:
+                    flush_composite(comp_start + total_length)
+            else:
+                # Default: keep
+                flush_composite(comp_start + total_length)
 
         return composites
 
@@ -1500,9 +1645,10 @@ class CompositingMethodEngine:
                 w_slice = _interval_weight(iv, tt_slice, cfg)
 
                 for k, v in iv.grades.items():
-                    if v is None:
-                        continue
-                    num_sums[k] = num_sums.get(k, 0.0) + v * w_slice
+                    grade_val = _get_grade_value(v, cfg)
+                    if grade_val is None:
+                        continue  # treat_null_as_zero=False: skip
+                    num_sums[k] = num_sums.get(k, 0.0) + grade_val * w_slice
                     w_sums[k] = w_sums.get(k, 0.0) + w_slice
 
                 total_length += take_len
@@ -1574,6 +1720,9 @@ class CompositingMethodEngine:
                         prev_comp.metadata["element_weights"] = prev_weights
                         prev_comp.metadata["support_downhole"] = new_len
                         prev_comp.metadata["merged_partial"] = True
+
+                        # BUG-C03 FIX: Update to_depth to reflect merged data extent
+                        prev_comp.to_depth = comp_start + partial_length
 
                         if new_len > 0 and new_mass > 0:
                             prev_comp.grades["density"] = new_mass / new_len
@@ -1729,9 +1878,20 @@ class CompositingMethodEngine:
         if cfg.composite_twice:
             # First pass
             first_pass = self._composite_economic_single_pass(intervals, cfg)
-            # Convert composites back to intervals for second pass
-            # (This is a simplification - in practice you'd use the ore/waste classification)
-            return self._composite_economic_single_pass(intervals, cfg)
+            
+            # BUG-C04 FIX: Convert first-pass composites back to intervals for second pass.
+            # This refines ore/waste boundaries by re-evaluating using the composited grades.
+            second_pass_intervals: List[Interval] = []
+            for comp in first_pass:
+                second_pass_intervals.append(Interval(
+                    hole_id=comp.hole_id,
+                    from_depth=comp.from_depth,
+                    to_depth=comp.to_depth,
+                    grades=dict(comp.grades),
+                    domain=comp.metadata.get("class"),  # ORE/WASTE from first pass
+                    density=comp.grades.get("density"),
+                ))
+            return self._composite_economic_single_pass(second_pass_intervals, cfg)
         else:
             return self._composite_economic_single_pass(intervals, cfg)
     
@@ -1773,7 +1933,7 @@ class CompositingMethodEngine:
             g = iv.grades.get(cfg.cutoff_field)
             if g is None:
                 return False
-            return g >= cfg.cutoff_grade
+            return _apply_cutoff(g, cfg.cutoff_grade, cfg.cutoff_operator)
         
         # Step 1: Classify all intervals as ore/waste
         classified_intervals: List[Dict[str, Any]] = []
@@ -1803,26 +1963,28 @@ class CompositingMethodEngine:
                 if ore_flag == current_flag:
                     seg_end = item["to"]
                 else:
+                    # C10 FIX: Use proper overlap logic with explicit parentheses.
+                    # An interval overlaps the segment if it doesn't end before the
+                    # segment starts AND doesn't start after the segment ends.
                     segments.append({
                         "start": seg_start,
                         "end": seg_end,
                         "is_ore": current_flag,
-                        "intervals": [iv for iv in classified_intervals 
-                                     if seg_start <= iv["from"] < seg_end or 
-                                        seg_start < iv["to"] <= seg_end]
+                        "intervals": [iv for iv in classified_intervals
+                                     if not (iv["to"] <= seg_start or iv["from"] >= seg_end)]
                     })
                     current_flag = ore_flag
                     seg_start = item["from"]
                     seg_end = item["to"]
-        
+
         if seg_start is not None and seg_end is not None:
+            # C10 FIX: Same proper overlap logic
             segments.append({
                 "start": seg_start,
                 "end": seg_end,
                 "is_ore": current_flag,
-                "intervals": [iv for iv in classified_intervals 
-                             if seg_start <= iv["from"] < seg_end or 
-                                seg_start < iv["to"] <= seg_end]
+                "intervals": [iv for iv in classified_intervals
+                             if not (iv["to"] <= seg_start or iv["from"] >= seg_end)]
             })
         
         if not segments:
@@ -1985,15 +2147,15 @@ class CompositingMethodEngine:
         
         if dilution_rule == EconomicDilutionRule.BASIC:
             # Basic: simple length-weighted average test
-            # Accept if combined average grade is >= cutoff
-            return combined_avg_grade >= cfg.cutoff_grade - 1e-8
-        
+            # Accept if combined average grade still meets cutoff
+            return _meets_cutoff_tolerant(combined_avg_grade, cfg.cutoff_grade, cfg.cutoff_operator)
+
         elif dilution_rule == EconomicDilutionRule.ADVANCED:
             # Advanced: more conservative
-            # 1. Combined average must be >= cutoff
+            # 1. Combined average must meet cutoff
             # 2. The waste-ore pair itself should not dilute too much
             #    (i.e., the ore segment in the pair should be significant)
-            if combined_avg_grade < cfg.cutoff_grade - 1e-8:
+            if not _meets_cutoff_tolerant(combined_avg_grade, cfg.cutoff_grade, cfg.cutoff_operator):
                 return False
             
             # Additional check: ore segment in the pair should be substantial
@@ -2012,9 +2174,9 @@ class CompositingMethodEngine:
             # 1. Combined average must be >= cutoff
             # 2. Check for waste-ore-waste patterns that would be below cutoff
             
-            if combined_avg_grade < cfg.cutoff_grade - 1e-8:
+            if not _meets_cutoff_tolerant(combined_avg_grade, cfg.cutoff_grade, cfg.cutoff_operator):
                 return False
-            
+
             # Check if adding this waste-ore pair creates a waste-ore-waste pattern
             # that would be below cutoff. This requires looking at the structure.
             # For now, we check if the waste segment alone is too large relative to ore
@@ -2047,8 +2209,8 @@ class CompositingMethodEngine:
                         # Fix #4: Use math.isclose for robust floating point comparison
                         wow_avg = wow_linear / wow_length if not math.isclose(wow_length, 0.0, abs_tol=1e-8) else 0.0
                         
-                        # Reject if waste-ore-waste pattern is below cutoff
-                        if wow_avg < cfg.cutoff_grade - 1e-8:
+                        # Reject if waste-ore-waste pattern fails cutoff
+                        if not _meets_cutoff_tolerant(wow_avg, cfg.cutoff_grade, cfg.cutoff_operator):
                             return False
                         break  # Only check the last waste segment
             
@@ -2063,13 +2225,18 @@ class CompositingMethodEngine:
                                   grade_field: str,
                                   cfg: CompositeConfig) -> Tuple[float, float]:
         """
-        Calculate length-weighted average grade for a segment.
+        Calculate weighted average grade for a segment.
+        
+        BUG-C01 FIX: Divides by total WEIGHT, not total length.
+        Under DENSITY/MASS weighting, weight = length × density, so we must
+        accumulate and divide by the same quantity used in the numerator.
         
         Returns:
-            (average_grade, total_length) tuple
+            (average_grade, total_weight) tuple
+            total_weight is the sum of weights (== total_length for LENGTH weighting)
         """
-        total_length = 0.0
-        total_grade_length = 0.0  # grade * length
+        total_weight = 0.0
+        total_grade_weight = 0.0  # grade * weight
         
         for iv in intervals:
             if iv.to_depth <= start or iv.from_depth >= end:
@@ -2084,17 +2251,17 @@ class CompositingMethodEngine:
             grade = iv.grades.get(grade_field)
             grade_val = _get_grade_value(grade, cfg)
             if grade_val is not None:
-                # Use weighting mode
+                # Use weighting mode — weight may differ from length under DENSITY/MASS
                 weight = _interval_weight(iv, length, cfg)
-                total_grade_length += grade_val * weight
-                total_length += length
+                total_grade_weight += grade_val * weight
+                total_weight += weight  # BUG-C01 FIX: accumulate weight, not length
         
-        if total_length > 1e-8:
-            avg_grade = total_grade_length / total_length
+        if total_weight > 1e-8:
+            avg_grade = total_grade_weight / total_weight
         else:
             avg_grade = 0.0
         
-        return avg_grade, total_length
+        return avg_grade, total_weight
     
     def _calculate_linear_grade(self,
                                hole_id: str,
@@ -2104,16 +2271,28 @@ class CompositingMethodEngine:
                                cfg: CompositeConfig) -> float:
         """
         Calculate linear grade (grade * length) for a segment.
-        
+
         Linear grade = average_grade * total_length
         This represents the total "grade content" in the segment.
+        Under density weighting, _calculate_weighted_grade returns total
+        *weight* (mass), not length.  We need actual length here.
         """
         if cfg.cutoff_field is None:
             return 0.0
-        
-        avg_grade, total_length = self._calculate_weighted_grade(
+
+        avg_grade, _ = self._calculate_weighted_grade(
             intervals, start, end, cfg.cutoff_field, cfg
         )
+        # Compute actual total length (not mass-weighted)
+        total_length = 0.0
+        for iv in intervals:
+            if iv.to_depth <= start or iv.from_depth >= end:
+                continue
+            iv_from = max(iv.from_depth, start)
+            iv_to = min(iv.to_depth, end)
+            seg_len = iv_to - iv_from
+            if seg_len > 1e-8:
+                total_length += seg_len
         return avg_grade * total_length
     
     def _expand_waste_composites(self,
@@ -2127,6 +2306,9 @@ class CompositingMethodEngine:
         Only applies to waste composites bounded on both sides by ore.
         Expansion takes segments from surrounding ore composites while minimizing
         loss from ore composites and ensuring ore constraints are still met.
+        
+        BUG-C11 FIX: After adjusting ore composite boundaries, recalculate
+        their grades over the new range instead of leaving stale grades.
         """
         if not composites or cfg.min_waste_composite_length is None:
             return composites
@@ -2152,35 +2334,31 @@ class CompositingMethodEngine:
                 
                 if waste_len < cfg.min_waste_composite_length - 1e-8:
                     # Need to expand this waste composite
-                    # Try to expand into adjacent ore composites
                     expansion_needed = cfg.min_waste_composite_length - waste_len
                     
-                    # Try expanding upward first (into previous ore composite)
                     expanded_waste_start = comp.from_depth
                     expanded_waste_end = comp.to_depth
                     
                     if i > 0:
                         prev_ore = expanded[-1]
                         if prev_ore.metadata.get("class") == "ORE":
-                            # Calculate how much we can take from previous ore
                             prev_ore_len = prev_ore.to_depth - prev_ore.from_depth
-                            
-                            # Check if taking from previous ore would break min_ore_composite_length
                             remaining_prev_ore_len = prev_ore_len - expansion_needed / 2
                             
                             if (cfg.min_ore_composite_length is None or 
                                 remaining_prev_ore_len >= cfg.min_ore_composite_length - 1e-8):
-                                # Safe to take from previous ore
                                 take_from_prev = min(expansion_needed / 2, prev_ore_len)
                                 expanded_waste_start = prev_ore.to_depth - take_from_prev
                                 
-                                # Update previous ore composite
-                                prev_ore.to_depth = expanded_waste_start
-                                prev_ore.metadata["support"] = prev_ore.to_depth - prev_ore.from_depth
+                                # BUG-C11 FIX: Rebuild previous ore composite with new boundary
+                                new_prev_ore = self._build_segment_composite(
+                                    hole_id, intervals, prev_ore.from_depth, expanded_waste_start, cfg, "ORE"
+                                )
+                                if new_prev_ore:
+                                    expanded[-1] = new_prev_ore  # Replace with recalculated version
                                 
                                 expansion_needed -= take_from_prev
                     
-                    # Try expanding downward (into next ore composite)
                     if expansion_needed > 1e-8 and i + 1 < len(composites):
                         next_ore = composites[i + 1]
                         if next_ore.metadata.get("class") == "ORE":
@@ -2192,9 +2370,12 @@ class CompositingMethodEngine:
                                 take_from_next = min(expansion_needed, next_ore_len)
                                 expanded_waste_end = next_ore.from_depth + take_from_next
                                 
-                                # Update next ore composite
-                                next_ore.from_depth = expanded_waste_end
-                                next_ore.metadata["support"] = next_ore.to_depth - next_ore.from_depth
+                                # BUG-C11 FIX: Rebuild next ore composite with new boundary
+                                new_next_ore = self._build_segment_composite(
+                                    hole_id, intervals, expanded_waste_end, next_ore.to_depth, cfg, "ORE"
+                                )
+                                if new_next_ore:
+                                    composites[i + 1] = new_next_ore  # Replace with recalculated version
                     
                     # Rebuild expanded waste composite
                     if expanded_waste_end - expanded_waste_start >= waste_len + 1e-8:

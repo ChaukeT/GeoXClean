@@ -48,6 +48,25 @@ from .database import DrillholeDatabaseManager
 from .reporting import DrillholeStatistics, ReportGenerator
 from .plotting import DownholePlotter, StripLogPlotter, FenceDiagramPlotter
 
+# Backward-compatibility re-exports — security.py and user_auth.py were moved
+# to core/ (L-05 refactor). Import from core.security / core.user_auth directly.
+from ..core.user_auth import (  # noqa: F401
+    Permission,
+    Role,
+    ROLE_PERMISSIONS,
+    User,
+    UserManager,
+    get_user_manager,
+    get_current_user,
+    require_permission,
+)
+from ..core.security import (  # noqa: F401
+    AccessType,
+    AccessLog,
+    SecurityManager,
+    get_security_manager,
+)
+
 __all__ = [
     # Data model
     "Collar",

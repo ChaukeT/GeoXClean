@@ -15,6 +15,7 @@ You decide where to persist cleaned tables.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -26,7 +27,12 @@ from .drillhole_validation import (
     ValidationViolation,
     ValidationResult,
     run_drillhole_validation,
+    _find_column,
 )
+
+# Detection limit pattern: "<0.01", "<=0.5", ">10", "≤0.01", "BDL", "ND", "TR"
+_DL_RE = re.compile(r'^[<≤]\s*([\d.]+)', re.UNICODE)
+_DL_KEYWORDS = {"BDL", "ND", "TRACE", "TR"}
 
 
 # =========================================================
@@ -88,6 +94,21 @@ def _record_fix(
     )
 
 
+def _clamp_confidence(deviation: float) -> float:
+    """Confidence score for a range-clamping fix based on deviation size.
+
+    - ≤5 units  → 0.95  (rounding / instrument drift)
+    - ≤15 units → 0.85  (data-entry typo)
+    - >15 units → 0.70  (systemic error, less certain)
+    """
+    abs_dev = abs(deviation)
+    if abs_dev <= 5.0:
+        return 0.95
+    elif abs_dev <= 15.0:
+        return 0.85
+    return 0.70
+
+
 # =========================================================
 # COLLAR AUTO-FIX
 # =========================================================
@@ -100,7 +121,8 @@ def autofix_collars(
     """
     Conservative collar fixes:
     - normalise hole_id (strip + uppercase)
-    
+    - clamp negative total_depth to 0
+
     SAFETY: Never raises exceptions, returns original data if fixes fail.
     """
     if collars is None or collars.empty:
@@ -133,28 +155,35 @@ def autofix_collars(
     except Exception:
         pass  # If fixing fails, return partially fixed data
 
+    # 2) Clamp negative total_depth to 0
+    td_col = _find_column(df, ["total_depth", "max_depth", "length", "TOTAL_DEPTH", "MAX_DEPTH", "EOH"])
+    if td_col:
+        try:
+            for idx, row in df.iterrows():
+                td_old = row.get(td_col)
+                if pd.isna(td_old):
+                    continue
+                try:
+                    td_val = float(td_old)
+                except (ValueError, TypeError):
+                    continue
+
+                if td_val < 0:
+                    df.at[idx, td_col] = 0.0
+                    _record_fix(
+                        fixes=fixes,
+                        table="collars",
+                        rule_code="COLLAR_TD_CLAMPED",
+                        hole_id=str(row.get(hole_id_col, "")),
+                        row_index=idx,
+                        col_changes={td_col: (td_old, 0.0)},
+                        reason=f"Clamped negative total_depth {td_val:.2f} to 0.",
+                        confidence=_clamp_confidence(td_val),
+                    )
+        except Exception:
+            pass
+
     return df
-
-
-# =========================================================
-# COLUMN DETECTION HELPERS
-# =========================================================
-
-def _find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """
-    Find a column in DataFrame by checking multiple candidate names.
-    Returns the first matching column name, or None if not found.
-    """
-    if df is None or df.empty:
-        return None
-    for col in candidates:
-        if col in df.columns:
-            return col
-        # Case-insensitive check
-        for actual_col in df.columns:
-            if actual_col.lower() == col.lower():
-                return actual_col
-    return None
 
 
 # =========================================================
@@ -170,8 +199,10 @@ def autofix_surveys(
     """
     Conservative survey fixes:
     - normalise azimuth into [0, 360)
+    - clamp dip to [cfg.dip_min, cfg.dip_max]
+    - clamp azimuth to [cfg.az_min, cfg.az_max] after normalisation
     - interpolate surveys in large gaps (spacing > max_survey_spacing)
-    
+
     Supports multiple depth column schemas:
     - 'depth' (single column)
     - 'depth_from' / 'depth_to' (interval columns)
@@ -226,33 +257,118 @@ def autofix_surveys(
                     confidence=1.0,
                 )
 
-    # 2) Clamp dip to valid range
+    # 1b) Clamp dip to valid range [cfg.dip_min, cfg.dip_max]
     if dip_col:
         for idx, row in df.iterrows():
             dip_old = row.get(dip_col)
             if pd.isna(dip_old):
                 continue
-
             try:
                 dip_val = float(dip_old)
             except (ValueError, TypeError):
                 continue
 
-            # Clamp to [dip_min, dip_max]
-            dip_new = max(cfg.dip_min, min(cfg.dip_max, dip_val))
+            if dip_val < cfg.dip_min:
+                dip_new = cfg.dip_min
+            elif dip_val > cfg.dip_max:
+                dip_new = cfg.dip_max
+            else:
+                continue  # In range — nothing to do
 
-            if not np.isclose(dip_new, dip_val):
-                df.at[idx, dip_col] = dip_new
+            deviation = dip_val - dip_new
+            df.at[idx, dip_col] = dip_new
+            _record_fix(
+                fixes=fixes,
+                table="surveys",
+                rule_code="SURVEY_DIP_CLAMPED",
+                hole_id=str(row.get(hole_id_col, "")),
+                row_index=idx,
+                col_changes={dip_col: (dip_old, dip_new)},
+                reason=f"Clamped dip {dip_val:.2f} to [{cfg.dip_min}, {cfg.dip_max}] (deviation: {deviation:+.2f}).",
+                confidence=_clamp_confidence(deviation),
+            )
+
+    # 1c) Clamp azimuth to [cfg.az_min, cfg.az_max] after normalisation
+    if azimuth_col:
+        for idx, row in df.iterrows():
+            az_raw = row.get(azimuth_col)
+            if pd.isna(az_raw):
+                continue
+            try:
+                az_val = float(az_raw)
+            except (ValueError, TypeError):
+                continue
+
+            if az_val < cfg.az_min:
+                az_new = cfg.az_min
+            elif az_val > cfg.az_max:
+                az_new = cfg.az_max
+            else:
+                continue
+
+            deviation = az_val - az_new
+            df.at[idx, azimuth_col] = az_new
+            _record_fix(
+                fixes=fixes,
+                table="surveys",
+                rule_code="SURVEY_AZ_CLAMPED",
+                hole_id=str(row.get(hole_id_col, "")),
+                row_index=idx,
+                col_changes={azimuth_col: (az_raw, az_new)},
+                reason=f"Clamped azimuth {az_val:.2f} to [{cfg.az_min}, {cfg.az_max}] (deviation: {deviation:+.2f}).",
+                confidence=_clamp_confidence(deviation),
+            )
+
+    # 2) Insert missing survey at depth 0 (collar orientation)
+    if dip_col and azimuth_col:
+        collar_rows: List[pd.Series] = []
+        try:
+            for hid, g in df.groupby(hole_id_col, sort=False):
+                g_sorted = g.sort_values(depth_col)
+                first_depth = g_sorted[depth_col].iloc[0]
+                try:
+                    first_depth_f = float(first_depth)
+                except (ValueError, TypeError):
+                    continue
+                if first_depth_f <= cfg.survey_start_tolerance:
+                    continue  # Already has a near-surface survey
+
+                # Create depth-0 survey: assume vertical (dip=-90), copy azimuth from first survey
+                first_row = g_sorted.iloc[0].copy()
+                first_az = first_row.get(azimuth_col, 0.0)
+                try:
+                    first_az = float(first_az)
+                except (ValueError, TypeError):
+                    first_az = 0.0
+
+                new_row = first_row.copy()
+                new_row[depth_col] = 0.0
+                new_row[dip_col] = -90.0
+                new_row[azimuth_col] = first_az
+                collar_rows.append(new_row)
+
                 _record_fix(
                     fixes=fixes,
                     table="surveys",
-                    rule_code="SURVEY_DIP_CLAMPED",
-                    hole_id=str(row.get(hole_id_col, "")),
-                    row_index=idx,
-                    col_changes={dip_col: (dip_old, dip_new)},
-                    reason=f"Clamped dip from {dip_old:.4f}° to valid range [{cfg.dip_min}°, {cfg.dip_max}°].",
-                    confidence=0.95,
+                    rule_code="SURVEY_START_INSERTED",
+                    hole_id=str(hid),
+                    row_index=-1,
+                    col_changes={
+                        depth_col: (None, 0.0),
+                        dip_col: (None, -90.0),
+                        azimuth_col: (None, first_az),
+                    },
+                    reason=f"Inserted collar survey at depth 0 (vertical, az={first_az:.1f}°). "
+                           f"First survey was at {first_depth_f:.1f} m.",
+                    confidence=0.8,
                 )
+        except Exception:
+            pass
+
+        if collar_rows:
+            collar_df = pd.DataFrame(collar_rows)
+            df = pd.concat([df, collar_df], ignore_index=True)
+            df = df.sort_values([hole_id_col, depth_col]).reset_index(drop=True)
 
     # 3) Interpolate surveys in large gaps (only if we have all needed columns)
     if not azimuth_col or not dip_col:
@@ -334,7 +450,251 @@ def autofix_surveys(
         new_df = pd.DataFrame(new_rows)
         df = pd.concat([df, new_df], ignore_index=True)
         df = df.sort_values([hole_id_col, depth_col]).reset_index(drop=True)
-    
+
+    # 4) Fix SURVEY_AZ_CURVATURE — detect back-bearing (±180°) azimuth errors
+    #    A 176° change over 10 m is almost certainly a back-bearing / front-bearing
+    #    transcription error, not a real dogleg.  If the angular diff between
+    #    consecutive azimuths is > az_reversal_deg (default 90°), check whether
+    #    flipping the suspect reading by ±180° produces a smooth trajectory.
+    if azimuth_col and dip_col:
+        try:
+            for hid, g in df.groupby(hole_id_col, sort=False):
+                g_sorted = g.sort_values(depth_col)
+                idxs = list(g_sorted.index)
+                if len(idxs) < 2:
+                    continue
+
+                azs = g_sorted[azimuth_col].to_numpy(dtype=float)
+                deps = g_sorted[depth_col].to_numpy(dtype=float)
+
+                for i in range(1, len(idxs)):
+                    d_depth = deps[i] - deps[i - 1]
+                    if d_depth <= 0:
+                        continue
+
+                    diff = abs(azs[i] - azs[i - 1])
+                    if diff > 180:
+                        diff = 360 - diff
+
+                    rate = diff / d_depth * 10.0  # deg per 10 m
+                    if rate <= cfg.max_az_change_deg:
+                        continue  # within tolerance
+
+                    # Candidate: flip by 180°
+                    az_old = float(azs[i])
+                    az_flipped = (az_old + 180.0) % 360.0
+
+                    # Check if flipped value produces a smaller curvature
+                    diff_flipped = abs(az_flipped - azs[i - 1])
+                    if diff_flipped > 180:
+                        diff_flipped = 360 - diff_flipped
+
+                    # Also check against the NEXT survey if available
+                    forward_ok = True
+                    if i + 1 < len(azs):
+                        diff_fwd_old = abs(azs[i] - azs[i + 1])
+                        if diff_fwd_old > 180:
+                            diff_fwd_old = 360 - diff_fwd_old
+                        diff_fwd_flip = abs(az_flipped - azs[i + 1])
+                        if diff_fwd_flip > 180:
+                            diff_fwd_flip = 360 - diff_fwd_flip
+                        # Flipped value should not make the forward curvature worse
+                        if diff_fwd_flip > diff_fwd_old + 10:
+                            forward_ok = False
+
+                    if diff_flipped < diff * 0.5 and forward_ok:
+                        # Apply the fix
+                        idx = idxs[i]
+                        df.at[idx, azimuth_col] = az_flipped
+                        azs[i] = az_flipped  # update local array for next iteration
+
+                        _record_fix(
+                            fixes=fixes,
+                            table="surveys",
+                            rule_code="SURVEY_AZ_BACK_BEARING",
+                            hole_id=str(hid),
+                            row_index=idx,
+                            col_changes={azimuth_col: (az_old, az_flipped)},
+                            reason=(
+                                f"Back-bearing correction: azimuth {az_old:.1f}° → "
+                                f"{az_flipped:.1f}° (curvature {rate:.1f}°/10 m → "
+                                f"{diff_flipped / d_depth * 10:.1f}°/10 m)."
+                            ),
+                            confidence=0.85 if forward_ok and diff_flipped < 5 else 0.70,
+                        )
+        except Exception:
+            pass
+
+    # 4b) Fix remaining SURVEY_DIP_CURVATURE and SURVEY_AZ_CURVATURE
+    #     After back-bearing correction (step 4), any remaining high-curvature
+    #     stations are likely transcription errors or instrument glitches.
+    #     Safe fix: replace the outlier dip/azimuth with a weighted average
+    #     of its immediate neighbours (linear interpolation), which smooths
+    #     the spike while preserving the overall trajectory.
+    if dip_col and azimuth_col:
+        try:
+            for hid, g in df.groupby(hole_id_col, sort=False):
+                g_sorted = g.sort_values(depth_col)
+                idxs = list(g_sorted.index)
+                if len(idxs) < 3:
+                    continue  # need at least 3 stations to smooth
+
+                dips = g_sorted[dip_col].to_numpy(dtype=float)
+                azs = g_sorted[azimuth_col].to_numpy(dtype=float)
+                deps = g_sorted[depth_col].to_numpy(dtype=float)
+
+                for i in range(1, len(idxs) - 1):
+                    d_prev = deps[i] - deps[i - 1]
+                    d_next = deps[i + 1] - deps[i]
+                    if d_prev <= 0 or d_next <= 0:
+                        continue
+
+                    # --- Dip curvature ---
+                    dip_rate = abs(dips[i] - dips[i - 1]) / d_prev * 10.0
+                    if np.isfinite(dip_rate) and dip_rate > cfg.max_dip_change_deg:
+                        # Smooth: weighted average of neighbours by inverse distance
+                        w_prev = 1.0 / d_prev
+                        w_next = 1.0 / d_next
+                        dip_new = (dips[i - 1] * w_prev + dips[i + 1] * w_next) / (w_prev + w_next)
+                        dip_new = round(dip_new, 2)
+                        new_rate = abs(dip_new - dips[i - 1]) / d_prev * 10.0
+                        if new_rate < dip_rate:
+                            dip_old = float(dips[i])
+                            idx = idxs[i]
+                            df.at[idx, dip_col] = dip_new
+                            dips[i] = dip_new
+                            _record_fix(
+                                fixes=fixes,
+                                table="surveys",
+                                rule_code="SURVEY_DIP_CURVATURE_SMOOTHED",
+                                hole_id=str(hid),
+                                row_index=idx,
+                                col_changes={dip_col: (dip_old, dip_new)},
+                                reason=(
+                                    f"Smoothed dip: {dip_old:.1f}° → {dip_new:.1f}° "
+                                    f"(curvature {dip_rate:.1f}°/10 m → {new_rate:.1f}°/10 m)."
+                                ),
+                                confidence=0.75,
+                            )
+
+                    # --- Azimuth curvature ---
+                    az_diff = abs(azs[i] - azs[i - 1])
+                    if az_diff > 180:
+                        az_diff = 360 - az_diff
+                    az_rate = az_diff / d_prev * 10.0
+                    if np.isfinite(az_rate) and az_rate > cfg.max_az_change_deg:
+                        # Circular weighted average for azimuth
+                        w_prev = 1.0 / d_prev
+                        w_next = 1.0 / d_next
+                        # Convert to unit vectors for proper circular mean
+                        sin_avg = (np.sin(np.radians(azs[i - 1])) * w_prev
+                                   + np.sin(np.radians(azs[i + 1])) * w_next)
+                        cos_avg = (np.cos(np.radians(azs[i - 1])) * w_prev
+                                   + np.cos(np.radians(azs[i + 1])) * w_next)
+                        az_new = float(np.degrees(np.arctan2(sin_avg, cos_avg))) % 360.0
+                        az_new = round(az_new, 2)
+                        # Verify improvement
+                        new_diff = abs(az_new - azs[i - 1])
+                        if new_diff > 180:
+                            new_diff = 360 - new_diff
+                        new_rate = new_diff / d_prev * 10.0
+                        if new_rate < az_rate:
+                            az_old = float(azs[i])
+                            idx = idxs[i]
+                            df.at[idx, azimuth_col] = az_new
+                            azs[i] = az_new
+                            _record_fix(
+                                fixes=fixes,
+                                table="surveys",
+                                rule_code="SURVEY_AZ_CURVATURE_SMOOTHED",
+                                hole_id=str(hid),
+                                row_index=idx,
+                                col_changes={azimuth_col: (az_old, az_new)},
+                                reason=(
+                                    f"Smoothed azimuth: {az_old:.1f}° → {az_new:.1f}° "
+                                    f"(curvature {az_rate:.1f}°/10 m → {new_rate:.1f}°/10 m)."
+                                ),
+                                confidence=0.70,
+                            )
+        except Exception:
+            pass
+
+    # 5) Fix SURVEY_NOT_TO_TD — extrapolate last survey to total depth
+    #    Standard industry practice: assume the hole continues with the same
+    #    dip and azimuth as the last measurement.  This is safe because survey
+    #    tools measure at discrete stations; the driller doesn't stop drilling
+    #    at the last survey depth.
+    if dip_col and azimuth_col:
+        collar_hole_col = _find_column(
+            collars, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"]
+        ) if collars is not None and not collars.empty else None
+        collar_td_col = _find_column(
+            collars, ["total_depth", "depth", "max_depth", "length", "TOTAL_DEPTH", "MAX_DEPTH", "EOH"]
+        ) if collars is not None and not collars.empty else None
+
+        td_rows: List[pd.Series] = []
+        if collar_hole_col and collar_td_col:
+            try:
+                collar_td_map: Dict[str, float] = {}
+                for _, crow in collars.iterrows():
+                    chid = str(crow.get(collar_hole_col, ""))
+                    ctd = crow.get(collar_td_col)
+                    if pd.notna(ctd):
+                        try:
+                            collar_td_map[chid] = float(ctd)
+                        except (ValueError, TypeError):
+                            pass
+
+                for hid, g in df.groupby(hole_id_col, sort=False):
+                    hid_str = str(hid)
+                    td_val = collar_td_map.get(hid_str)
+                    if td_val is None:
+                        continue
+
+                    g_sorted = g.sort_values(depth_col)
+                    last_depth = float(g_sorted[depth_col].iloc[-1])
+                    shortfall = td_val - last_depth
+
+                    if shortfall <= cfg.survey_td_tolerance:
+                        continue  # within tolerance — no fix needed
+
+                    # Extrapolate: copy last survey's dip/azimuth at TD depth
+                    last_row = g_sorted.iloc[-1].copy()
+                    last_az = float(last_row.get(azimuth_col, 0.0))
+                    last_dip = float(last_row.get(dip_col, -90.0))
+
+                    new_row = last_row.copy()
+                    new_row[depth_col] = td_val
+                    new_row[dip_col] = last_dip
+                    new_row[azimuth_col] = last_az
+                    td_rows.append(new_row)
+
+                    _record_fix(
+                        fixes=fixes,
+                        table="surveys",
+                        rule_code="SURVEY_EXTRAPOLATED_TO_TD",
+                        hole_id=hid_str,
+                        row_index=-1,
+                        col_changes={
+                            depth_col: (last_depth, td_val),
+                            dip_col: (None, last_dip),
+                            azimuth_col: (None, last_az),
+                        },
+                        reason=(
+                            f"Extrapolated survey to TD: inserted measurement at "
+                            f"{td_val:.1f} m (dip={last_dip:.1f}°, az={last_az:.1f}°). "
+                            f"Last survey was at {last_depth:.1f} m, {shortfall:.1f} m above TD."
+                        ),
+                        confidence=0.85,
+                    )
+            except Exception:
+                pass
+
+        if td_rows:
+            td_df = pd.DataFrame(td_rows)
+            df = pd.concat([df, td_df], ignore_index=True)
+            df = df.sort_values([hole_id_col, depth_col]).reset_index(drop=True)
+
     return df
 
 
@@ -351,13 +711,18 @@ def autofix_intervals(
 ) -> pd.DataFrame:
     """
     Safe interval fixes:
+    - negative from_depth / to_depth -> clamp to 0
     - small gaps -> snap next from_depth down to prev to_depth
-    - small overlaps -> snap from_depth up to prev to_depth
-    - negative/zero length -> extend to standard_sample_length (if configured)
+    - small overlaps (within max_small_overlap) -> snap from_depth up to prev to_depth
     - small overshoot beyond TD -> clamp to TD
+    - large gaps -> insert no-sample filler interval (NaN grades)
+    - assays not to TD -> extend with no-sample interval to collar TD
+
+    NOT auto-fixed (left for manual review):
+    - large overlaps (may indicate duplicate or misassigned data)
 
     Works for both assays and lithology.
-    
+
     SAFETY: Never raises exceptions, returns original data if fixes fail.
     """
     if df is None or df.empty:
@@ -395,6 +760,8 @@ def autofix_intervals(
             except Exception:
                 pass
 
+    rows_to_drop: List[int] = []
+
     try:
         for hid, g in out.groupby(hole_id_col, sort=False):
             hid_str = str(hid)
@@ -419,14 +786,81 @@ def autofix_intervals(
                     prev_to = t_old
                     continue
 
+                # 0) Clamp negative depths to 0
+                if f < 0:
+                    f_clamped = 0.0
+                    _record_fix(
+                        fixes=fixes,
+                        table=table,
+                        rule_code=f"{table.upper()}_DEPTH_CLAMPED",
+                        hole_id=hid_str,
+                        row_index=idx,
+                        col_changes={from_col: (f_old, f_clamped)},
+                        reason=f"Clamped negative from_depth {f:.2f} to 0.",
+                        confidence=_clamp_confidence(f),
+                    )
+                    out.at[idx, from_col] = f_clamped
+                    f_old = f_clamped
+                    f = f_clamped
+
+                if t < 0:
+                    t_clamped = 0.0
+                    _record_fix(
+                        fixes=fixes,
+                        table=table,
+                        rule_code=f"{table.upper()}_DEPTH_CLAMPED",
+                        hole_id=hid_str,
+                        row_index=idx,
+                        col_changes={to_col: (t_old, t_clamped)},
+                        reason=f"Clamped negative to_depth {t:.2f} to 0.",
+                        confidence=_clamp_confidence(t),
+                    )
+                    out.at[idx, to_col] = t_clamped
+                    t_old = t_clamped
+                    t = t_clamped
+
                 col_changes: Dict[str, Tuple[Any, Any]] = {}
 
-                # 1) Negative or zero length
+                # 1) Negative length — swap from/to (obvious data-entry error)
+                #    Zero length is left for manual review (ambiguous).
                 length = t - f
-                if length <= 0 and cfg.standard_sample_length is not None:
-                    t_new = f + cfg.standard_sample_length
-                    col_changes[to_col] = (t_old, t_new)
-                    t = t_new
+                if length < 0:
+                    # from > to → swap them
+                    f_new, t_new = t, f
+                    _record_fix(
+                        fixes=fixes,
+                        table=table,
+                        rule_code=f"{table.upper()}_FROM_TO_SWAPPED",
+                        hole_id=hid_str,
+                        row_index=idx,
+                        col_changes={
+                            from_col: (f_old, f_new),
+                            to_col: (t_old, t_new),
+                        },
+                        reason=f"Swapped from_depth ({f:.2f}) and to_depth ({t:.2f}) — negative length.",
+                        confidence=0.90,
+                    )
+                    out.at[idx, from_col] = f_new
+                    out.at[idx, to_col] = t_new
+                    f_old, t_old = f_new, t_new
+                    f, t = f_new, t_new
+                    length = t - f
+                if length == 0:
+                    # Zero-length interval (FROM == TO) — no sample material.
+                    # Mark for removal.
+                    _record_fix(
+                        fixes=fixes,
+                        table=table,
+                        rule_code=f"{table.upper()}_ZERO_LENGTH_REMOVED",
+                        hole_id=hid_str,
+                        row_index=idx,
+                        col_changes={},
+                        reason=f"Removed zero-length interval ({f:.2f}–{t:.2f}).",
+                        confidence=0.95,
+                    )
+                    rows_to_drop.append(idx)
+                    prev_to = t
+                    continue
 
                 # 2) Gap / overlap relative to previous interval
                 if prev_to is not None:
@@ -435,29 +869,55 @@ def autofix_intervals(
                         gap = f - prev_to_float
                         overlap = prev_to_float - f
 
-                        # Small gap – snap down
+                        # Small gap – snap down (only if within tolerance)
                         if gap > 0 and gap <= cfg.max_interval_gap:
                             f_new = prev_to_float
                             col_changes[from_col] = (f_old, f_new)
                             f = f_new
 
-                        # Overlap – snap up (fix ALL overlaps, regardless of size)
-                        if overlap > 0:
+                        # Small overlap – snap current from_depth up
+                        if overlap > 0 and overlap <= cfg.max_small_overlap:
                             f_new = prev_to_float
                             col_changes[from_col] = (f_old, f_new)
                             f = f_new
+
+                        # Large overlap – truncate PREVIOUS interval's to_depth
+                        # to current from_depth. This is standard industry practice:
+                        # the later (deeper) sample is authoritative.
+                        elif overlap > cfg.max_small_overlap:
+                            prev_idx = idxs[idxs.index(idx) - 1] if idxs.index(idx) > 0 else None
+                            if prev_idx is not None:
+                                prev_to_old = out.at[prev_idx, to_col]
+                                out.at[prev_idx, to_col] = f
+                                _record_fix(
+                                    fixes=fixes,
+                                    table=table,
+                                    rule_code=f"{table.upper()}_OVERLAP_TRUNCATED",
+                                    hole_id=hid_str,
+                                    row_index=prev_idx,
+                                    col_changes={to_col: (prev_to_old, f)},
+                                    reason=f"Truncated overlapping interval to_depth "
+                                           f"{float(prev_to_old):.2f} -> {f:.2f} "
+                                           f"(overlap {overlap:.2f} m).",
+                                    confidence=0.80,
+                                )
                     except (ValueError, TypeError):
                         pass
 
-                # 3) Slight overshoot beyond TD
+                # 3) Cap to_depth that exceeds TD
                 if td is not None:
                     try:
                         td_float = float(td)
                         overshoot = t - td_float
-                        if overshoot > 0 and overshoot <= cfg.max_interval_gap:
+                        if overshoot > 1e-3:
                             t_new = td_float
                             col_changes[to_col] = (t_old, t_new)
                             t = t_new
+                            # Also cap from_depth if it's at or beyond TD
+                            if f >= td_float:
+                                # Entire interval beyond TD — mark for drop
+                                col_changes[from_col] = (f_old, td_float)
+                                f = td_float
                     except (ValueError, TypeError):
                         pass
 
@@ -468,6 +928,21 @@ def autofix_intervals(
                     if to_col in col_changes:
                         out.at[idx, to_col] = col_changes[to_col][1]
 
+                    # Scale confidence by magnitude of change
+                    max_change = max(
+                        abs(float(v[1]) - float(v[0]))
+                        for v in col_changes.values()
+                        if v[0] is not None and v[1] is not None
+                    )
+                    if max_change <= 0.01:
+                        confidence = 1.0   # Sub-centimetre: rounding artifact
+                    elif max_change <= cfg.max_interval_gap:
+                        confidence = 0.95  # Within configured tolerance
+                    elif max_change <= cfg.max_small_overlap:
+                        confidence = 0.85  # Small overlap fix
+                    else:
+                        confidence = 0.7   # Larger fix (e.g. TD cap beyond tolerance)
+
                     _record_fix(
                         fixes=fixes,
                         table=table,
@@ -475,13 +950,204 @@ def autofix_intervals(
                         hole_id=hid_str,
                         row_index=idx,
                         col_changes=col_changes,
-                        reason="Safe interval auto-fix (gap/overlap/length/TD clamp).",
-                        confidence=0.9,
+                        reason="Safe interval auto-fix (gap/overlap/TD clamp).",
+                        confidence=confidence,
                     )
 
                 prev_to = t
     except Exception:
         pass  # If fixing fails, return partially fixed data
+
+    # Drop zero-length intervals collected during pass 1
+    if rows_to_drop:
+        out = out.drop(index=rows_to_drop, errors='ignore').reset_index(drop=True)
+
+    # ── Pass 2: Fill large gaps and extend to TD with no-sample rows ──
+    # Identify grade/value columns (everything except hole_id, from, to)
+    metadata_cols = {hole_id_col, from_col, to_col}
+    grade_cols = [c for c in out.columns if c not in metadata_cols]
+
+    filler_rows: List[Dict[str, Any]] = []
+
+    try:
+        for hid, g in out.groupby(hole_id_col, sort=False):
+            hid_str = str(hid)
+            g_sorted = g.sort_values(from_col)
+
+            td = collar_td.get(hid) or collar_td.get(hid_str)
+
+            # Collect valid intervals as (from, to) pairs
+            intervals = []
+            for idx in g_sorted.index:
+                f_val = g_sorted.at[idx, from_col]
+                t_val = g_sorted.at[idx, to_col]
+                if pd.isna(f_val) or pd.isna(t_val):
+                    continue
+                try:
+                    intervals.append((float(f_val), float(t_val)))
+                except (ValueError, TypeError):
+                    continue
+
+            if not intervals:
+                continue
+
+            # (a) Fill gaps between consecutive intervals
+            for i in range(len(intervals) - 1):
+                _, prev_end = intervals[i]
+                next_start, _ = intervals[i + 1]
+                gap = next_start - prev_end
+
+                if gap > cfg.max_interval_gap:
+                    row_data = {hole_id_col: hid, from_col: prev_end, to_col: next_start}
+                    for gc in grade_cols:
+                        row_data[gc] = np.nan
+                    filler_rows.append(row_data)
+
+                    _record_fix(
+                        fixes=fixes,
+                        table=table,
+                        rule_code=f"{table.upper()}_GAP_FILLED",
+                        hole_id=hid_str,
+                        row_index=-1,
+                        col_changes={
+                            from_col: (None, prev_end),
+                            to_col: (None, next_start),
+                        },
+                        reason=f"Inserted no-sample interval [{prev_end:.2f}, {next_start:.2f}] to fill {gap:.2f} m gap.",
+                        confidence=0.9,
+                    )
+
+            # (b) Extend to TD if assays end above total depth
+            if td is not None:
+                try:
+                    td_float = float(td)
+                    _, last_to = intervals[-1]
+                    shortfall = td_float - last_to
+
+                    if shortfall > 1.0:
+                        row_data = {hole_id_col: hid, from_col: last_to, to_col: td_float}
+                        for gc in grade_cols:
+                            row_data[gc] = np.nan
+                        filler_rows.append(row_data)
+
+                        _record_fix(
+                            fixes=fixes,
+                            table=table,
+                            rule_code=f"{table.upper()}_EXTENDED_TO_TD",
+                            hole_id=hid_str,
+                            row_index=-1,
+                            col_changes={
+                                from_col: (None, last_to),
+                                to_col: (None, td_float),
+                            },
+                            reason=f"Extended {table} to TD: inserted no-sample interval [{last_to:.2f}, {td_float:.2f}] ({shortfall:.2f} m).",
+                            confidence=0.85,
+                        )
+                except (ValueError, TypeError):
+                    pass
+    except Exception:
+        pass  # If gap-fill fails, return data with existing fixes only
+
+    # Append filler rows
+    if filler_rows:
+        filler_df = pd.DataFrame(filler_rows)
+        out = pd.concat([out, filler_df], ignore_index=True)
+        try:
+            out = out.sort_values([hole_id_col, from_col, to_col], kind="mergesort").reset_index(drop=True)
+        except Exception:
+            pass
+
+    return out
+
+
+def autofix_assay_grades(
+    assays: pd.DataFrame,
+    fixes: List[FixAction],
+) -> pd.DataFrame:
+    """
+    Fix assay grade values:
+    - Detection limit markers ("<0.01", "<=0.5", "BDL", "ND", "TR") → half-DL numeric
+    - Negative grades → clamp to 0
+
+    SAFETY: Never raises exceptions, returns original data if fixes fail.
+    """
+    if assays is None or assays.empty:
+        return assays if assays is not None else pd.DataFrame()
+
+    out = assays.copy(deep=True)
+    hole_id_col = _find_column(out, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"])
+    from_col = _find_column(out, ["from_depth", "depth_from", "from", "FROM", "DEPTH_FROM", "MFROM"])
+    to_col = _find_column(out, ["to_depth", "depth_to", "to", "TO", "DEPTH_TO", "MTO"])
+
+    # Identify grade columns (everything except structural columns)
+    skip = {hole_id_col, from_col, to_col}
+    # Also skip QAQC metadata columns
+    qaqc_cols = {"qaqc_type", "QAQC_TYPE", "qaqc", "sample_type", "SAMPLE_TYPE",
+                 "qaqc_reference_id", "QAQC_REFERENCE_ID", "crm_code", "CRM_CODE",
+                 "parent_sample_id", "PARENT_SAMPLE_ID", "sample_id", "SAMPLE_ID"}
+    skip.update(qaqc_cols)
+    grade_cols = [c for c in out.columns if c not in skip and c is not None]
+
+    try:
+        for col in grade_cols:
+            # ── 1) Detection limit markers → half-DL numeric ──
+            for idx in out.index:
+                val = out.at[idx, col]
+                if pd.isna(val):
+                    continue
+
+                val_str = str(val).strip().upper()
+                numeric_replacement = None
+
+                # Check regex pattern: "<0.01", "<=0.5", "≤0.01"
+                m = _DL_RE.match(str(val).strip())
+                if m:
+                    try:
+                        dl_value = float(m.group(1))
+                        numeric_replacement = dl_value / 2.0
+                    except (ValueError, TypeError):
+                        pass
+
+                # Check keyword markers: "BDL", "ND", "TR", "TRACE"
+                if numeric_replacement is None and val_str in _DL_KEYWORDS:
+                    numeric_replacement = 0.0  # No DL value available, use 0
+
+                if numeric_replacement is not None:
+                    hid = str(out.at[idx, hole_id_col]) if hole_id_col else "Unknown"
+                    out.at[idx, col] = numeric_replacement
+                    _record_fix(
+                        fixes=fixes,
+                        table="assays",
+                        rule_code="ASSAY_DL_REPLACED",
+                        hole_id=hid,
+                        row_index=idx,
+                        col_changes={col: (val, numeric_replacement)},
+                        reason=f"Detection limit '{val}' in '{col}' replaced with {numeric_replacement:.6g}.",
+                        confidence=0.9,
+                    )
+
+            # ── 2) Negative grades → clamp to 0 ──
+            try:
+                numeric_vals = pd.to_numeric(out[col], errors="coerce")
+                neg_mask = numeric_vals < 0
+                for idx in out.index[neg_mask]:
+                    old_val = out.at[idx, col]
+                    hid = str(out.at[idx, hole_id_col]) if hole_id_col else "Unknown"
+                    out.at[idx, col] = 0.0
+                    _record_fix(
+                        fixes=fixes,
+                        table="assays",
+                        rule_code="ASSAY_NEG_CLAMPED",
+                        hole_id=hid,
+                        row_index=idx,
+                        col_changes={col: (old_val, 0.0)},
+                        reason=f"Negative grade {old_val} in '{col}' clamped to 0.",
+                        confidence=0.85,
+                    )
+            except Exception:
+                pass
+    except Exception:
+        pass  # If grade fixing fails, return partially fixed data
 
     return out
 
@@ -492,7 +1158,9 @@ def autofix_assays(
     cfg: ValidationConfig,
     fixes: List[FixAction],
 ) -> pd.DataFrame:
-    return autofix_intervals(assays, collars, table="assays", cfg=cfg, fixes=fixes)
+    out = autofix_intervals(assays, collars, table="assays", cfg=cfg, fixes=fixes)
+    out = autofix_assay_grades(out, fixes)
+    return out
 
 
 def autofix_lithology(
@@ -502,6 +1170,68 @@ def autofix_lithology(
     fixes: List[FixAction],
 ) -> pd.DataFrame:
     return autofix_intervals(lithology, collars, table="lithology", cfg=cfg, fixes=fixes)
+
+
+# =========================================================
+# ORPHAN REMOVAL (NO_COLLAR)
+# =========================================================
+
+def _remove_orphans(
+    collars: pd.DataFrame,
+    surveys: pd.DataFrame,
+    assays: pd.DataFrame,
+    lithology: pd.DataFrame,
+    fixes: List[FixAction],
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Remove records from surveys/assays/lithology whose hole_id has no collar.
+
+    Returns (surveys_clean, assays_clean, lithology_clean).
+    """
+    if collars is None or collars.empty:
+        return surveys, assays, lithology
+
+    collar_hid_col = _find_column(collars, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"])
+    if not collar_hid_col:
+        return surveys, assays, lithology
+
+    valid_ids = set(
+        collars[collar_hid_col].dropna().astype(str).str.strip().str.upper()
+    )
+
+    def _clean(df: pd.DataFrame, table: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df if df is not None else pd.DataFrame()
+        hid_col = _find_column(df, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"])
+        if not hid_col:
+            return df
+        ids = df[hid_col].fillna("").astype(str).str.strip().str.upper()
+        orphan_mask = ~ids.isin(valid_ids) | (ids == "")
+        orphan_count = int(orphan_mask.sum())
+        if orphan_count == 0:
+            return df
+
+        # Record one fix per orphan hole_id (not per row, to keep log compact)
+        orphan_ids = set(ids[orphan_mask].unique()) - {""}
+        for oid in sorted(orphan_ids):
+            n = int((ids == oid).sum())
+            _record_fix(
+                fixes=fixes,
+                table=table,
+                rule_code=f"{table.upper()}_NO_COLLAR_REMOVED",
+                hole_id=oid,
+                row_index=-1,
+                col_changes={},
+                reason=f"Removed {n} {table} record(s) for hole '{oid}' — no matching collar.",
+                confidence=0.95,
+            )
+
+        return df[~orphan_mask].reset_index(drop=True)
+
+    return (
+        _clean(surveys, "surveys"),
+        _clean(assays, "assays"),
+        _clean(lithology, "lithology"),
+    )
 
 
 # =========================================================
@@ -555,6 +1285,14 @@ def run_drillhole_autofix(
 
         # Apply auto-fixes
         collars_fixed = autofix_collars(collars_fixed, cfg, fixes)
+
+        # Remove orphan records (NO_COLLAR) — records whose hole_id
+        # has no matching collar.  Run after collar normalisation so
+        # the uppercase hole_ids match.
+        surveys_fixed, assays_fixed, lith_fixed = _remove_orphans(
+            collars_fixed, surveys_fixed, assays_fixed, lith_fixed, fixes,
+        )
+
         surveys_fixed = autofix_surveys(surveys_fixed, collars_fixed, cfg, fixes)
         assays_fixed = autofix_assays(assays_fixed, collars_fixed, cfg, fixes)
         lith_fixed = autofix_lithology(lith_fixed, collars_fixed, cfg, fixes)

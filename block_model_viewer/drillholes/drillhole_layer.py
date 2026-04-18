@@ -309,9 +309,28 @@ def build_drillhole_polylines(
                     break
 
         sorted_depth_points = sorted(depth_to_point.items())
+
+        # ── FIX: Filter NaN/Inf coordinates and near-duplicate points ──
+        # Root cause 1 & 2: NaN/Inf from corrupt desurvey and spline
+        # overshoot on near-zero segments produce scattered noise artifacts.
+        filtered_depth_points = []
+        for depth, coord in sorted_depth_points:
+            c = np.asarray(coord, dtype=float)
+            # Skip NaN/Inf coordinates (root cause: desurvey corruption)
+            if not np.all(np.isfinite(c)):
+                logger.debug("Hole %s: skipping NaN/Inf point at depth %.2f", hid, depth)
+                continue
+            # Skip near-duplicate points < 1mm apart (prevents spline overshoot)
+            if filtered_depth_points:
+                prev_c = np.asarray(filtered_depth_points[-1][1], dtype=float)
+                if np.linalg.norm(c - prev_c) < 0.001:
+                    logger.debug("Hole %s: merging near-duplicate at depth %.2f", hid, depth)
+                    continue
+            filtered_depth_points.append((depth, coord))
+
         points = []
         index_map = {}
-        for depth, coord in sorted_depth_points:
+        for depth, coord in filtered_depth_points:
             index_map[depth] = len(points)
             points.append(coord)
 
@@ -320,9 +339,9 @@ def build_drillhole_polylines(
         assay_list = []
         from_depth_list = []
         to_depth_list = []
-        for idx in range(len(sorted_depth_points) - 1):
-            start_depth = sorted_depth_points[idx][0]
-            end_depth = sorted_depth_points[idx + 1][0]
+        for idx in range(len(filtered_depth_points) - 1):
+            start_depth = filtered_depth_points[idx][0]
+            end_depth = filtered_depth_points[idx + 1][0]
             if abs(end_depth - start_depth) < 1e-6:
                 continue
             i0 = index_map[start_depth]

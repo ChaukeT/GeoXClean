@@ -420,15 +420,15 @@ def validate_surveys(surveys: pd.DataFrame, collars: pd.DataFrame, cfg: Validati
             f"Survey missing required fields: {missing_str}."
         ))
 
-    # Build collar_ids set safely
+    # Build collar_ids set safely (case-insensitive)
     collar_ids: Set[str] = set()
     if collars is not None and not collars.empty:
         collar_hole_col = _find_column(collars, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"])
         if collar_hole_col:
-            collar_ids = set(collars[collar_hole_col].astype(str))
+            collar_ids = set(collars[collar_hole_col].astype(str).str.strip().str.upper())
 
     for hid, g in _group(surveys):
-        hid_str = str(hid)
+        hid_str = str(hid).strip().upper()
         g = g.sort_values(depth_col)
 
         # Missing collar
@@ -691,10 +691,17 @@ def validate_intervals(
                         f"Gap of {f - prev_to:.3f} m before this interval."
                     ))
                 if f < prev_to:
+                    overlap_size = prev_to - f
+                    # Small overlaps (rounding artifacts) are warnings
+                    # Large overlaps (real data problems) are errors
+                    if overlap_size <= cfg.max_small_overlap:
+                        severity = "WARNING"
+                    else:
+                        severity = "ERROR"
                     v.append(ValidationViolation(
-                        table, f"{table.upper()}_OVERLAP", "ERROR",
+                        table, f"{table.upper()}_OVERLAP", severity,
                         hid_str, idx,
-                        f"Overlap of {prev_to - f:.3f} m."
+                        f"Overlap of {overlap_size:.3f} m."
                     ))
 
             prev_to = t
@@ -707,6 +714,108 @@ def validate_intervals(
                     hid_str, idx,
                     f"Interval to_depth {t} exceeds TD {td}"
                 ))
+
+    return v
+
+
+# =========================================================
+# ASSAY VALUE VALIDATION
+# =========================================================
+
+def validate_assay_values(
+    assays: pd.DataFrame,
+    collars: pd.DataFrame,
+    cfg: ValidationConfig,
+) -> List[ValidationViolation]:
+    """
+    Validate assay grade values. Returns violations list, never raises exceptions.
+    
+    Checks:
+    - Negative grade values (physically impossible for most elements)
+    - Non-numeric values in grade columns (detection limit markers like "<0.01")
+    - Extreme outliers (optional, if primary_grade_col configured)
+    """
+    v = []
+
+    if assays is None or assays.empty:
+        return v
+
+    hole_id_col = _find_column(assays, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"])
+    from_col = _find_column(assays, ["from_depth", "depth_from", "from", "FROM", "DEPTH_FROM", "MFROM"])
+    to_col = _find_column(assays, ["to_depth", "depth_to", "to", "TO", "DEPTH_TO", "MTO"])
+
+    if not hole_id_col:
+        return v
+
+    # Identify grade columns (numeric columns that aren't structural)
+    structural_cols = set()
+    if hole_id_col:
+        structural_cols.add(hole_id_col)
+    if from_col:
+        structural_cols.add(from_col)
+    if to_col:
+        structural_cols.add(to_col)
+
+    # Common non-grade column names to exclude
+    exclude_lower = {
+        "holeid", "hole_id", "hole", "bhid",
+        "from", "to", "from_depth", "to_depth", "depth_from", "depth_to",
+        "mfrom", "mto", "length", "depth",
+        "x", "y", "z", "easting", "northing", "elevation", "rl",
+        "sample_id", "sampleid", "sample_type",
+        "qaqc_type", "qaqc_reference_id", "parent_sample_id",
+        "crm_code", "standard_id", "original_id",
+        "lith_code", "lithology", "code",
+    }
+
+    grade_cols = []
+    for col in assays.columns:
+        if col in structural_cols:
+            continue
+        if col.lower() in exclude_lower:
+            continue
+        # Check if column is numeric
+        if pd.api.types.is_numeric_dtype(assays[col]):
+            grade_cols.append(col)
+
+    # Check each grade column for negative values
+    for col in grade_cols:
+        try:
+            numeric_mask = pd.to_numeric(assays[col], errors='coerce')
+            negative_mask = numeric_mask < 0
+
+            for idx in assays.index[negative_mask]:
+                val = assays.at[idx, col]
+                hid = str(assays.at[idx, hole_id_col]) if hole_id_col in assays.columns else "Unknown"
+                v.append(ValidationViolation(
+                    "assays", "ASSAY_NEGATIVE_VALUE", "ERROR",
+                    hid, idx,
+                    f"Negative grade value {val} in column '{col}'. "
+                    f"Negative grades are physically impossible and indicate "
+                    f"data entry errors or lab reporting issues."
+                ))
+        except Exception as e:
+            logger.warning(f"Error checking negative values in column {col}: {e}")
+
+    # Check for non-numeric markers in grade columns (detection limits)
+    for col in grade_cols:
+        try:
+            # Find cells that look like detection limit markers
+            str_vals = assays[col].astype(str)
+            detection_mask = str_vals.str.match(r'^[<>≤≥]\s*[\d.]', na=False)
+
+            for idx in assays.index[detection_mask]:
+                val = assays.at[idx, col]
+                hid = str(assays.at[idx, hole_id_col]) if hole_id_col in assays.columns else "Unknown"
+                v.append(ValidationViolation(
+                    "assays", "ASSAY_DETECTION_LIMIT", "WARNING",
+                    hid, idx,
+                    f"Detection limit marker '{val}' in column '{col}'. "
+                    f"Replace with numeric value (e.g., half detection limit) "
+                    f"before compositing."
+                ))
+        except Exception:
+            pass  # Column may already be fully numeric
 
     return v
 
@@ -864,18 +973,18 @@ def validate_cross_table(collars, surveys, assays, lith) -> List[ValidationViola
         ))
         return v
     
-    collar_ids = set(collars[collar_hole_col].astype(str))
+    collar_ids = set(collars[collar_hole_col].astype(str).str.strip().str.upper())
 
-    # Assays/Lith with no collar
+    # Assays/Lith with no collar (case-insensitive)
     for tname, df in [("assays", assays), ("lithology", lith)]:
         if df is None or df.empty:
             continue
-        
+
         hole_col = _find_column(df, ["hole_id", "holeid", "HOLE_ID", "HoleID", "hole"])
         if not hole_col:
             continue  # Skip if no hole_id column
-            
-        for idx, row in df[~df[hole_col].astype(str).isin(collar_ids)].iterrows():
+
+        for idx, row in df[~df[hole_col].astype(str).str.strip().str.upper().isin(collar_ids)].iterrows():
             v.append(ValidationViolation(
                 tname, f"{tname.upper()}_NO_COLLAR", "ERROR",
                 str(row[hole_col]), idx,
@@ -1117,6 +1226,19 @@ def run_drillhole_validation(
             f"Internal validation error: {str(e)}"
         ))
         schema_errors.append(f"assays: {str(e)}")
+
+    # Validate assay grade values (negative grades, detection limits)
+    try:
+        report_progress(55, "Validating assay grade values")
+        grade_violations = validate_assay_values(assays, collars, cfg)
+        violations.extend(grade_violations)
+    except Exception as e:
+        logger.error(f"Unexpected error in assay value validation: {e}", exc_info=True)
+        violations.append(ValidationViolation(
+            "assays", "VALIDATION_ERROR", "ERROR",
+            "", -1,
+            f"Internal assay value validation error: {str(e)}"
+        ))
 
     # Validate lithology
     try:
