@@ -1436,6 +1436,10 @@ class MainWindow(PanelMixin, FileMixin, QMainWindow):
         if self.bookmarks is not None:
             self.bookmarks.persist_bookmarks()
 
+    def save_current_layout(self):
+        """Save the current dock/panel layout as a named profile."""
+        self._save_layout()
+
     def _save_layout(self):
         """Save window geometry and dock widget layout (NEW - Architecture Refactor)."""
         try:

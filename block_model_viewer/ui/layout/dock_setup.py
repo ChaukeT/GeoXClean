@@ -182,6 +182,68 @@ def setup_toolbar(main_window: 'MainWindow') -> None:
     main_window.toolbar_widget.scene_action_requested.connect(main_window._handle_scene_action)
     main_window.toolbar_widget.view_action_requested.connect(main_window._handle_view_action)
     main_window.toolbar_widget.panel_action_requested.connect(main_window._handle_panel_action)
-    
-    logger.info("Setup modern toolbar")
 
+    # Connect quick-action icon button signals
+    main_window.toolbar_widget.zoom_in_requested.connect(main_window.zoom_in)
+    main_window.toolbar_widget.zoom_out_requested.connect(main_window.zoom_out)
+    main_window.toolbar_widget.fit_view_icon_requested.connect(main_window.fit_to_view)
+    # Alias per March Pictures spec
+    if hasattr(main_window.toolbar_widget, "zoom_fit_requested"):
+        main_window.toolbar_widget.zoom_fit_requested.connect(main_window.fit_to_view)
+    if hasattr(main_window, "refresh_view"):
+        main_window.toolbar_widget.refresh_requested.connect(main_window.refresh_view)
+
+    # Mouse mode buttons (new, from March Pictures)
+    if hasattr(main_window.toolbar_widget, "mouse_mode_requested"):
+        if hasattr(main_window, "_handle_mouse_mode"):
+            main_window.toolbar_widget.mouse_mode_requested.connect(
+                main_window._handle_mouse_mode
+            )
+        # Sync toolbar buttons when mouse mode changes via keyboard / menu
+        try:
+            if main_window.interaction is not None and hasattr(
+                main_window.interaction, "mode_changed"
+            ):
+                main_window.interaction.mode_changed.connect(
+                    main_window.toolbar_widget.sync_mode
+                )
+        except Exception:
+            pass
+
+    # Grade cutoff signals (new, from March Pictures)
+    if hasattr(main_window.toolbar_widget, "grade_cutoff_reset"):
+        def _on_grade_cutoff_reset():
+            """Clear the grade cutoff filter — show all blocks again."""
+            try:
+                if main_window.viewer_widget and main_window.viewer_widget.renderer:
+                    renderer = main_window.viewer_widget.renderer
+                    if hasattr(renderer, "clear_grade_cutoff"):
+                        renderer.clear_grade_cutoff()
+                    elif hasattr(renderer, "apply_property_filter"):
+                        renderer.apply_property_filter("", 0, 0)  # clear
+            except Exception as _e:
+                logger.debug(f"Grade cutoff reset failed: {_e}")
+        main_window.toolbar_widget.grade_cutoff_reset.connect(_on_grade_cutoff_reset)
+
+    if hasattr(main_window.toolbar_widget, "grade_cutoff_changed"):
+        def _on_grade_cutoff_value(value: float):
+            """Apply the new grade cutoff value to the active property in renderer."""
+            try:
+                if not (main_window.viewer_widget and main_window.viewer_widget.renderer):
+                    return
+                renderer = main_window.viewer_widget.renderer
+                # Only apply when the toggle is enabled
+                toggle = getattr(main_window.toolbar_widget, "grade_cutoff_toggle", None)
+                if toggle is not None and not toggle.isChecked():
+                    return
+                prop = getattr(renderer, "current_property", None) or \
+                       getattr(main_window.viewer_widget, "current_property", None)
+                if prop and hasattr(renderer, "apply_property_filter"):
+                    # Upper bound = property max (filter >= cutoff)
+                    import sys as _sys
+                    renderer.apply_property_filter(prop, value, _sys.float_info.max)
+            except Exception as _e:
+                logger.debug(f"Grade cutoff apply failed: {_e}")
+        main_window.toolbar_widget.grade_cutoff_changed.connect(_on_grade_cutoff_value)
+
+    logger.info("Setup modern toolbar")

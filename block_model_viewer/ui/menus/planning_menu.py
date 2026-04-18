@@ -66,6 +66,14 @@ def build_planning_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     act.triggered.connect(main_window.open_rockburst_panel)
     ug_menu.addAction(act)
 
+    act = QAction(get_menu_icon("mine_planning", "underground"), "UG &Advanced (SLOS, Caving, Void)", main_window)
+    act.setStatusTip("Advanced underground operations: SLOS, caving, void management")
+    if hasattr(main_window, 'open_ug_advanced_panel'):
+        act.triggered.connect(main_window.open_ug_advanced_panel)
+    else:
+        act.setEnabled(False)
+    ug_menu.addAction(act)
+
     menu.addSeparator()
 
     # ── Scheduling ───────────────────────────────────────────────
@@ -139,6 +147,14 @@ def build_planning_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     act = QAction(get_menu_icon("geotech", "geotech_summary"), "&Geotech Dashboard", main_window)
     act.setStatusTip("Geotechnical dashboard (rock mass, interpolation, stability summary)")
     act.triggered.connect(main_window.open_geotech_panel)
+    dash_menu.addAction(act)
+
+    act = QAction(get_menu_icon("dashboards", "research"), "&Research Dashboard", main_window)
+    act.setStatusTip("Experiment configuration and results comparison dashboard")
+    if hasattr(main_window, 'open_research_dashboard_panel'):
+        act.triggered.connect(main_window.open_research_dashboard_panel)
+    else:
+        act.setEnabled(False)
     dash_menu.addAction(act)
 
     return menu

@@ -9,6 +9,25 @@ import os
 from pathlib import Path
 import numbers
 
+
+class _SafeRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that tolerates Windows file locks on rotation.
+
+    Imported from the March (Pictures) snapshot.  Plain RotatingFileHandler
+    raises PermissionError on Windows if another process has the log file
+    open (e.g. another GeoX instance, a text editor, or the log viewer),
+    which crashes the application at startup.  This subclass catches that
+    error during rollover and falls back to the current log file.
+    """
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except (PermissionError, OSError):
+            # Another process holds the file — keep appending to current log
+            if self.stream is None:
+                self.stream = self._open()
+
 # Set matplotlib backend ONCE before any matplotlib imports
 # This must be done before any module imports matplotlib to prevent backend conflicts
 try:
@@ -23,8 +42,10 @@ except ImportError:
 # re-importing GUI modules and re-initializing the application.
 
 # Set environment variables for better compatibility
+# NOTE: Removed QT_SCALE_FACTOR='1' which broke HiDPI rendering on 125%/150%/200%
+# monitors.  Qt HighDpiScaleFactorRoundingPolicy.PassThrough is set below after
+# QApplication is created to handle fractional scale factors correctly.
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
-os.environ['QT_SCALE_FACTOR'] = '1'
 os.environ['MESA_GL_VERSION_OVERRIDE'] = '3.3'
 os.environ['VTK_SILENCE_GET_VOID_POINTER_WARNINGS'] = '1'
 # Suppress Qt warnings about QWidgetWindow (harmless warnings from embedded widgets)
@@ -69,7 +90,7 @@ def setup_logging():
             log_dir = Path(local_appdata) / 'GeoX'
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / 'block_model_viewer.log'
-            rotating_handler = RotatingFileHandler(
+            rotating_handler = _SafeRotatingFileHandler(
                 log_path,
                 maxBytes=10 * 1024 * 1024,  # 10 MB per file
                 backupCount=5,  # Keep 5 backup files
@@ -80,7 +101,7 @@ def setup_logging():
         else:
             # Fallback to current directory then home
             log_path = Path('block_model_viewer.log')
-            rotating_handler = RotatingFileHandler(
+            rotating_handler = _SafeRotatingFileHandler(
                 log_path, maxBytes=10*1024*1024, backupCount=5,
                 encoding='utf-8', errors='replace'
             )
@@ -89,7 +110,7 @@ def setup_logging():
         try:
             # Fallback to user's home directory
             log_path = Path.home() / 'block_model_viewer.log'
-            rotating_handler = RotatingFileHandler(
+            rotating_handler = _SafeRotatingFileHandler(
                 log_path, maxBytes=10*1024*1024, backupCount=5,
                 encoding='utf-8', errors='replace'
             )
@@ -372,6 +393,18 @@ def main(headless=False):
 
         # Create QApplication
         app = QApplication(sys.argv)
+
+        # HiDPI support (from March Pictures snapshot): PassThrough means
+        # non-integer scale factors (125%, 150%, 200%) are applied as-is
+        # without rounding, producing sharp rendering on high-DPI monitors.
+        try:
+            from PyQt6.QtCore import Qt
+            app.setHighDpiScaleFactorRoundingPolicy(
+                Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+            )
+        except Exception:
+            pass
+
         # Ensure the app does not quit when a dialog window is closed
         try:
             app.setQuitOnLastWindowClosed(False)
@@ -380,7 +413,7 @@ def main(headless=False):
         app.setApplicationName("GeoX")
         app.setApplicationVersion("1.0.0")
         app.setOrganizationName("GeoX")
-        
+
         # Set application style
         app.setStyle('Fusion')
         

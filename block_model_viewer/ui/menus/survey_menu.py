@@ -120,6 +120,35 @@ def build_survey_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     )
     deformation_index_action.triggered.connect(main_window.compute_deformation_index)
     survey_menu.addAction(deformation_index_action)
-    
+
+    survey_menu.addSeparator()
+
+    # ── Remote Sensing ───────────────────────────────────────────
+    insar_action = QAction(
+        get_menu_icon("remote_sensing", "insar"),
+        "&InSAR Analysis...",
+        main_window,
+    )
+    insar_action.setStatusTip(
+        "Interferometric SAR deformation time-series analysis"
+    )
+    if hasattr(main_window, 'open_insar_panel'):
+        insar_action.triggered.connect(main_window.open_insar_panel)
+    else:
+        insar_action.setEnabled(False)
+    survey_menu.addAction(insar_action)
+
+    scan_action = QAction(
+        get_menu_icon("data", "scan"),
+        "&Scan / Point Cloud...",
+        main_window,
+    )
+    scan_action.setStatusTip("Import and process LiDAR/photogrammetry scans")
+    if hasattr(main_window, 'open_scan_panel'):
+        scan_action.triggered.connect(main_window.open_scan_panel)
+    else:
+        scan_action.setEnabled(False)
+    survey_menu.addAction(scan_action)
+
     return survey_menu
 

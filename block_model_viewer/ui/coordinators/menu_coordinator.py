@@ -98,16 +98,21 @@ class MenuCoordinator(QObject):
     # ═══════════════════════════════════════════════════════════════
 
     def _build_all_menus(self):
-        """Build all 11 consolidated menus."""
+        """Build the consolidated menu bar (matches March Pictures layout + Drillholes).
+
+        Order: File | Edit | View | Data | Drillholes | Modelling | Survey |
+               Planning | Resources | Tools | Window | Help
+        """
         from ..menus import (
             build_file_menu,
             build_edit_menu,
             build_view_menu,
             build_data_menu,
+            build_drillholes_menu,
             build_modelling_menu,
-            build_resources_menu,
-            build_planning_menu,
             build_survey_menu,
+            build_planning_menu,
+            build_resources_menu,
             build_tools_menu,
             build_window_menu,
             build_help_menu,
@@ -122,10 +127,11 @@ class MenuCoordinator(QObject):
             ("edit_menu", build_edit_menu),
             ("view_menu", build_view_menu),
             ("data_menu", build_data_menu),
+            ("drillholes_menu", build_drillholes_menu),
             ("modelling_menu", build_modelling_menu),
-            ("resources_menu", build_resources_menu),
-            ("planning_menu", build_planning_menu),
             ("survey_menu", build_survey_menu),
+            ("planning_menu", build_planning_menu),
+            ("resources_menu", build_resources_menu),
             ("tools_menu", build_tools_menu),
             ("window_menu", build_window_menu),
             ("help_menu", build_help_menu),

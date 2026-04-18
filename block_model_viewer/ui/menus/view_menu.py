@@ -71,6 +71,32 @@ def build_view_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     main_window.projection_action = proj_action
     view_menu.addAction(proj_action)
 
+    # Full-screen toggle
+    fullscreen_action = QAction("Full &Screen", main_window)
+    fullscreen_action.setShortcut(QKeySequence("F11"))
+    fullscreen_action.setCheckable(True)
+    fullscreen_action.setStatusTip("Toggle full-screen mode")
+    _safe(fullscreen_action, main_window, 'toggle_fullscreen')
+    main_window.fullscreen_action = fullscreen_action
+    view_menu.addAction(fullscreen_action)
+
+    # Toolbars / Status bar toggles
+    toolbars_action = QAction("Show &Toolbars", main_window)
+    toolbars_action.setCheckable(True)
+    toolbars_action.setChecked(True)
+    toolbars_action.setStatusTip("Show or hide all toolbars")
+    _safe(toolbars_action, main_window, 'toggle_toolbars')
+    main_window.toolbars_action = toolbars_action
+    view_menu.addAction(toolbars_action)
+
+    statusbar_action = QAction("Show Status &Bar", main_window)
+    statusbar_action.setCheckable(True)
+    statusbar_action.setChecked(True)
+    statusbar_action.setStatusTip("Show or hide the status bar")
+    _safe(statusbar_action, main_window, 'toggle_statusbar')
+    main_window.statusbar_action = statusbar_action
+    view_menu.addAction(statusbar_action)
+
     view_menu.addSeparator()
 
     # Data Registry Status
@@ -235,5 +261,12 @@ def build_view_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     load_ws = QAction("Load Workspace Layout...", main_window)
     _safe(load_ws, main_window, 'load_workspace_layout_file')
     workspace_menu.addAction(load_ws)
+
+    workspace_menu.addSeparator()
+
+    layout_composer = QAction("&Layout Composer (Plot Publisher)...", main_window)
+    layout_composer.setStatusTip("Publication layout composer for figures and reports")
+    _safe(layout_composer, main_window, 'open_layout_composer')
+    workspace_menu.addAction(layout_composer)
 
     return view_menu

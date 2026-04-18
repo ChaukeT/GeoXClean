@@ -1,5 +1,5 @@
 """
-Data & Analysis menu construction for GeoX.
+Data menu construction for GeoX.
 """
 
 from typing import TYPE_CHECKING
@@ -16,10 +16,32 @@ except ImportError:
         return None
 
 
+def _safe_connect(action, main_window, method_name):
+    """Connect an action's triggered signal to a main-window method, disabling the action if missing."""
+    handler = getattr(main_window, method_name, None)
+    if handler is not None:
+        action.triggered.connect(handler)
+    else:
+        action.setEnabled(False)
+
+
 def build_data_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
-    """Build and return the Data & Analysis menu."""
-    data_menu = menubar.addMenu("&Data && Analysis")
-    
+    """Build and return the Data menu."""
+    data_menu = menubar.addMenu("&Data")
+
+    # ── Block Model Construction ─────────────────────────────────
+    builder_action = QAction(get_menu_icon("data", "block_model"), "&Block Model Builder...", main_window)
+    builder_action.setStatusTip("Construct block models from geological and assay data")
+    _safe_connect(builder_action, main_window, 'open_block_model_builder')
+    data_menu.addAction(builder_action)
+
+    calc_action = QAction(get_menu_icon("data", "calculator"), "Block &Property Calculator...", main_window)
+    calc_action.setStatusTip("Compute derived block properties via expressions")
+    _safe_connect(calc_action, main_window, 'open_block_property_calculator_panel')
+    data_menu.addAction(calc_action)
+
+    data_menu.addSeparator()
+
     # Statistics Window
     statistics_action = QAction(get_menu_icon("data_analysis", "statistics"), "Statistics", main_window)
     statistics_action.setStatusTip("Open statistics and data summary window")
@@ -54,6 +76,19 @@ def build_data_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     data_menu.addAction(swath_action)
 
     data_menu.addSeparator()
-    
-    return data_menu
 
+    # ── Domain Modelling ──────────────────────────────────────────
+    domain_menu = data_menu.addMenu("Domain Modelling")
+
+    irbf_action = QAction(
+        get_menu_icon("estimations", "rbf"),
+        "&Indicator RBF Domain...",
+        main_window,
+    )
+    irbf_action.setStatusTip(
+        "Build implicit domain boundaries using Indicator Radial Basis Functions"
+    )
+    irbf_action.triggered.connect(main_window.open_indicator_rbf_panel)
+    domain_menu.addAction(irbf_action)
+
+    return data_menu

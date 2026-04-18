@@ -5,7 +5,7 @@ Tools menu construction for GeoX.
 import logging
 from typing import TYPE_CHECKING
 from PyQt6.QtWidgets import QMenuBar, QMenu
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QKeySequence
 
 if TYPE_CHECKING:
     from ..main_window import MainWindow
@@ -75,5 +75,11 @@ def build_tools_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     interactive_slicer_tool.setStatusTip("Interactive slicing with draggable plane, box, sphere widgets")
     _safe_connect(interactive_slicer_tool, main_window, 'open_interactive_slicer')
     tools_menu.addAction(interactive_slicer_tool)
+
+    clip_plane_tool = QAction(get_menu_icon("tools", "clip"), "&Clip Plane...", main_window)
+    clip_plane_tool.setShortcut(QKeySequence("Ctrl+Shift+C"))
+    clip_plane_tool.setStatusTip("ParaView-style clip plane with draggable handles")
+    _safe_connect(clip_plane_tool, main_window, 'toggle_clip_plane')
+    tools_menu.addAction(clip_plane_tool)
 
     return tools_menu

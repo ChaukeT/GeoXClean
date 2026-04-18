@@ -152,13 +152,45 @@ class SignalCoordinator(QObject):
         # fails silently for cached SGSIM/Kriging/Classification layers.
         try:
             if hasattr(mw, 'property_panel') and mw.property_panel is not None:
-                if hasattr(mw.property_panel, 'request_visualization'):
-                    mw.property_panel.request_visualization.connect(
+                pp = mw.property_panel
+                if hasattr(pp, 'request_visualization'):
+                    pp.request_visualization.connect(
                         mw._handle_property_panel_visualization_request
                     )
                     logger.info("Connected property_panel.request_visualization signal to handler")
+                # CRITICAL (from March Pictures): without these, changing
+                # property/colormap in the panel doesn't repaint the 3D view.
+                if hasattr(pp, 'property_changed') and hasattr(mw, 'on_property_changed'):
+                    pp.property_changed.connect(mw.on_property_changed)
+                if hasattr(pp, 'colormap_changed') and hasattr(mw, 'on_colormap_changed'):
+                    pp.colormap_changed.connect(mw.on_colormap_changed)
+                # Bind renderer for legend updates
+                if hasattr(pp, 'set_renderer') and mw.viewer_widget:
+                    try:
+                        pp.set_renderer(mw.viewer_widget.renderer)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.debug(f"Could not connect property panel signal: {e}")
+
+        # Scene inspector signals — reset-view / view-preset / projection /
+        # scalar-bar toggle.  These are fully wired in the March (Pictures)
+        # snapshot but completely absent from April (Documents); clicking
+        # those buttons in the panel produces no effect without this block.
+        try:
+            if hasattr(mw, 'scene_inspector_panel') and mw.scene_inspector_panel is not None:
+                si = mw.scene_inspector_panel
+                if hasattr(si, 'reset_view_requested') and hasattr(mw, 'reset_camera'):
+                    si.reset_view_requested.connect(mw.reset_camera)
+                if hasattr(si, 'view_preset_requested') and hasattr(mw, 'set_view_preset'):
+                    si.view_preset_requested.connect(mw.set_view_preset)
+                if hasattr(si, 'projection_toggled') and hasattr(mw, 'on_projection_toggled'):
+                    si.projection_toggled.connect(mw.on_projection_toggled)
+                if hasattr(si, 'scalar_bar_toggled') and hasattr(mw, 'on_scalar_bar_toggled'):
+                    si.scalar_bar_toggled.connect(mw.on_scalar_bar_toggled)
+                logger.info("Connected scene_inspector_panel signals (reset/preset/projection/scalar bar)")
+        except Exception as e:
+            logger.debug(f"Could not connect scene inspector signals: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     # HANDLER METHODS
@@ -273,3 +305,171 @@ class SignalCoordinator(QObject):
                 pass  # Could highlight in drillhole panel
         except Exception as e:
             logger.warning(f"Error handling drillhole selection: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # GENERIC PANEL SIGNAL HANDLERS
+    # ═══════════════════════════════════════════════════════════════
+    # These are reusable handlers that any panel can connect its signals
+    # to.  See panel_mixin.open_*_panel() methods for where each handler
+    # gets wired to a specific dialog instance.
+
+    def on_panel_progress(self, percent: int, message: str = ""):
+        """Generic progress handler for any panel emitting progress_updated(int, str)."""
+        mw = self._mw
+        if mw.status is not None:
+            try:
+                fraction = max(0.0, min(1.0, float(percent) / 100.0))
+                mw.status.update_progress(message or f"Working... {percent}%", fraction)
+            except Exception:
+                pass
+
+    def on_filters_changed(self, filter_state: dict):
+        """Handler for block_model_filter_panel.filtersChanged.
+
+        Applies the filter state to the renderer so filtered blocks become invisible.
+        """
+        mw = self._mw
+        try:
+            if mw.viewer_widget and mw.viewer_widget.renderer:
+                renderer = mw.viewer_widget.renderer
+                if hasattr(renderer, 'apply_block_filters'):
+                    renderer.apply_block_filters(filter_state)
+                elif hasattr(renderer, 'apply_filters'):
+                    renderer.apply_filters(filter_state)
+                else:
+                    logger.debug("Renderer has no apply_block_filters/apply_filters method")
+        except Exception as e:
+            logger.warning(f"Failed to apply block filters: {e}")
+
+    def on_section_updated(self, section_data):
+        """Handler for cross_section_panel.section_updated."""
+        mw = self._mw
+        try:
+            if mw.viewer_widget and mw.viewer_widget.renderer:
+                renderer = mw.viewer_widget.renderer
+                if hasattr(renderer, 'refresh_cross_section'):
+                    renderer.refresh_cross_section(section_data)
+        except Exception as e:
+            logger.warning(f"Failed to refresh cross-section: {e}")
+
+    def on_slicer_range_changed(self, axis: str, lo: float, hi: float):
+        """Handler for interactive_slicer_panel.rangeChanged."""
+        mw = self._mw
+        try:
+            if mw.viewer_widget:
+                if hasattr(mw.viewer_widget, 'apply_spatial_slice'):
+                    mw.viewer_widget.apply_spatial_slice(axis, lo, hi)
+        except Exception as e:
+            logger.warning(f"Failed to apply slice range: {e}")
+
+    def on_slicer_clipping_changed(self, clip_state: dict):
+        """Handler for interactive_slicer_panel.clipping_changed."""
+        mw = self._mw
+        try:
+            if mw.viewer_widget and mw.viewer_widget.renderer:
+                renderer = mw.viewer_widget.renderer
+                if hasattr(renderer, 'apply_clip_state'):
+                    renderer.apply_clip_state(clip_state)
+        except Exception as e:
+            logger.warning(f"Failed to apply clip state: {e}")
+
+    def on_domain_codes_assigned(self, codes):
+        """Handler for lithology_manager_panel.domainCodesAssigned."""
+        mw = self._mw
+        try:
+            registry = mw.controller.registry if mw.controller else mw._registry
+            if registry and hasattr(registry, 'register_domain_codes'):
+                registry.register_domain_codes(codes, source_panel="LithologyManager")
+            logger.info(f"Domain codes assigned: {len(codes) if hasattr(codes, '__len__') else '?'} entries")
+        except Exception as e:
+            logger.warning(f"Failed to register domain codes: {e}")
+
+    def on_contacts_extracted(self, contacts):
+        """Handler for lithology_manager_panel.contactsExtracted."""
+        mw = self._mw
+        try:
+            registry = mw.controller.registry if mw.controller else mw._registry
+            if registry and hasattr(registry, 'register_contact_set'):
+                registry.register_contact_set(contacts, source_panel="LithologyManager")
+            logger.info("Contacts extracted and registered")
+        except Exception as e:
+            logger.warning(f"Failed to register contacts: {e}")
+
+    def on_frag_import_completed(self, result):
+        """Handler for frag_import_panel.import_completed."""
+        logger.info("Fragmentation import completed")
+        mw = self._mw
+        if mw.status is not None:
+            mw.status.show_message("Fragmentation import complete", 3000)
+
+    def on_frag_preprocessing_completed(self, result):
+        """Handler for frag_preprocessing_panel.preprocessing_completed."""
+        logger.info("Fragmentation preprocessing completed")
+        mw = self._mw
+        if mw.status is not None:
+            mw.status.show_message("Fragmentation preprocessing complete", 3000)
+
+    def on_frag_segmentation_completed(self, result):
+        """Handler for frag_segmentation_panel.segmentation_completed."""
+        logger.info("Fragmentation segmentation completed")
+        mw = self._mw
+        if mw.status is not None:
+            mw.status.show_message("Fragmentation segmentation complete", 3000)
+
+    def on_fragment_selected(self, fragment_id):
+        """Handler for frag_results_panel.fragment_selected."""
+        logger.info(f"Fragment selected: {fragment_id}")
+        mw = self._mw
+        try:
+            if mw.viewer_widget and mw.viewer_widget.renderer:
+                renderer = mw.viewer_widget.renderer
+                if hasattr(renderer, 'highlight_fragment'):
+                    renderer.highlight_fragment(fragment_id)
+        except Exception as e:
+            logger.debug(f"Failed to highlight fragment: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # PANEL SIGNAL BINDER
+    # ═══════════════════════════════════════════════════════════════
+
+    def wire_panel_dialog_signals(self, dialog):
+        """Inspect a dialog for known signals and connect them to handlers.
+
+        Idempotent: always disconnects before reconnecting, so it's safe to call
+        this every time a panel dialog is opened.  Called from panel_mixin.open_*
+        methods.
+        """
+        if dialog is None:
+            return
+
+        # Map of signal_name → handler (we connect only if the dialog emits it)
+        signal_map = {
+            'progress_updated': self.on_panel_progress,
+            'filtersChanged': self.on_filters_changed,
+            'section_updated': self.on_section_updated,
+            'rangeChanged': self.on_slicer_range_changed,
+            'clipping_changed': self.on_slicer_clipping_changed,
+            'domainCodesAssigned': self.on_domain_codes_assigned,
+            'contactsExtracted': self.on_contacts_extracted,
+            'import_completed': self.on_frag_import_completed,
+            'preprocessing_completed': self.on_frag_preprocessing_completed,
+            'segmentation_completed': self.on_frag_segmentation_completed,
+            'fragment_selected': self.on_fragment_selected,
+        }
+
+        for signal_name, handler in signal_map.items():
+            sig = getattr(dialog, signal_name, None)
+            if sig is None:
+                continue
+            # Only treat it as a signal if it has .connect()
+            if not hasattr(sig, 'connect'):
+                continue
+            try:
+                sig.disconnect(handler)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                sig.connect(handler)
+                logger.debug(f"Connected {dialog.__class__.__name__}.{signal_name} → {handler.__name__}")
+            except Exception as e:
+                logger.debug(f"Could not connect {signal_name}: {e}")

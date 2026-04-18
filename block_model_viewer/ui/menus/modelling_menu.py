@@ -63,6 +63,16 @@ def build_modelling_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     act.triggered.connect(main_window.open_slope_stability_panel)
     geotech_menu.addAction(act)
 
+    geotech_menu.addSeparator()
+
+    act = QAction(get_menu_icon("geotech", "geotech_summary"), "Geotech S&ummary", main_window)
+    act.setStatusTip("Rock-mass parameter summary (RMR, Q, GSI)")
+    if hasattr(main_window, 'open_geotech_summary_panel'):
+        act.triggered.connect(main_window.open_geotech_summary_panel)
+    else:
+        act.setEnabled(False)
+    geotech_menu.addAction(act)
+
     menu.addSeparator()
 
     # ═══════════════════════════════════════════════════════════════
@@ -226,5 +236,57 @@ def build_modelling_menu(main_window: 'MainWindow', menubar: QMenuBar) -> QMenu:
     act.setStatusTip("Unsupervised K-Means clustering for domain classification")
     act.triggered.connect(main_window.open_kmeans_panel)
     ml_menu.addAction(act)
+
+    menu.addSeparator()
+
+    # ═══════════════════════════════════════════════════════════════
+    # GEOMETALLURGY
+    # ═══════════════════════════════════════════════════════════════
+    geomet_menu = menu.addMenu("Geometallur&gy")
+
+    for label, method, tip in [
+        ("&Geomet Dashboard", 'open_geomet_panel',
+         "Domain, plant response, and recovery modelling"),
+        ("Geomet &Domains", 'open_geomet_domain_panel',
+         "Cluster drillholes into geometallurgical domains"),
+        ("Geomet &Plant Model", 'open_geomet_plant_panel',
+         "Plant recovery and throughput modelling"),
+        ("Value &Chain", 'open_geomet_chain_panel',
+         "End-to-end mine-to-mill geometallurgy chain"),
+    ]:
+        act = QAction(get_menu_icon("geology", "geomet"), label, main_window)
+        act.setStatusTip(tip)
+        if hasattr(main_window, method):
+            act.triggered.connect(getattr(main_window, method))
+        else:
+            act.setEnabled(False)
+        geomet_menu.addAction(act)
+
+    menu.addSeparator()
+
+    # ═══════════════════════════════════════════════════════════════
+    # FRAGMENTATION
+    # ═══════════════════════════════════════════════════════════════
+    frag_menu = menu.addMenu("&Fragmentation")
+
+    for label, method, tip in [
+        ("&Import Blast Images...", 'open_frag_import_panel',
+         "Import images/videos of blast muck pile"),
+        ("&Preprocessing...", 'open_frag_preprocessing_panel',
+         "Scale calibration, ROI selection, enhancement"),
+        ("&Segmentation...", 'open_frag_segmentation_panel',
+         "Detect and segment rock fragments"),
+        ("&Results / Analysis...", 'open_frag_results_panel',
+         "Size distribution, P80, Kuz-Ram comparisons"),
+        ("Manual &Editor...", 'open_frag_editor_panel',
+         "Manually edit segmented fragments"),
+    ]:
+        act = QAction(get_menu_icon("tools", "fragmentation"), label, main_window)
+        act.setStatusTip(tip)
+        if hasattr(main_window, method):
+            act.triggered.connect(getattr(main_window, method))
+        else:
+            act.setEnabled(False)
+        frag_menu.addAction(act)
 
     return menu
