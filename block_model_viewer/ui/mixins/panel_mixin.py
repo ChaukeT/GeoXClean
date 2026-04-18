@@ -2698,6 +2698,9 @@ class PanelMixin:
 
             self._setup_dialog_persistence(self.variogram_dialog, 'variogram_dialog')
 
+            if hasattr(self, '_signal_coordinator'):
+                self._signal_coordinator.wire_panel_dialog_signals(self.variogram_dialog)
+
             logger.info("Opened 3D Variogram Analysis panel")
             self.status_bar.showMessage("Variogram panel ready - Results will be stored for kriging", 3000)
         else:
@@ -3409,6 +3412,9 @@ class PanelMixin:
             self.fastrbf_dialog.request_visualization.connect(self.visualize_fastrbf_results)
             logger.info("Connected FastRBF visualization signal")
 
+        if hasattr(self, '_signal_coordinator'):
+            self._signal_coordinator.wire_panel_dialog_signals(self.fastrbf_dialog)
+
         drillhole_df = self._resolve_drillhole_dataframe()
         if drillhole_df is not None:
             if self.controller:
@@ -3470,6 +3476,10 @@ class PanelMixin:
             except (TypeError, RuntimeError):
                 pass
             self.arbf_dialog.request_visualization.connect(self.visualize_sgsim_results)
+
+        # Wire progress, filters, and other common panel signals to coordinator
+        if hasattr(self, '_signal_coordinator'):
+            self._signal_coordinator.wire_panel_dialog_signals(self.arbf_dialog)
 
         # Push drillhole data directly into the panel
         drillhole_df = self._resolve_drillhole_dataframe()
@@ -3546,6 +3556,9 @@ class PanelMixin:
             except (TypeError, RuntimeError):
                 pass
             self.indicator_rbf_dialog.request_visualization.connect(self.visualize_indicator_rbf_results)
+
+        if hasattr(self, '_signal_coordinator'):
+            self._signal_coordinator.wire_panel_dialog_signals(self.indicator_rbf_dialog)
 
         # Push drillhole data directly into the panel
         drillhole_df = self._resolve_drillhole_dataframe()
@@ -4112,6 +4125,9 @@ class PanelMixin:
                         )
                     except Exception:
                         pass
+
+            if hasattr(self, '_signal_coordinator'):
+                self._signal_coordinator.wire_panel_dialog_signals(self.geological_model_dialog)
 
             self.geological_model_dialog.show()
             self.geological_model_dialog.raise_()
@@ -7748,6 +7764,10 @@ class PanelMixin:
                     self._block_filter_panel.bind_controller(self.controller)
                     self.controller._filter_panel = self._block_filter_panel
 
+                # Wire filter signal so filters actually get applied to renderer
+                if hasattr(self, '_signal_coordinator'):
+                    self._signal_coordinator.wire_panel_dialog_signals(self._block_filter_panel)
+
                 # Wire drillhole points for envelope filter
                 try:
                     dh_df = self._get_clean_drillhole_df(
@@ -11186,10 +11206,22 @@ class PanelMixin:
     # FRAGMENTATION ANALYSIS
     # ══════════════════════════════════════════════════════════════════
 
+    def _wire_panel_manager_panel(self, panel_id: str):
+        """Helper: get the panel instance from panel_manager and wire its signals."""
+        try:
+            if not hasattr(self, '_signal_coordinator') or not hasattr(self, 'panel_manager'):
+                return
+            inst = self.panel_manager.get_panel_instance(panel_id)
+            if inst is not None:
+                self._signal_coordinator.wire_panel_dialog_signals(inst)
+        except Exception as e:
+            logger.debug(f"Failed to wire {panel_id} signals: {e}")
+
     def open_frag_import_panel(self):
         """Open the Fragmentation Import panel."""
         try:
             self.panel_manager.show_panel("FragImportPanel")
+            self._wire_panel_manager_panel("FragImportPanel")
         except Exception as e:
             logger.error("Error opening Fragmentation Import panel: %s", e, exc_info=True)
             QMessageBox.critical(self, "Panel Error", f"Failed to open Fragmentation Import:\n\n{e}")
@@ -11198,6 +11230,7 @@ class PanelMixin:
         """Open the Fragmentation Preprocessing panel."""
         try:
             self.panel_manager.show_panel("FragPreprocessingPanel")
+            self._wire_panel_manager_panel("FragPreprocessingPanel")
         except Exception as e:
             logger.error("Error opening Fragmentation Preprocessing panel: %s", e, exc_info=True)
             QMessageBox.critical(self, "Panel Error", f"Failed to open Fragmentation Preprocessing:\n\n{e}")
@@ -11206,6 +11239,7 @@ class PanelMixin:
         """Open the Fragmentation Segmentation panel."""
         try:
             self.panel_manager.show_panel("FragSegmentationPanel")
+            self._wire_panel_manager_panel("FragSegmentationPanel")
         except Exception as e:
             logger.error("Error opening Fragmentation Segmentation panel: %s", e, exc_info=True)
             QMessageBox.critical(self, "Panel Error", f"Failed to open Fragmentation Segmentation:\n\n{e}")
@@ -11214,6 +11248,7 @@ class PanelMixin:
         """Open the Fragmentation Results panel."""
         try:
             self.panel_manager.show_panel("FragResultsPanel")
+            self._wire_panel_manager_panel("FragResultsPanel")
         except Exception as e:
             logger.error("Error opening Fragmentation Results panel: %s", e, exc_info=True)
             QMessageBox.critical(self, "Panel Error", f"Failed to open Fragmentation Results:\n\n{e}")
@@ -11222,6 +11257,240 @@ class PanelMixin:
         """Open the interactive Fragmentation Editor panel."""
         try:
             self.panel_manager.show_panel("FragEditorPanel")
+            self._wire_panel_manager_panel("FragEditorPanel")
         except Exception as e:
             logger.error("Error opening Fragmentation Editor panel: %s", e, exc_info=True)
             QMessageBox.critical(self, "Panel Error", f"Failed to open Fragmentation Editor:\n\n{e}")
+
+    def open_block_resource_panel(self):
+        """Open Block Model Resource calculation panel in a separate window."""
+        if hasattr(self, 'block_resource_dialog') and self._is_dialog_valid(self.block_resource_dialog):
+            if self.block_resource_dialog.isVisible():
+                self.block_resource_dialog.raise_()
+                self.block_resource_dialog.activateWindow()
+            else:
+                self.block_resource_dialog.show()
+                self.block_resource_dialog.raise_()
+                self.block_resource_dialog.activateWindow()
+            return
+
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout
+        from ..block_resource_panel import BlockModelResourcePanel
+
+        self.block_resource_dialog = QDialog(None)
+        self.block_resource_dialog.setWindowTitle("Block Model Resources")
+        self.block_resource_dialog.resize(600, 800)
+        self.block_resource_dialog.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+        self.block_resource_dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self.block_resource_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+        if hasattr(self, '_setup_dialog_persistence'):
+            self._setup_dialog_persistence(self.block_resource_dialog, 'block_resource_dialog')
+
+        layout = QVBoxLayout(self.block_resource_dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.block_resource_panel = BlockModelResourcePanel()
+        layout.addWidget(self.block_resource_panel)
+
+        if self.controller:
+            self.block_resource_panel.bind_controller(self.controller)
+
+        if hasattr(self.block_resource_panel, 'highlight_blocks_requested'):
+            self.block_resource_panel.highlight_blocks_requested.connect(
+                self.on_block_resource_highlight
+            )
+        if hasattr(self.block_resource_panel, 'visualize_classification_requested'):
+            self.block_resource_panel.visualize_classification_requested.connect(
+                self.on_visualize_resource_classification
+            )
+
+        if hasattr(self, 'current_model') and self.current_model:
+            self.block_resource_panel.set_block_model(self.current_model)
+
+        logger.info("Opened Block Model Resource panel in separate window")
+        self.block_resource_dialog.show()
+
+    def open_sensitivity_panel(self):
+        """Open Cut-off Sensitivity Analysis panel (placeholder)."""
+        QMessageBox.information(
+            self,
+            "Sensitivity Analysis",
+            "Cut-off Sensitivity Analysis\n\n"
+            "This feature will allow you to:\n"
+            "- Generate grade-tonnage curves\n"
+            "- Analyze cut-off sensitivity for both block models and drillholes\n"
+            "- Export results for reporting\n\n"
+            "Coming soon!"
+        )
+
+    def open_cross_section_manager(self):
+        """Open the Cross-Section Manager dialog."""
+        if not self._has_valid_block_model():
+            QMessageBox.information(self, "No Model", "Load a block model first to create cross-sections.")
+            return
+        try:
+            from ..cross_section_manager_panel import CrossSectionManagerPanel
+            if not hasattr(self, 'cross_section_manager_dialog') or self.cross_section_manager_dialog is None:
+                self.cross_section_manager_dialog = QDialog()
+                self.cross_section_manager_dialog.setWindowTitle("Cross-Section Manager")
+                self.cross_section_manager_dialog.resize(500, 750)
+                self.cross_section_manager_dialog.setWindowFlags(
+                    Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint |
+                    Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint
+                )
+                self.cross_section_manager_dialog.setModal(False)
+                layout = QVBoxLayout(self.cross_section_manager_dialog)
+                self.cross_section_manager_panel = CrossSectionManagerPanel(
+                    self.cross_section_manager_dialog, signals=self.signals
+                )
+                layout.addWidget(self.cross_section_manager_panel)
+                self.cross_section_manager_panel.set_main_window(self)
+                import pandas as pd
+                if isinstance(self.current_model, pd.DataFrame):
+                    block_df = self.current_model
+                elif hasattr(self.current_model, 'to_dataframe'):
+                    block_df = self.current_model.to_dataframe()
+                else:
+                    block_df = None
+                grid_spec = getattr(self.current_model, 'grid_spec', None) if not isinstance(self.current_model, pd.DataFrame) else None
+                if block_df is not None:
+                    self.cross_section_manager_panel.set_block_model(block_df, grid_spec)
+                self.cross_section_manager_panel.section_render_requested.connect(self._on_section_render_requested)
+            self.cross_section_manager_dialog.show()
+            self.cross_section_manager_dialog.raise_()
+            self.cross_section_manager_dialog.activateWindow()
+        except Exception as e:
+            logger.error(f"Error opening cross-section manager: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Failed to open Cross-Section Manager:\n{str(e)}")
+
+    def open_cross_section_panel(self):
+        """Open Cross-Section Tool panel in a separate window."""
+        if hasattr(self, 'cross_section_dialog') and self._is_dialog_valid(self.cross_section_dialog):
+            self.cross_section_dialog.show()
+            self.cross_section_dialog.raise_()
+            self.cross_section_dialog.activateWindow()
+            return
+        mesh = None
+        scalar_field = None
+        colormap = getattr(self.viewer_widget, 'current_colormap', 'viridis')
+        if self.current_model and hasattr(self.viewer_widget, 'renderer') and hasattr(self.viewer_widget.renderer, 'block_meshes'):
+            block_meshes = self.viewer_widget.renderer.block_meshes
+            if 'unstructured_grid' in block_meshes:
+                mesh = block_meshes['unstructured_grid']
+                scalar_field = getattr(self.viewer_widget, 'current_property', None)
+                if scalar_field is None:
+                    scalar_field = getattr(self.viewer_widget.renderer, 'current_property', None)
+                if scalar_field is None and self.current_model.properties:
+                    scalar_field = list(self.current_model.properties.keys())[0]
+        if mesh is None:
+            QMessageBox.warning(self, "No Data", "Please load and visualize data first.")
+            return
+        from ..cross_section_panel import CrossSectionPanel
+        self.cross_section_dialog = QDialog(None)
+        self.cross_section_dialog.setWindowTitle("Cross-Section Tool")
+        self.cross_section_dialog.resize(400, 600)
+        self.cross_section_dialog.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.cross_section_dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self.cross_section_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        if hasattr(self, '_setup_dialog_persistence'):
+            self._setup_dialog_persistence(self.cross_section_dialog, 'cross_section_dialog')
+        layout = QVBoxLayout(self.cross_section_dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        self.cross_section_panel = CrossSectionPanel(signals=self.signals)
+        layout.addWidget(self.cross_section_panel)
+        self.cross_section_panel.set_mesh(mesh, scalar_field=scalar_field, colormap=colormap)
+        self.cross_section_panel.set_plotter(self.viewer_widget.plotter)
+        if hasattr(self, '_signal_coordinator'):
+            self._signal_coordinator.wire_panel_dialog_signals(self.cross_section_panel)
+        self.cross_section_dialog.show()
+
+    def open_drillhole_resource_panel(self):
+        """DrillholeResourcePanel removed - use BlockModelResourcePanel instead."""
+        QMessageBox.information(
+            self, "Panel Removed",
+            "DrillholeResourcePanel has been removed as it was redundant.\n\n"
+            "To calculate resources from drillholes:\n"
+            "1. Build a block model from drillholes first\n"
+            "2. Use BlockModelResourcePanel for resource calculation"
+        )
+
+    def open_filter_tool(self):
+        """Open filter tool (focus property panel)."""
+        if hasattr(self, 'property_dock') and self.property_dock:
+            self.property_dock.show()
+            self.property_dock.raise_()
+        if hasattr(self, 'status_bar') and self.status_bar:
+            self.status_bar.showMessage("Use Property Panel for filtering", 2000)
+
+    def open_interactive_slicer(self):
+        """Open the Interactive Slicer panel."""
+        try:
+            self.panel_manager.show_panel("InteractiveSlicerPanel")
+            panel_instance = self.panel_manager.get_panel_instance("InteractiveSlicerPanel")
+            if panel_instance and hasattr(self, 'viewer_widget') and hasattr(self.viewer_widget, 'renderer'):
+                panel_instance.set_renderer(self.viewer_widget.renderer)
+                panel_instance.refresh_layers()
+            # Wire rangeChanged/clipping_changed so slicing actually applies
+            if panel_instance and hasattr(self, '_signal_coordinator'):
+                self._signal_coordinator.wire_panel_dialog_signals(panel_instance)
+        except Exception as e:
+            logger.error(f"Error opening interactive slicer: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Failed to open Interactive Slicer:\n{str(e)}")
+
+    def open_selection_manager(self):
+        """Open the Block Selection Manager dialog."""
+        if not self._has_valid_block_model():
+            QMessageBox.information(self, "No Model", "Load a block model first to use selection tools.")
+            return
+        try:
+            from ..selection_panel import SelectionPanel
+            if not hasattr(self, 'selection_dialog') or self.selection_dialog is None:
+                self.selection_dialog = QDialog()
+                self.selection_dialog.setWindowTitle("Block Selection Manager")
+                self.selection_dialog.resize(450, 800)
+                self.selection_dialog.setWindowFlags(
+                    Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint |
+                    Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint
+                )
+                self.selection_dialog.setModal(False)
+                layout = QVBoxLayout(self.selection_dialog)
+                self.selection_panel = SelectionPanel(self.selection_dialog)
+                layout.addWidget(self.selection_panel)
+                self.selection_panel.set_main_window(self)
+                self.selection_panel.selection_changed.connect(self._on_selection_changed)
+            if hasattr(self, 'viewer_widget') and hasattr(self.viewer_widget, 'renderer'):
+                self.selection_panel.set_plotter(self.viewer_widget.renderer.plotter)
+            import pandas as pd
+            block_df = None
+            if self.current_model is not None:
+                if isinstance(self.current_model, pd.DataFrame):
+                    block_df = self.current_model
+                elif hasattr(self.current_model, 'to_dataframe'):
+                    block_df = self.current_model.to_dataframe()
+            if block_df is None:
+                block_df = self._get_block_model_from_layers()
+            if block_df is not None:
+                self.selection_panel.set_block_model(block_df, getattr(self.current_model, 'grid_spec', None))
+            self.selection_dialog.show()
+            self.selection_dialog.raise_()
+            self.selection_dialog.activateWindow()
+        except Exception as e:
+            logger.error(f"Error opening selection manager: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Failed to open Selection Manager:\n{str(e)}")
+
+    def open_slice_tool(self):
+        """Open slice tool (focus property panel)."""
+        if hasattr(self, 'property_dock') and self.property_dock:
+            self.property_dock.show()
+            self.property_dock.raise_()
+        if hasattr(self, 'status_bar') and self.status_bar:
+            self.status_bar.showMessage("Use Property Panel for slicing", 2000)

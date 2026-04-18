@@ -93,47 +93,47 @@ class ColorPalette:
 #   TEXT_DISABLED  #666666  →  3.2:1   (below AA, acceptable for disabled)
 
 DARK = ColorPalette(
-    # Backgrounds — neutral warm gray, layered elevation
+    # Backgrounds — VS Code / Material Design-inspired layered elevation
     BG_BASE="#1e1e1e",
     BG_SURFACE="#252526",
-    BG_SURFACE_HOVER="#2a2a2d",
-    BG_ELEVATED="#333337",
-    BG_OVERLAY="#3c3c3f",
+    BG_SURFACE_HOVER="#2a2a2c",
+    BG_ELEVATED="#303032",
+    BG_OVERLAY="#383838",
 
     # Borders — subtle neutral edges
-    BORDER_SUBTLE="#3e3e42",
-    BORDER_DEFAULT="#474747",
-    BORDER_STRONG="#555555",
+    BORDER_SUBTLE="#333333",
+    BORDER_DEFAULT="#3e3e42",
+    BORDER_STRONG="#505054",
 
-    # Text — clear white hierarchy
-    TEXT_PRIMARY="#d4d4d4",
+    # Text — brighter primary for better contrast (11.2:1 on BG_SURFACE)
+    TEXT_PRIMARY="#e4e4e4",
     TEXT_SECONDARY="#a0a0a0",
     TEXT_TERTIARY="#808080",
-    TEXT_DISABLED="#666666",
+    TEXT_DISABLED="#606060",
     TEXT_ON_ACCENT="#ffffff",
-    TEXT_LINK="#569cd6",
+    TEXT_LINK="#4daafc",
 
-    # Accent — professional blue (mining/geo feel)
-    ACCENT="#3b82f6",
-    ACCENT_HOVER="#60a5fa",
-    ACCENT_PRESSED="#2563eb",
-    ACCENT_SUBTLE="#2a3a5c",
-    ACCENT_SECONDARY="#14b8a6",
+    # Accent — Azure blue (muted, professional)
+    ACCENT="#2188d9",
+    ACCENT_HOVER="#2ba0f5",
+    ACCENT_PRESSED="#1a6fb5",
+    ACCENT_SUBTLE="#1a3a52",
+    ACCENT_SECONDARY="#26a69a",
 
-    # Status — vibrant and clear
-    STATUS_SUCCESS="#22c55e",
-    STATUS_SUCCESS_SUBTLE="#1e3a2a",
-    STATUS_WARNING="#f59e0b",
-    STATUS_WARNING_SUBTLE="#3a3020",
-    STATUS_ERROR="#ef4444",
-    STATUS_ERROR_SUBTLE="#3a2020",
-    STATUS_INFO="#38bdf8",
-    STATUS_INFO_SUBTLE="#1e2e3a",
+    # Status — Material Design palette
+    STATUS_SUCCESS="#4caf50",
+    STATUS_SUCCESS_SUBTLE="#1e3a20",
+    STATUS_WARNING="#ffa726",
+    STATUS_WARNING_SUBTLE="#3d2e12",
+    STATUS_ERROR="#ef5350",
+    STATUS_ERROR_SUBTLE="#3d1a1a",
+    STATUS_INFO="#42a5f5",
+    STATUS_INFO_SUBTLE="#1a2e3d",
 
     # Special
-    HIGHLIGHT="#f59e0b",
-    SHADOW="rgba(0, 0, 0, 0.45)",
-    FOCUS_RING="#3b82f6",
+    HIGHLIGHT="#ffa726",
+    SHADOW="rgba(0, 0, 0, 0.4)",
+    FOCUS_RING="#2188d9",
 )
 
 
@@ -145,47 +145,47 @@ DARK = ColorPalette(
 #   TEXT_DISABLED  #a0a0a0  →  2.7:1   (below AA, acceptable for disabled)
 
 LIGHT = ColorPalette(
-    # Backgrounds — clean, airy surfaces
-    BG_BASE="#f0f2f7",
+    # Backgrounds — neutral gray (typical desktop engineering software)
+    BG_BASE="#f0f0f0",
     BG_SURFACE="#ffffff",
-    BG_SURFACE_HOVER="#f5f6fa",
+    BG_SURFACE_HOVER="#f7f7f8",
     BG_ELEVATED="#ffffff",
     BG_OVERLAY="#ffffff",
 
-    # Borders — soft and refined
-    BORDER_SUBTLE="#e5e7ef",
-    BORDER_DEFAULT="#d0d4e0",
-    BORDER_STRONG="#b0b6c8",
+    # Borders — soft neutral
+    BORDER_SUBTLE="#e8e8e8",
+    BORDER_DEFAULT="#d4d4d4",
+    BORDER_STRONG="#b0b0b0",
 
-    # Text — deep ink hierarchy
-    TEXT_PRIMARY="#111827",
-    TEXT_SECONDARY="#4b5563",
-    TEXT_TERTIARY="#9ca3af",
-    TEXT_DISABLED="#c0c4cc",
+    # Text — neutral gray hierarchy
+    TEXT_PRIMARY="#1a1a1a",
+    TEXT_SECONDARY="#5c5c5c",
+    TEXT_TERTIARY="#808080",
+    TEXT_DISABLED="#a0a0a0",
     TEXT_ON_ACCENT="#ffffff",
-    TEXT_LINK="#2563eb",
+    TEXT_LINK="#1a73c7",
 
-    # Accent
-    ACCENT="#2563eb",
-    ACCENT_HOVER="#3b82f6",
-    ACCENT_PRESSED="#1d4ed8",
-    ACCENT_SUBTLE="#eff6ff",
-    ACCENT_SECONDARY="#0d9488",
+    # Accent — Google blue
+    ACCENT="#1a73c7",
+    ACCENT_HOVER="#1e88e5",
+    ACCENT_PRESSED="#155da3",
+    ACCENT_SUBTLE="#e3f0fc",
+    ACCENT_SECONDARY="#00897b",
 
-    # Status
-    STATUS_SUCCESS="#16a34a",
-    STATUS_SUCCESS_SUBTLE="#f0fdf4",
-    STATUS_WARNING="#d97706",
-    STATUS_WARNING_SUBTLE="#fffbeb",
-    STATUS_ERROR="#dc2626",
-    STATUS_ERROR_SUBTLE="#fef2f2",
-    STATUS_INFO="#2563eb",
-    STATUS_INFO_SUBTLE="#eff6ff",
+    # Status — Material Design palette
+    STATUS_SUCCESS="#2e7d32",
+    STATUS_SUCCESS_SUBTLE="#e8f5e9",
+    STATUS_WARNING="#e65100",
+    STATUS_WARNING_SUBTLE="#fff3e0",
+    STATUS_ERROR="#c62828",
+    STATUS_ERROR_SUBTLE="#fce4ec",
+    STATUS_INFO="#1565c0",
+    STATUS_INFO_SUBTLE="#e3f2fd",
 
     # Special
-    HIGHLIGHT="#d97706",
-    SHADOW="rgba(0, 0, 0, 0.08)",
-    FOCUS_RING="#2563eb",
+    HIGHLIGHT="#e65100",
+    SHADOW="rgba(0, 0, 0, 0.12)",
+    FOCUS_RING="#1a73c7",
 )
 
 
@@ -207,10 +207,10 @@ SPACING_XL = 24        # Page-level: major layout divisions
 # =============================================================================
 
 # Input heights (outer height including border)
-HEIGHT_INPUT = 34          # Combo box, spin box, line edit
-HEIGHT_BUTTON = 38         # Standard buttons
-HEIGHT_BUTTON_SM = 30      # Small buttons (OK, Cancel in dialogs)
-HEIGHT_BUTTON_LG = 46      # Large call-to-action buttons
+HEIGHT_INPUT = 32          # Combo box, spin box, line edit
+HEIGHT_BUTTON = 36         # Standard buttons
+HEIGHT_BUTTON_SM = 28      # Small buttons (OK, Cancel in dialogs)
+HEIGHT_BUTTON_LG = 44      # Large call-to-action buttons
 
 # Minimum widths
 WIDTH_COMBO_MIN = 160
@@ -256,9 +256,9 @@ FONT_WEIGHT_BOLD = 700
 # =============================================================================
 
 BORDER_WIDTH = 1
-BORDER_RADIUS_SM = 6      # Inputs, small elements
-BORDER_RADIUS_MD = 8      # Cards, buttons, groups
-BORDER_RADIUS_LG = 12     # Large containers, dialogs
+BORDER_RADIUS_SM = 4      # Inputs, small elements
+BORDER_RADIUS_MD = 6      # Cards, buttons, groups
+BORDER_RADIUS_LG = 8      # Large containers, dialogs
 
 
 # =============================================================================
@@ -275,18 +275,18 @@ ICON_SIZE_XL = 48          # Dialog icons, empty states
 # ANIMATION
 # =============================================================================
 
-ANIM_DURATION_FAST = 150   # Collapse/expand, tooltips
-ANIM_DURATION_NORMAL = 250 # Transitions, fades
-ANIM_DURATION_SLOW = 400   # Page transitions, complex animations
+ANIM_DURATION_FAST = 100   # Collapse/expand, tooltips
+ANIM_DURATION_NORMAL = 200 # Transitions, fades
+ANIM_DURATION_SLOW = 350   # Page transitions, complex animations
 
 
 # =============================================================================
 # SCROLLBAR
 # =============================================================================
 
-SCROLLBAR_WIDTH = 8
-SCROLLBAR_MIN_HANDLE = 30
-SCROLLBAR_RADIUS = 4
+SCROLLBAR_WIDTH = 10
+SCROLLBAR_MIN_HANDLE = 24
+SCROLLBAR_RADIUS = 5
 
 
 # =============================================================================
@@ -390,13 +390,13 @@ tokens = _Tokens()
 # =============================================================================
 
 VIS_PALETTES: Dict[str, List[str]] = {
-    "geology":      ["#d4a06a", "#f0e6d3", "#8b6914", "#a7dbd8", "#45b7a0"],
-    "resource":     ["#3b82f6", "#22c55e", "#ef4444", "#f59e0b", "#8b5cf6"],
-    "uncertainty":  ["#6d28d9", "#8b5cf6", "#a78bfa", "#c4b5fd", "#ede9fe"],
-    "esg":          ["#16a34a", "#4ade80", "#a3e635", "#fde047", "#064e3b"],
-    "pit":          ["#dc2626", "#f87171", "#fecaca", "#bfdbfe", "#2563eb"],
-    "underground":  ["#0ea5e9", "#67e8f9", "#ecfdf5", "#a7f3d0", "#1e3a5f"],
-    "heatmap":      ["#1e3a8a", "#3b82f6", "#93c5fd", "#fde68a", "#f97316", "#991b1b"],
-    "categorical":  ["#ef4444", "#3b82f6", "#22c55e", "#a855f7", "#f59e0b",
-                     "#78350f", "#ec4899", "#6b7280"],
+    "geology":      ["#d8b365", "#f5f5dc", "#8c510a", "#c7eae5", "#5ab4ac"],
+    "resource":     ["#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a"],
+    "uncertainty":  ["#54278f", "#756bb1", "#bcbddc", "#d4b9da", "#f1eef6"],
+    "esg":          ["#238b45", "#78c679", "#c2e699", "#f7fcb1", "#004529"],
+    "pit":          ["#b2182b", "#ef8a62", "#fddbc7", "#d1e5f0", "#2166ac"],
+    "underground":  ["#2c7fb8", "#7fcdbb", "#edf8b1", "#c7e9b4", "#253494"],
+    "heatmap":      ["#313695", "#4575b4", "#abd9e9", "#fee090", "#f46d43", "#a50026"],
+    "categorical":  ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
+                     "#a65628", "#f781bf", "#999999"],
 }

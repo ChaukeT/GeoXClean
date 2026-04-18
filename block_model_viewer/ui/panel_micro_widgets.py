@@ -330,18 +330,29 @@ class BusyOverlay(QWidget):
 # ═══════════════════════════════════════════════════════════════════
 
 MICRO_WIDGET_QSS = f"""
-/* Confirm button armed state */
-QPushButton#btn_danger_armed {{
-    background-color: #f44336;
-    color: #ffffff;
-    font-weight: 700;
-    border: 2px solid #d32f2f;
-    border-radius: 6px;
+/* Confirm button styles */
+QPushButton#btn_danger {{
+    background-color: transparent;
+    color: {ModernColors.TEXT_SECONDARY};
+    border: 1px solid {ModernColors.BORDER};
+    border-radius: 4px;
     padding: 4px 12px;
-    min-height: 28px;
-    animation: pulse 0.3s;
 }}
-QPushButton#btn_danger_armed:hover {{
-    background-color: #e53935;
+QPushButton#btn_danger:hover {{
+    border-color: #e74c3c;
+    color: #e74c3c;
+}}
+QPushButton#btn_danger_armed {{
+    background-color: #e74c3c;
+    color: white;
+    border: 1px solid #c0392b;
+    border-radius: 4px;
+    padding: 4px 12px;
+}}
+QPushButton#btn_toggle:checked {{
+    background-color: {ModernColors.ACCENT_PRIMARY};
+    color: white;
+    border: 1px solid {ModernColors.ACCENT_PRIMARY};
+    border-radius: 4px;
 }}
 """

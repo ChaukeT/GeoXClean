@@ -190,8 +190,13 @@ class PanelManager(QObject):
             minimum_height: Minimum height in pixels
             tooltip: Help tooltip
         """
-        # Get panel ID from class
+        # Get panel ID from class. If the class only inherits PANEL_ID from
+        # BaseDockPanel/BasePanel (i.e. didn't set its own), fall back to the
+        # class's __name__ so sibling subclasses don't collide under a shared
+        # PANEL_ID like "BaseDockPanel".
         panel_id = getattr(panel_class, 'PANEL_ID', panel_class.__name__)
+        if panel_id in ('BaseDockPanel', 'BasePanel'):
+            panel_id = panel_class.__name__
 
         # Generate display name
         name = getattr(panel_class, 'PANEL_NAME', panel_class.__name__)

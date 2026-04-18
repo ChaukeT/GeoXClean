@@ -136,7 +136,6 @@ class PanelRegistrar:
             from .cosgsim_panel import CoSGSIMPanel
             from .turning_bands_panel import TurningBandsPanel
             from .mps_panel import MPSPanel
-            from .direct_block_sim import DirectBlockSimPanel
             from .dbs_panel import DBSPanel
             from .declustering_panel import DeclusteringPanel
             from .scan_panel import ScanPanel
@@ -158,7 +157,6 @@ class PanelRegistrar:
                 (CoSGSIMPanel, PanelCategory.GEOSTATS, "sgsim", None, DockArea.LEFT, False, "Co-Sequential Gaussian Simulation"),
                 (TurningBandsPanel, PanelCategory.GEOSTATS, "turning_bands", None, DockArea.LEFT, False, "Turning Bands simulation"),
                 (MPSPanel, PanelCategory.GEOSTATS, "mps", None, DockArea.LEFT, False, "Multiple Point Statistics"),
-                (DirectBlockSimPanel, PanelCategory.GEOSTATS, "block", None, DockArea.LEFT, False, "Direct block simulation"),
                 (DBSPanel, PanelCategory.GEOSTATS, "block", None, DockArea.LEFT, False, "Distance Based Simulation"),
                 (DeclusteringPanel, PanelCategory.GEOSTATS, "decluster", None, DockArea.LEFT, False, "Sample declustering"),
                 (ScanPanel, PanelCategory.ANALYSIS, "scan", "Ctrl+Shift+S", DockArea.RIGHT, False, "Scan analysis and fragmentation"),
@@ -170,6 +168,32 @@ class PanelRegistrar:
 
         except ImportError as e:
             logger.warning(f"Some geostats panels not available: {e}")
+
+        # Register new panels (added independently so a failure in one doesn't block others)
+        new_panels = [
+            ('arbf_panel', 'ARBFPanel', PanelCategory.GEOSTATS, 'rbf', None, DockArea.LEFT, False, 'Adaptive RBF estimation'),
+            ('arbf_estimation_panel', 'ARBFEstimationPanel', PanelCategory.GEOSTATS, 'rbf', None, DockArea.LEFT, False, 'ARBF estimation workflow'),
+            ('indicator_rbf_panel', 'IndicatorRBFPanel', PanelCategory.GEOSTATS, 'rbf', None, DockArea.LEFT, False, 'Indicator RBF estimation'),
+            ('fastrbf_panel', 'FastRBFPanel', PanelCategory.GEOSTATS, 'rbf', None, DockArea.LEFT, False, 'Fast RBF estimation'),
+            ('bayesian_kriging_panel', 'BayesianKrigingPanel', PanelCategory.GEOSTATS, 'kriging', None, DockArea.LEFT, False, 'Bayesian kriging'),
+            ('geological_model_panel', 'GeologicalModelPanel', PanelCategory.ANALYSIS, 'geology', None, DockArea.LEFT, False, 'Implicit geological modelling'),
+            ('lithology_manager_panel', 'LithologyManagerPanel', PanelCategory.ANALYSIS, 'geology', None, DockArea.LEFT, False, 'Lithology domain manager'),
+            ('block_model_filter_panel', 'BlockModelFilterPanel', PanelCategory.ANALYSIS, 'filter', None, DockArea.LEFT, False, 'Block model filtering'),
+            ('clip_plane_panel', 'ClipPlaneWindow', PanelCategory.ANALYSIS, 'clip', None, DockArea.LEFT, False, 'Clip plane interactive'),
+            ('define_block_model_panel', 'DefineBlockModelPanel', PanelCategory.ANALYSIS, 'block', None, DockArea.LEFT, False, 'Define block model grid'),
+            ('frag_import_panel', 'FragImportPanel', PanelCategory.ANALYSIS, 'scan', None, DockArea.LEFT, False, 'Fragmentation import'),
+            ('frag_preprocessing_panel', 'FragPreprocessingPanel', PanelCategory.ANALYSIS, 'scan', None, DockArea.LEFT, False, 'Fragmentation preprocessing'),
+            ('frag_segmentation_panel', 'FragSegmentationPanel', PanelCategory.ANALYSIS, 'scan', None, DockArea.LEFT, False, 'Fragmentation segmentation'),
+            ('frag_results_panel', 'FragResultsPanel', PanelCategory.ANALYSIS, 'scan', None, DockArea.LEFT, False, 'Fragmentation results'),
+            ('frag_editor_panel', 'FragEditorPanel', PanelCategory.ANALYSIS, 'scan', None, DockArea.LEFT, False, 'Fragmentation editor'),
+        ]
+        for module_name, class_name, category, icon, shortcut, dock_area, visible, tooltip in new_panels:
+            try:
+                mod = __import__(f'block_model_viewer.ui.{module_name}', fromlist=[class_name])
+                panel_class = getattr(mod, class_name)
+                self._register_single_panel(panel_class, category, icon, shortcut, dock_area, visible, tooltip)
+            except (ImportError, AttributeError) as e:
+                logger.debug(f"Could not register {class_name}: {e}")
 
 
     def _register_drillhole_panels(self):
@@ -219,10 +243,10 @@ class PanelRegistrar:
     def _register_planning_panels(self):
         """Register mine planning and scheduling panels."""
         try:
-            from .mine_planning.npvs.npvs_panel import NPVSPanel
-            from .mine_planning.scheduling.short_term_schedule_panel import ShortTermSchedulePanel
-            from .mine_planning.scheduling.strategic_schedule_panel import StrategicSchedulePanel
-            from .mine_planning.scheduling.tactical_schedule_panel import TacticalSchedulePanel
+            from .npvs_panel import NPVSPanel
+            from .short_term_schedule_panel import ShortTermSchedulePanel
+            from .strategic_schedule_panel import StrategicSchedulePanel
+            from .tactical_schedule_panel import TacticalSchedulePanel
             from .planning_dashboard_panel import PlanningDashboardPanel
             from .production_dashboard_panel import ProductionDashboardPanel
             from .research_dashboard_panel import ResearchDashboardPanel
@@ -339,18 +363,8 @@ class PanelRegistrar:
 
     def _register_chart_panels(self):
         """Register chart and visualization panels."""
-        try:
-            from .separated_charts import SeparatedChartsPanel
-
-            chart_panels = [
-                (SeparatedChartsPanel, PanelCategory.CHART, "chart", None, DockArea.RIGHT, False, "Separated charts"),
-            ]
-
-            for panel_class, category, icon, shortcut, dock_area, visible, tooltip in chart_panels:
-                self._register_single_panel(panel_class, category, icon, shortcut, dock_area, visible, tooltip)
-
-        except ImportError as e:
-            logger.warning(f"Chart panels not available: {e}")
+        # SeparatedChartsPanel removed — no such class on separated_charts.py
+        pass
 
     def _register_config_panels(self):
         """Register configuration and utility panels."""
@@ -388,8 +402,12 @@ class PanelRegistrar:
             tooltip: Help tooltip
         """
         try:
-            # Get panel ID from class
+            # Get panel ID from class. If the class only inherits PANEL_ID from
+            # BaseDockPanel/BasePanel (i.e. didn't override), fall back to the
+            # class's own __name__ so sibling subclasses don't collide.
             panel_id = getattr(panel_class, 'PANEL_ID', panel_class.__name__)
+            if panel_id in ('BaseDockPanel', 'BasePanel'):
+                panel_id = panel_class.__name__
 
             if panel_id in self._registered_panels:
                 logger.debug(f"Panel {panel_id} already registered, skipping")

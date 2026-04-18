@@ -493,7 +493,11 @@ class BasePanel(QWidget):
         """Add a horizontal separator line to main layout."""
         line = QWidget()
         line.setFixedHeight(1)
-        line.setStyleSheet("background-color: #555;")
+        try:
+            from .modern_styles import ModernColors
+            line.setStyleSheet(f"background-color: {ModernColors.BORDER};")
+        except Exception:
+            line.setStyleSheet("background-color: #3e3e42;")  # fallback = DARK.BORDER_DEFAULT
         self.main_layout.addWidget(line)
     
     # =========================================================================

@@ -49,17 +49,17 @@ logger = logging.getLogger(__name__)
 # Micromine reference).  Previous values caused a "squeezed" look.
 # Increased across the board for breathing room and legibility.
 
-PANEL_MARGINS = (16, 16, 16, 16)          # left, top, right, bottom  (was 12)
-PANEL_SPACING = 18                         # between sections          (was 12)
-SECTION_SPACING = 12                       # within a section          (was 8)
-FORM_V_SPACING = 12                        # form vertical             (was 8)
-FORM_H_SPACING = 14                        # form horizontal           (was 12)
-COMBO_MIN_HEIGHT = 34                      # combobox height           (was 28)
-BUTTON_HEIGHT_PRIMARY = 40                 # primary button            (was 32)
-BUTTON_HEIGHT_SECONDARY = 34              # secondary button           (was 28)
-LABEL_FONT_SIZE = "12px"                   # form labels               (was 11px)
+PANEL_MARGINS = (12, 12, 12, 12)          # Pictures tight spacing
+PANEL_SPACING = 12                         # between sections
+SECTION_SPACING = 8                        # within a section
+FORM_V_SPACING = 8                         # form vertical
+FORM_H_SPACING = 12                        # form horizontal
+COMBO_MIN_HEIGHT = 28                      # combobox height
+BUTTON_HEIGHT_PRIMARY = 32                 # primary button
+BUTTON_HEIGHT_SECONDARY = 28               # secondary button
+LABEL_FONT_SIZE = "11px"                   # form labels
 PANEL_MIN_WIDTH = 280
-PANEL_MAX_WIDTH = 400
+PANEL_MAX_WIDTH = 380
 
 
 # ═══════════════════════════════════════════════════════════════════
