@@ -980,10 +980,11 @@ class GeologicalAuditVerdictTable(QFrame):
         w['badge'].setProperty("pillStatus", status)
         _refresh_style(w['badge'])
 
-        w['what'].setText(f"What: {v.get('what') or '\u2014'}")
-        w['where'].setText(f"Where: {v.get('where') or '\u2014'}")
-        w['why'].setText(f"Why: {v.get('why') or '\u2014'}")
-        w['impact'].setText(f"Impact: {v.get('impact') or '\u2014'}")
+        _dash = "\u2014"
+        w['what'].setText(f"What: {v.get('what') or _dash}")
+        w['where'].setText(f"Where: {v.get('where') or _dash}")
+        w['why'].setText(f"Why: {v.get('why') or _dash}")
+        w['impact'].setText(f"Impact: {v.get('impact') or _dash}")
 
     def _toggle_expand(self, check_id: str) -> None:
         if check_id not in self._row_widgets:
@@ -1305,8 +1306,9 @@ class ModelBuildExecutionPanel(QFrame):
 
     def set_seed(self, seed: Optional[int] = None) -> None:
         self._seed = seed
+        _dash = "\u2014"
         self._seed_label.setText(
-            f"Seed: {seed}" if seed is not None else "Seed: \u2014")
+            f"Seed: {seed}" if seed is not None else f"Seed: {_dash}")
 
     def set_warnings(self, warnings: List[str]) -> None:
         self._warnings = warnings
