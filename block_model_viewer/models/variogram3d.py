@@ -1810,5 +1810,355 @@ def plot_variogram_cloud(
     )
     
     logger.info(f"Variogram cloud generated: {len(distances)} pairs")
-    
+
     return distances, gamma_values
+
+
+# ============================================================
+# VARIOGRAM SETTINGS RECOMMENDER
+# ============================================================
+def recommend_variogram_settings(
+    df: pd.DataFrame,
+    vcol: str = "Fe",
+    xcol: str = "X",
+    ycol: str = "Y",
+    zcol: str = "Z",
+    z_positive_up: bool = True,
+    random_state: Optional[int] = 42,
+    sample_weights: Optional[np.ndarray] = None,
+    progress_callback: Optional[Any] = None,
+) -> dict:
+    """
+    Recommend optimal variogram settings by probing the data.
+
+    This function analyses the spatial data, calculates auto-lags,
+    runs probe variograms in several directions, scores model families
+    (spherical, exponential, gaussian) and returns a recommendation
+    dict that can be applied directly to the variogram analysis UI.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Drillhole data containing coordinate and grade columns.
+    vcol : str
+        Name of the grade / value column.
+    xcol, ycol, zcol : str
+        Coordinate column names (auto-detected if missing).
+    z_positive_up : bool
+        Whether Z increases upward.
+    random_state : int, optional
+        Seed for reproducible subsampling.
+    sample_weights : np.ndarray, optional
+        Per-sample declustering weights.
+    progress_callback : callable, optional
+        ``callback(percent: int, message: str)`` for UI progress.
+
+    Returns
+    -------
+    dict
+        ``{"settings": {...}, "analysis": {...}, "rationale": [...]}``
+    """
+
+    def _progress(pct: int, msg: str):
+        if progress_callback is not None:
+            progress_callback(pct, msg)
+
+    _progress(0, "Starting variogram recommendation …")
+
+    config = VARIOGRAM_CONFIG
+
+    # ------------------------------------------------------------------
+    # 1.  Resolve coordinate columns
+    # ------------------------------------------------------------------
+    from ..utils.coordinate_utils import ensure_xyz_columns
+    try:
+        df = ensure_xyz_columns(df)
+        xcol, ycol, zcol = "X", "Y", "Z"
+    except Exception:
+        pass  # Fall back to caller-supplied names
+
+    required = [xcol, ycol, zcol, vcol]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns in data: {missing}")
+
+    clean = df[required].dropna()
+    if len(clean) < 10:
+        raise ValueError(
+            f"Not enough valid samples ({len(clean)}) for variogram recommendation."
+        )
+
+    coords = clean[[xcol, ycol, zcol]].values.astype(float)
+    values = clean[vcol].values.astype(float)
+    n_samples = len(clean)
+    sample_variance = float(np.nanvar(values))
+
+    rationale: list[str] = []
+    rationale.append(f"Dataset contains {n_samples} valid samples (variance = {sample_variance:.4f}).")
+
+    _progress(10, "Analysing data geometry …")
+
+    # ------------------------------------------------------------------
+    # 2.  Compute median drill spacing via nearest neighbours
+    # ------------------------------------------------------------------
+    median_spacing = float("nan")
+    try:
+        if cKDTree is not None and coords.shape[0] >= 5:
+            tree = cKDTree(coords[:, :2])
+            dists, _ = tree.query(coords[:, :2], k=2)
+            nn_dists = dists[:, 1]
+            median_spacing = float(np.median(nn_dists[nn_dists > 0]))
+            rationale.append(f"Median XY nearest-neighbour spacing ≈ {median_spacing:.1f} m.")
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------
+    # 3.  Auto-lag calculation
+    # ------------------------------------------------------------------
+    _progress(15, "Calculating auto-lags …")
+
+    # Detect FROM/TO columns for composite-length estimation
+    from_depths, to_depths = None, None
+    for fcand in ["FROM", "from", "From", "FROM_DEPTH"]:
+        if fcand in df.columns:
+            from_depths = df.loc[clean.index, fcand].values
+            break
+    for tcand in ["TO", "to", "To", "TO_DEPTH"]:
+        if tcand in df.columns:
+            to_depths = df.loc[clean.index, tcand].values
+            break
+
+    h_nlags, h_lag, h_max = calculate_auto_lags(
+        coords, direction="horizontal",
+        from_depths=from_depths, to_depths=to_depths,
+    )
+    rationale.append(f"Auto-lags (horizontal): lag = {h_lag:.1f} m, n_lags = {h_nlags}.")
+
+    rec_nlag = h_nlags
+    rec_lag_distance = round(float(h_lag), 2)
+    rec_lag_tolerance = round(rec_lag_distance * 0.3, 2)
+
+    # ------------------------------------------------------------------
+    # 4.  Orientation probe – sweep 4 azimuths to find anisotropy
+    # ------------------------------------------------------------------
+    _progress(25, "Probing anisotropy …")
+
+    probe_cone = float(config.get("default_cone_tolerance", 15.0))
+    max_dir_samples = int(config.get("max_directional_samples", 1500))
+
+    # Sub-sample for speed
+    rng = np.random.RandomState(random_state)
+    if n_samples > max_dir_samples:
+        idx = rng.choice(n_samples, max_dir_samples, replace=False)
+        probe_coords = coords[idx]
+        probe_values = values[idx]
+        probe_weights = sample_weights[idx] if sample_weights is not None else None
+    else:
+        probe_coords = coords
+        probe_values = values
+        probe_weights = sample_weights
+
+    vgm = Variogram3D(
+        n_lags=rec_nlag,
+        lag_distance=rec_lag_distance,
+        lag_tolerance=rec_lag_tolerance,
+        z_positive_up=z_positive_up,
+        random_state=random_state,
+        auto_lags=False,
+        n_structures=1,
+    )
+
+    sweep_azimuths = [0.0, 45.0, 90.0, 135.0]
+    best_az = 0.0
+    best_range = 0.0
+    az_ranges: dict[float, float] = {}
+
+    for az in sweep_azimuths:
+        try:
+            vg_df = vgm.calculate_directional(
+                probe_coords, probe_values, probe_weights,
+                azimuth_deg=az, dip_deg=0.0, cone_tolerance=probe_cone,
+                n_lags=rec_nlag, max_range=h_max,
+            )
+            if len(vg_df) >= 3:
+                nug, psill, prange = vgm.fit_model(
+                    vg_df["distance"].to_numpy(float),
+                    vg_df["gamma"].to_numpy(float),
+                    model_type="spherical",
+                )
+                az_ranges[az] = prange
+                if prange > best_range:
+                    best_range = prange
+                    best_az = az
+        except Exception:
+            continue
+
+    _progress(45, "Orientation analysis done")
+
+    orientation_ratio = 1.0
+    minor_az = (best_az + 90.0) % 360.0
+    if best_az in az_ranges and minor_az in az_ranges:
+        minor_range = az_ranges.get(minor_az, best_range)
+        if minor_range > 0:
+            orientation_ratio = best_range / minor_range
+
+    orientation_source = "probe_sweep"
+    use_manual_azimuth = orientation_ratio > 1.3
+    if use_manual_azimuth:
+        rationale.append(
+            f"Anisotropy detected: major azimuth ≈ {best_az:.0f}° "
+            f"(range ratio {orientation_ratio:.2f})."
+        )
+    else:
+        rationale.append("No strong directional anisotropy detected; omni-directional mode recommended.")
+        best_az = 0.0
+
+    # ------------------------------------------------------------------
+    # 5.  Model family scoring – fit spherical / exponential / gaussian
+    # ------------------------------------------------------------------
+    _progress(55, "Scoring model families …")
+
+    # Use omnidirectional probe for model scoring
+    try:
+        omni_df = vgm.calculate_omnidirectional(
+            probe_coords, probe_values, probe_weights,
+            n_lags=rec_nlag, max_range=h_max,
+        )
+    except Exception:
+        omni_df = pd.DataFrame({"distance": [], "gamma": [], "npairs": []})
+
+    model_scores: dict[str, float] = {}
+    best_model = "spherical"
+    best_score = float("inf")
+
+    if len(omni_df) >= 3:
+        exp_dist = omni_df["distance"].to_numpy(float)
+        exp_gamma = omni_df["gamma"].to_numpy(float)
+
+        for mtype in ["spherical", "exponential", "gaussian"]:
+            try:
+                nug, psill, prange = vgm.fit_model(exp_dist, exp_gamma, model_type=mtype)
+                if prange <= 0 or psill <= 0:
+                    continue
+                predicted = np.array([
+                    MODEL_MAP[mtype](h, prange, psill + nug, nug) for h in exp_dist
+                ])
+                rmse = float(np.sqrt(np.mean((predicted - exp_gamma) ** 2)))
+                model_scores[mtype] = round(rmse, 6)
+                if rmse < best_score:
+                    best_score = rmse
+                    best_model = mtype
+            except Exception:
+                continue
+
+    rationale.append(f"Best-fit model family: {best_model} (RMSE scores: {model_scores}).")
+
+    _progress(70, "Estimating nugget …")
+
+    # ------------------------------------------------------------------
+    # 6.  Nugget estimation from omnidirectional fit
+    # ------------------------------------------------------------------
+    rec_nugget = None
+    if len(omni_df) >= 3:
+        try:
+            nug, psill, prange = vgm.fit_model(
+                omni_df["distance"].to_numpy(float),
+                omni_df["gamma"].to_numpy(float),
+                model_type=best_model,
+            )
+            if 0 < nug < sample_variance * 0.8:
+                rec_nugget = round(float(nug), 6)
+                rationale.append(f"Global nugget recommendation: {rec_nugget:.4f} (from omni fit).")
+            else:
+                rationale.append("Nugget not locked (omni-fit nugget outside reasonable range).")
+        except Exception:
+            rationale.append("Nugget estimation skipped (fit failed).")
+
+    _progress(80, "Determining structures …")
+
+    # ------------------------------------------------------------------
+    # 7.  Decide number of nested structures
+    # ------------------------------------------------------------------
+    rec_n_structures = 1
+    if len(omni_df) >= 6:
+        # Heuristic: if the semivariance rises quickly then flattens then rises again,
+        # a nested (2-structure) model is indicated.
+        gamma_vals = omni_df["gamma"].to_numpy(float)
+        half = len(gamma_vals) // 2
+        if half >= 2:
+            early_gradient = (gamma_vals[half - 1] - gamma_vals[0]) / max(1, half - 1)
+            late_gradient = (gamma_vals[-1] - gamma_vals[half]) / max(1, len(gamma_vals) - half)
+            if early_gradient > 0 and late_gradient > 0:
+                ratio = late_gradient / early_gradient
+                if 0.15 < ratio < 0.85:
+                    rec_n_structures = 2
+                    rationale.append("Two nested structures recommended (early+late gradients suggest short+long range).")
+
+    # ------------------------------------------------------------------
+    # 8.  Bandwidth recommendation
+    # ------------------------------------------------------------------
+    rec_bandwidth = None
+    if np.isfinite(median_spacing) and median_spacing > 0:
+        rec_bandwidth = round(float(median_spacing * 1.5), 1)
+        rationale.append(f"Bandwidth set to 1.5 × spacing ≈ {rec_bandwidth:.1f} m.")
+
+    # ------------------------------------------------------------------
+    # 9.  Detect weak directions
+    # ------------------------------------------------------------------
+    weak_directions: list[str] = []
+    weak_threshold = int(config.get("weak_threshold", 50))
+    for direction_label, az_val, dip_val in [("major", best_az, 0.0), ("minor", minor_az, 0.0), ("vertical", 0.0, 90.0)]:
+        try:
+            vg_df = vgm.calculate_directional(
+                probe_coords, probe_values, probe_weights,
+                azimuth_deg=az_val, dip_deg=dip_val, cone_tolerance=probe_cone,
+                n_lags=min(5, rec_nlag), max_range=h_max * 0.5,
+            )
+            total_pairs = int(vg_df["npairs"].sum()) if len(vg_df) > 0 else 0
+            if total_pairs < weak_threshold:
+                weak_directions.append(direction_label)
+        except Exception:
+            weak_directions.append(direction_label)
+
+    if weak_directions:
+        rationale.append(f"Weak support in directions: {weak_directions}. Results may be unreliable.")
+
+    _progress(95, "Finalising recommendation …")
+
+    # ------------------------------------------------------------------
+    # 10. Build result dict
+    # ------------------------------------------------------------------
+    settings = {
+        "auto_lags": True,
+        "nlag": rec_nlag,
+        "lag_distance": rec_lag_distance,
+        "lag_tolerance": rec_lag_tolerance,
+        "manual_azimuth": use_manual_azimuth,
+        "default_azimuth": round(best_az, 1),
+        "default_dip": 0.0,
+        "cone_tolerance": probe_cone,
+        "model_type": best_model,
+        "n_structures": rec_n_structures,
+        "global_nugget": rec_nugget,
+        "bandwidth": rec_bandwidth,
+    }
+
+    analysis = {
+        "n_samples": n_samples,
+        "sample_variance": sample_variance,
+        "support_points": n_samples,
+        "median_spacing": median_spacing,
+        "orientation_source": orientation_source,
+        "orientation_ratio": orientation_ratio,
+        "probe_cone_tolerance": probe_cone,
+        "probe_model_scores": model_scores,
+        "critical_weak_directions": weak_directions,
+    }
+
+    _progress(100, "Recommendation complete")
+
+    return {
+        "settings": settings,
+        "analysis": analysis,
+        "rationale": rationale,
+    }

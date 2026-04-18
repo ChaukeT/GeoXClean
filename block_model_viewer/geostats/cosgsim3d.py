@@ -28,6 +28,7 @@ References:
 - Leuangthong, O. et al. (2004). Minimum Acceptance Criteria for Geostatistical Realizations
 """
 
+import hashlib
 import logging
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from dataclasses import dataclass, field
@@ -195,7 +196,7 @@ def _back_transform_from_gaussian(
     # Quantiles at which we have the sorted original values
     # Using (i + 0.5) / n for plotting position (Hazen formula)
     # This reduces bias at extremes compared to (i + 1) / (n + 1)
-    x_axis = (np.arange(n) + 0.5) / n
+    x_axis = (np.arange(n) + 1) / (n + 1)  # Match forward transform plotting position
     
     # 3. Handle NaNs
     result = np.full_like(gaussian_values, np.nan, dtype=np.float64)
@@ -289,21 +290,20 @@ def _generate_structured_residual_field(
     nx, ny, nz = grid_shape
     dx, dy, dz = grid_spacing
     
-    # Set seed for this realization
-    if base_seed is not None:
-        np.random.seed(base_seed + seed_offset)
-    
+    # Use per-realization RandomState for thread safety (avoid corrupting global RNG)
+    rng = np.random.RandomState(base_seed + seed_offset if base_seed is not None else None)
+
     # Extract variogram parameters (default to reasonable values)
     range_major = variogram_params.get('range', variogram_params.get('range_major', 100.0))
     range_minor = variogram_params.get('range_minor', range_major)
     range_vert = variogram_params.get('range_vert', range_major * 0.25)
     vario_type = variogram_params.get('model_type', variogram_params.get('variogram_type', 'spherical'))
-    
+
     # FFT-MA method: Generate Gaussian white noise and convolve with covariance kernel
     # This is efficient and produces correct spatial structure
-    
+
     # 1. Generate white noise
-    white_noise = np.random.normal(0, 1, size=(nz, ny, nx))
+    white_noise = rng.normal(0, 1, size=(nz, ny, nx))
     
     # 2. Build covariance kernel in frequency domain
     # Create distance arrays for each dimension
@@ -359,8 +359,9 @@ def _generate_structured_residual_field(
     if field_std > 0:
         structured_field = structured_field / field_std
     
-    # 9. Flatten in consistent order
-    return structured_field.ravel(order='F')[:n_blocks]
+    # 9. Flatten in C-order to match flat_indices mapping used at call site
+    # SIM-10 FIX: return full grid; caller applies grid-to-block index mapping
+    return structured_field.ravel()  # C-order of (nz,ny,nx): iz varies slowest, ix fastest
 
 
 def run_cosgsim3d(
@@ -505,7 +506,7 @@ def run_cosgsim3d(
     # 5. Setup SGSIM Parameters for Primary (WITH search params!)
     # Variograms already validated above - guaranteed to exist
     prim_vario = _variogram_models[config.primary_name]
-    
+
     # Validate required variogram parameters exist
     required_vario_params = ['model_type', 'range', 'sill']
     for param in required_vario_params:
@@ -514,37 +515,70 @@ def run_cosgsim3d(
                 f"CoSGSIM GATE: Primary variogram missing required parameter '{param}'. "
                 "Ensure variogram is properly fitted before running simulation."
             )
-    
-    # Get range (support both 'range' and 'range_major' keys)
-    prim_range = prim_vario.get('range', prim_vario.get('range_major'))
-    if prim_range is None or prim_range <= 0:
-        raise ValueError(
-            f"CoSGSIM GATE: Primary variogram missing valid 'range' parameter. Got: {prim_range}"
-        )
-    
+
+    # Extract anisotropy from combined_3d_model (has correct range ordering + azimuth)
+    # or fall back to top-level keys
+    prim_combined = prim_vario.get('combined_3d_model', {})
+    if prim_combined and prim_combined.get('major_range'):
+        prim_range = prim_combined['major_range']
+        prim_range_minor = prim_combined.get('minor_range', prim_range)
+        prim_range_vert = prim_combined.get('vertical_range', prim_range * 0.25)
+        prim_azimuth = prim_combined.get('azimuth', prim_vario.get('major_azimuth', 0.0))
+        prim_dip = prim_combined.get('dip', prim_vario.get('major_dip', 0.0))
+        prim_nugget = prim_combined.get('nugget', 0.0)
+        # FIX: 'sill' in combined_3d_model is PARTIAL. Use total_sill, or compute total.
+        prim_sill = prim_combined.get('total_sill', None)
+        if prim_sill is None:
+            prim_sill = prim_nugget + prim_combined.get('sill', 1.0)
+        prim_model_type = prim_combined.get('model_type', prim_vario.get('model_type', 'spherical'))
+    else:
+        # Fallback to top-level keys
+        prim_range = prim_vario.get('range', prim_vario.get('range_major'))
+        if prim_range is None or prim_range <= 0:
+            raise ValueError(
+                f"CoSGSIM GATE: Primary variogram missing valid 'range' parameter. Got: {prim_range}"
+            )
+        prim_range_minor = prim_vario.get('range_minor', prim_range)
+        prim_range_vert = prim_vario.get('range_vert', prim_range * 0.25)
+        prim_azimuth = prim_vario.get('major_azimuth', prim_vario.get('azimuth', 0.0))
+        prim_dip = prim_vario.get('major_dip', prim_vario.get('dip', 0.0))
+        # Swap protection: ensure major >= minor
+        if prim_range_minor > prim_range * 1.01:
+            prim_range, prim_range_minor = prim_range_minor, prim_range
+            logger.warning(f"CoSGSIM: range swap detected — major={prim_range:.1f}, minor={prim_range_minor:.1f}")
+        prim_nugget = prim_vario.get('nugget', 0.0)
+        prim_sill = prim_vario.get('total_sill', prim_vario.get('sill', 1.0))
+        prim_model_type = prim_vario['model_type']
+
+    # SIM-04 FIX: SGSIM places cell CENTRES at xmin + (ix+0.5)*xinc, so the grid origin
+    # must be half a cell below the minimum block centroid to get cell-centroid alignment.
+    xmin_grid = xmin - xinc / 2.0
+    ymin_grid = ymin - yinc / 2.0
+    zmin_grid = zmin - zinc / 2.0
+
     sgsim_params = SGSIMParameters(
         nreal=config.n_realizations,
         nx=nx, ny=ny, nz=nz,
-        xmin=xmin, ymin=ymin, zmin=zmin,
+        xmin=xmin_grid, ymin=ymin_grid, zmin=zmin_grid,  # SIM-04 FIX: grid origin, not centroid
         xinc=xinc, yinc=yinc, zinc=zinc,
-        variogram_type=prim_vario['model_type'],
+        variogram_type=prim_model_type,
         range_major=prim_range,
-        range_minor=prim_vario.get('range_minor', prim_range),  # Default to isotropic if not specified
-        range_vert=prim_vario.get('range_vert', prim_range * 0.25),  # Default vertical anisotropy
-        azimuth=prim_vario.get('azimuth', 0.0),
-        dip=prim_vario.get('dip', 0.0),
-        sill=prim_vario['sill'],
-        nugget=prim_vario.get('nugget', 0.0),
+        range_minor=prim_range_minor,
+        range_vert=prim_range_vert,
+        azimuth=prim_azimuth,
+        dip=prim_dip,
+        sill=prim_sill,    # SIM-05 FIX: total sill
+        nugget=prim_nugget,
         # Search parameters
         min_neighbors=min_neighbors,
         max_neighbors=max_neighbors,
         max_search_radius=max_search_radius,
         seed=config.random_seed
     )
-    
+
     logger.info(
         f"Primary variogram: type={prim_vario['model_type']}, range={prim_range:.1f}, "
-        f"sill={prim_vario['sill']:.3f}, nugget={prim_vario.get('nugget', 0):.3f}"
+        f"sill={prim_sill:.3f}, nugget={prim_nugget:.3f}"
     )
     
     # 6. Run SGSIM for Primary
@@ -627,14 +661,17 @@ def run_cosgsim3d(
             # Generate SPATIALLY STRUCTURED residual field
             # This is the KEY FIX - residual has correct spatial correlation!
             if config.use_structured_residual:
-                residual = _generate_structured_residual_field(
+                # SIM-10 FIX: function returns full C-order grid; apply same grid-to-block
+                # index mapping used for the primary variable (flat_indices, lines above).
+                residual_grid = _generate_structured_residual_field(
                     n_blocks=n_blocks,
                     grid_shape=(nx, ny, nz),
                     grid_spacing=(xinc, yinc, zinc),
                     variogram_params=sec_vario,
-                    seed_offset=i * 1000 + hash(sec_name) % 1000,
+                    seed_offset=i * 1000 + int(hashlib.md5(sec_name.encode()).hexdigest(), 16) % 1000,
                     base_seed=config.random_seed
                 )
+                residual = residual_grid[flat_indices]  # SIM-10 FIX: proper grid-to-block extraction
             else:
                 # Legacy: unstructured random noise (NOT recommended for production!)
                 residual = np.random.normal(0, 1, size=n_blocks)

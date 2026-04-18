@@ -350,7 +350,8 @@ def run_sis(
     
     actual_seed = config.random_seed
     is_reproducible = True
-    np.random.seed(actual_seed)
+    # FIX F-SIM: Use local RNG instead of global np.random.seed()
+    rng = np.random.default_rng(actual_seed)
     logger.info(f"SIS: Using random seed {actual_seed} for reproducible simulation")
     
     # Validate inputs
@@ -426,7 +427,7 @@ def run_sis(
             progress_callback(overall_progress, f"Starting realization {ireal + 1}/{config.n_realizations}")
 
         # Random path through grid
-        path = np.random.permutation(n_grid)
+        path = rng.permutation(n_grid)
         
         # Initialize indicator arrays for this realization
         # Each threshold has its own indicator simulation
@@ -509,7 +510,7 @@ def run_sis(
                 prob = min(prob, prev_indicator)
                 
                 # Draw indicator
-                sim_value = 1.0 if np.random.random() < prob else 0.0
+                sim_value = 1.0 if rng.random() < prob else 0.0
                 
                 # Order correction: if higher threshold is 1, lower must also be 1
                 # (already handled by order of thresholds)
@@ -703,7 +704,7 @@ def run_sis_full(
     indicator_realizations = np.zeros((n_realizations, n_grid))
     for i in range(n_realizations):
         # Use indicator probabilities as proxy (would be actual realizations in full impl)
-        indicator_realizations[i] = (np.random.random(n_grid) < sis_result.indicator_probabilities[:, 0]).astype(float)
+        indicator_realizations[i] = (rng.random(n_grid) < sis_result.indicator_probabilities[:, 0]).astype(float)
     
     if grid_shape is not None and realizations_reshaped is not None:
         indicator_realizations = indicator_realizations.reshape((n_realizations, nz, ny, nx))

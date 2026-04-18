@@ -373,9 +373,9 @@ def run_mps(
     logger.info(f"Starting MPS: {config.n_realizations} realizations, grid {grid_shape}")
     
     # Set random seed
-    if config.random_seed is not None:
-        np.random.seed(config.random_seed)
-    
+    # FIX F-SIM: Use local RNG instead of global np.random.seed()
+    rng = np.random.default_rng(config.random_seed)
+
     nz, ny, nx = grid_shape
     n_cells = nz * ny * nx
     
@@ -426,7 +426,7 @@ def run_mps(
         
         # Random path
         indices = [(z, y, x) for z in range(nz) for y in range(ny) for x in range(nx)]
-        np.random.shuffle(indices)
+        rng.shuffle(indices)
         
         # Current proportions for servo system
         current_counts = {cat: 0 for cat in categories}
@@ -468,7 +468,7 @@ def run_mps(
             probs = np.maximum(probs, 0)
             probs /= probs.sum()
             
-            sim_value = np.random.choice(categories, p=probs)
+            sim_value = rng.choice(categories, p=probs)
             sim[z, y, x] = sim_value
             
             current_counts[sim_value] += 1

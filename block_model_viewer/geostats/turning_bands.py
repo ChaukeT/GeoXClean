@@ -250,7 +250,8 @@ def _generate_1d_process(
     t: np.ndarray,
     range_: float,
     sill: float,
-    model_type: str
+    model_type: str,
+    rng: np.random.Generator = None,
 ) -> np.ndarray:
     """
     Generate 1D Gaussian process along a line using spectral method.
@@ -272,7 +273,9 @@ def _generate_1d_process(
     window_size = max(1, int(range_ / dt))
     
     # Generate white noise
-    white_noise = np.random.randn(n + 2 * window_size)
+    if rng is None:
+        rng = np.random.default_rng()
+    white_noise = rng.standard_normal(n + 2 * window_size)
     
     # Moving average kernel (approximates covariance structure)
     kernel = _line_covariance(
@@ -341,10 +344,9 @@ def run_turning_bands(
     logger.info(f"Anisotropy: major={config.range_major}, minor={config.range_minor}, vert={config.range_vert}")
     logger.info(f"Orientation: azimuth={config.azimuth}°, dip={config.dip}°")
     
-    # Set random seed
-    if config.random_seed is not None:
-        np.random.seed(config.random_seed)
-    
+    # FIX F-SIM: Use local RNG instead of global np.random.seed()
+    rng = np.random.default_rng(config.random_seed)
+
     n_grid = len(grid_coords)
     
     # AUDIT FIX TB-001: Create anisotropy transformation matrix
@@ -403,7 +405,8 @@ def run_turning_bands(
                 sorted_proj,
                 effective_range,
                 config.sill - config.nugget,
-                config.variogram_type
+                config.variogram_type,
+                rng=rng,
             )
             
             # Add to simulation (unsort)
@@ -415,7 +418,7 @@ def run_turning_bands(
         
         # Add nugget effect
         if config.nugget > 0:
-            sim_values += np.sqrt(config.nugget) * np.random.randn(n_grid)
+            sim_values += np.sqrt(config.nugget) * rng.standard_normal(n_grid)
         
         # Conditioning via Simple Kriging (using transformed coordinates)
         if has_conditioning:

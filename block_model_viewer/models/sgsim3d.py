@@ -41,7 +41,7 @@ SGSIM works ONLY in Gaussian space (N(0,1)). The engine is "blind" to physical u
     4. BACK-TRANSFORM: Gaussian Realizations → Raw Grade Space
     5. POST-PROCESS: Metal/Tonnage calculations on Raw Data (VALID!)
 
-For complete workflow, use execute_simulation_workflow() from workflow_manager.py
+For complete workflow, use execute_standardized_simulation_workflow() from simulation_workflow_manager.py
 
 Workflow:
     1. Transform data to Gaussian space using Grade Transformation panel (normal-score)
@@ -60,6 +60,8 @@ from typing import Dict, List, Tuple, Optional, Callable, Any
 from dataclasses import dataclass
 import logging
 from scipy.spatial import cKDTree
+
+logger = logging.getLogger(__name__)
 from scipy.stats import norm
 import pyvista as pv
 import os
@@ -117,8 +119,6 @@ except ImportError:
     NormalScoreTransformer = None
     logger.warning("NormalScoreTransformer not available. Back-transformation may not work properly.")
 
-logger = logging.getLogger(__name__)
-
 
 # ============================================================================
 # DATA STRUCTURES
@@ -169,14 +169,15 @@ class SGSIMParameters:
     dip: float = 0.0
     nugget: float = 0.0
     sill: float = 1.0
-    min_neighbors: int = 8  # Increased from 4 for better numerical stability
+    min_neighbors: int = 4  # Low default: avoids unconditional draws in sparse datasets
     max_neighbors: int = 16  # Increased from 12 for better conditioning
     max_search_radius: float = 200.0
     seed: Optional[int] = None
     parallel: bool = True  # Enable parallel execution by default
     n_jobs: int = -1  # -1 = use all CPU cores
-    method: str = 'fft_ma'  # 'fft_ma' (fast, SGEMS-like) or 'sequential' (backward compatible)
+    method: str = 'fft_ma'  # 'fft_ma' (fast, SGEMS-like) or 'sequential' (point-by-point kriging, very slow for large grids)
     use_numba: bool = True  # Enable Numba JIT compilation
+    domain_mask: Optional[np.ndarray] = None  # Boolean mask (nx*ny*nz,): True=estimate, False=skip (NaN)
 
 
 # ============================================================================
@@ -239,32 +240,39 @@ def _fft_ma_unconditional_field(
     np.ndarray
         Unconditional field in grid shape (nz, ny, nx)
     """
-    # Set seed for this realization
+    # Use per-realization RandomState for thread safety
     if params.seed is not None:
-        np.random.seed(params.seed + seed_offset)
+        rng = np.random.RandomState(params.seed + seed_offset)
     else:
-        np.random.seed(seed_offset)
-    
+        rng = np.random.RandomState(None)
+
     nx, ny, nz = params.nx, params.ny, params.nz
     dx, dy, dz = params.xinc, params.yinc, params.zinc
-    
+
     # Create frequency grids
     kx = np.fft.fftfreq(nx, d=dx) * 2 * np.pi
     ky = np.fft.fftfreq(ny, d=dy) * 2 * np.pi
     kz = np.fft.fftfreq(nz, d=dz) * 2 * np.pi
-    
+
     KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing='ij')
     
     # Handle anisotropy: transform wavenumbers
     # For anisotropy, we need to account for rotation and scaling
     range_geometric_mean = (params.range_major * params.range_minor * params.range_vert) ** (1.0 / 3.0)
     
-    # Simplified: use geometric mean for isotropic FFT (can be improved with full rotation)
-    # For full anisotropy, would need to rotate KX, KY, KZ before computing |K|
+    # Apply azimuth/dip rotation to wavenumber components before range scaling
+    az = np.radians(params.azimuth)
+    dp = np.radians(params.dip)
+    cos_az, sin_az = np.cos(az), np.sin(az)
+    cos_dp, sin_dp = np.cos(dp), np.sin(dp)
+    # Rotation: azimuth about Z, then dip about rotated X
+    KX_rot = cos_az * KX + sin_az * KY
+    KY_rot = -sin_az * cos_dp * KX + cos_az * cos_dp * KY + sin_dp * KZ
+    KZ_rot = sin_az * sin_dp * KX - cos_az * sin_dp * KY + cos_dp * KZ
     K = np.sqrt(
-        (KX * range_geometric_mean / params.range_major)**2 +
-        (KY * range_geometric_mean / params.range_minor)**2 +
-        (KZ * range_geometric_mean / params.range_vert)**2
+        (KX_rot * range_geometric_mean / params.range_major)**2 +
+        (KY_rot * range_geometric_mean / params.range_minor)**2 +
+        (KZ_rot * range_geometric_mean / params.range_vert)**2
     )
     
     # Compute spectral density S(k) from covariance function
@@ -285,7 +293,11 @@ def _fft_ma_unconditional_field(
         )
     
     if params.variogram_type == 'spherical':
-        # Spherical spectral density (approximate)
+        # SIM-09 NOTE: The spherical variogram has no closed-form spectral density.
+        # We use the Matérn ν=2 (Whittle) spectral approximation: S(k) ∝ (1 + (a·k)²)⁻²
+        # This matches the spherical model's shape well in practice (same decay rate
+        # at origin and similar effective range) but is not exact. Alternatives include
+        # the exponential model (exact spectrum) which is preferred for rigorous work.
         a = effective_range
         S = partial_sill * a**3 / (1 + (a * K)**2)**2
     elif params.variogram_type == 'exponential':
@@ -307,26 +319,26 @@ def _fft_ma_unconditional_field(
     # ✅ FIX: Ensure S is always non-negative to prevent sqrt(negative) = NaN
     S = np.maximum(S, 0)
     
-    # Generate complex Gaussian noise
-    noise_real = np.random.randn(nx, ny, nz)
-    noise_imag = np.random.randn(nx, ny, nz)
+    # Generate complex Gaussian noise (thread-safe per-realization RNG)
+    noise_real = rng.randn(nx, ny, nz)
+    noise_imag = rng.randn(nx, ny, nz)
     noise = noise_real + 1j * noise_imag
-    
+
     # Apply spectral filter: multiply by sqrt(S)
     # S is guaranteed non-negative, so sqrt is safe
     filtered = noise * np.sqrt(S)
-    
+
     # Inverse FFT to get spatial field
     field = np.real(np.fft.ifftn(filtered))
-    
+
     # Normalize to target variance
     current_std = np.std(field)
     if current_std > 1e-10:
         field = field / current_std * np.sqrt(partial_sill)
-    
+
     # Add nugget component (white noise)
     if params.nugget > 0:
-        field += np.sqrt(params.nugget) * np.random.randn(nx, ny, nz)
+        field += np.sqrt(params.nugget) * rng.randn(nx, ny, nz)
     
     # Return as (nz, ny, nx) to match expected format
     return field.transpose(2, 1, 0)
@@ -340,89 +352,21 @@ def _condition_field_to_data_fft_ma_fast(
     params: SGSIMParameters,
     vario_func: Callable
 ) -> np.ndarray:
-    """
-    FAST conditioning using vectorized IDW-like blending.
-    
-    This is 10-100x faster than per-node kriging while producing similar results.
-    The FFT-MA field already has correct spatial correlation; we just need to
-    honor the data values at their locations.
-    
-    Approach:
-    1. Find nearest grid node for each data point
-    2. Compute residuals (data - unconditional at data locations)
-    3. Interpolate residuals to all grid nodes using fast IDW
-    4. Add residuals to unconditional field
+    """Condition FFT-MA field using Simple Kriging weights.
+
+    Delegates to ``_precompute_fft_ma_conditioning`` +
+    ``_condition_field_to_data_fft_ma_cached`` so that the same
+    anisotropic-SK logic is used regardless of entry point.
     """
     if len(data_coords) == 0:
         return uncond_field
-    
-    nx, ny, nz = params.nx, params.ny, params.nz
-    
-    # Flatten unconditional field
-    uncond_flat = uncond_field.ravel(order='F')
-    
-    # Build KDTree for grid
-    tree_grid = cKDTree(grid_coords)
-    
-    # Find nearest grid nodes for each data point
-    _, data_grid_idx = tree_grid.query(data_coords, k=1)
-    
-    # Compute residuals at data locations
-    # residual = data_value - unconditional_value_at_data_location
-    uncond_at_data = uncond_flat[data_grid_idx]
-    residuals = data_values - uncond_at_data
-    
-    # Find grid nodes within influence radius
-    max_range = max(params.range_major, params.range_minor, params.range_vert)
-    influence_radius = min(params.max_search_radius, 2.0 * max_range)
-    
-    # Build KDTree for data
-    tree_data = cKDTree(data_coords)
-    
-    # Query all grid nodes for nearby data (VECTORIZED - fast!)
-    dists, indices = tree_data.query(
-        grid_coords, 
-        k=min(8, len(data_coords)),  # Limit to 8 neighbors for speed
-        distance_upper_bound=influence_radius
+
+    precomputed = _precompute_fft_ma_conditioning(
+        data_coords, grid_coords, params, vario_func
     )
-    
-    # Initialize residual field
-    residual_field = np.zeros(len(grid_coords))
-    weight_sum = np.zeros(len(grid_coords))
-    
-    # Handle 1D vs 2D results
-    if dists.ndim == 1:
-        dists = dists.reshape(-1, 1)
-        indices = indices.reshape(-1, 1)
-    
-    # Vectorized IDW interpolation of residuals
-    for k in range(dists.shape[1]):
-        valid = (dists[:, k] < influence_radius) & (indices[:, k] < len(residuals))
-        
-        if not np.any(valid):
-            continue
-            
-        # IDW weights: w = 1 / (d + epsilon)^2
-        d = dists[valid, k]
-        w = 1.0 / (d + 0.1)**2
-        
-        # Gaussian-like decay for smoother blending
-        w *= np.exp(-3.0 * (d / max_range)**2)
-        
-        residual_field[valid] += w * residuals[indices[valid, k]]
-        weight_sum[valid] += w
-    
-    # Normalize
-    nonzero = weight_sum > 0
-    residual_field[nonzero] /= weight_sum[nonzero]
-    
-    # Apply residuals to unconditional field
-    conditioned = uncond_flat + residual_field
-    
-    # Exact conditioning: force data values at nearest grid nodes
-    conditioned[data_grid_idx] = data_values
-    
-    return conditioned.reshape(nz, ny, nx, order='F')
+    return _condition_field_to_data_fft_ma_cached(
+        uncond_field, data_values, params, precomputed
+    )
 
 
 def _condition_field_to_data_fft_ma(
@@ -434,12 +378,12 @@ def _condition_field_to_data_fft_ma(
     vario_func: Callable
 ) -> np.ndarray:
     """
-    Condition unconditional field to data using Simple Kriging.
-    
-    Now uses fast vectorized conditioning by default.
-    Falls back to per-node kriging only if needed.
+    Condition unconditional field to data.
+
+    Uses fast vectorized conditioning (10-100x faster than per-node kriging).
+    The FFT-MA field already has correct spatial correlation from the spectral
+    filter; conditioning only needs to honor data values at their locations.
     """
-    # Use fast conditioning (10-100x faster)
     return _condition_field_to_data_fft_ma_fast(
         uncond_field, data_coords, data_values, grid_coords, params, vario_func
     )
@@ -562,7 +506,7 @@ def _condition_field_to_data_fft_ma_kriging(
             
             # Scaled regularization for numerical stability
             max_diag = np.max(np.diag(C_matrix))
-            reg_value = max(1e-10 * max_diag, 1e-10)
+            reg_value = max(1e-6 * max_diag, 1e-10)
             C_matrix.flat[::n_nb + 1] += reg_value
             try:
                 from scipy.linalg import solve
@@ -572,13 +516,11 @@ def _condition_field_to_data_fft_ma_kriging(
         
         # Simple Kriging estimate
         sk_mean = np.dot(w, nb_values)
-        
-        # Sanity check: if estimate is extreme, fall back to mean
-        data_mean = np.mean(nb_values)
-        data_range = np.max(nb_values) - np.min(nb_values) if len(nb_values) > 1 else 1.0
-        if data_range > 0 and abs(sk_mean - data_mean) > 10 * data_range:
-            sk_mean = data_mean
-        
+
+        # Sanity check: clamp to [-6, 6] for normal-scored data
+        # (SK global mean is 0; using local neighbor mean introduces bias)
+        sk_mean = np.clip(sk_mean, -6.0, 6.0)
+
         sk_var = C0 - np.dot(w, c0)
         sk_var = max(sk_var, 1e-10)
         
@@ -599,30 +541,276 @@ def _run_single_realization_fft_ma(
     grid_coords: np.ndarray,
     params: SGSIMParameters,
     vario_func: Callable,
-    seed_offset: int
+    seed_offset: int,
+    precomputed_conditioning: dict = None,
 ) -> np.ndarray:
     """
     Run a single SGSIM realization using FFT-MA method (fast, SGEMS-like).
-    
+
     This is 100-1000x faster than sequential point-by-point method for large grids.
+
+    Parameters
+    ----------
+    precomputed_conditioning : dict, optional
+        Pre-computed KDTree queries and grid indices to avoid rebuilding per
+        realization.  Keys: 'data_grid_idx', 'dists', 'indices',
+        'influence_radius', 'max_range'.
     """
     # Generate unconditional field using FFT (very fast)
     uncond_field = _fft_ma_unconditional_field(params, seed_offset)
-    
+
     # Condition to data (only at nearby nodes - key optimization)
     if len(data_coords) > 0:
-        conditioned_field = _condition_field_to_data_fft_ma(
+        conditioned_field = _condition_field_to_data_fft_ma_cached(
             uncond_field,
-            data_coords,
             data_values,
-            grid_coords,
             params,
-            vario_func
+            precomputed_conditioning,
         )
     else:
         conditioned_field = uncond_field
-    
+
     return conditioned_field
+
+
+def _precompute_fft_ma_conditioning(
+    data_coords: np.ndarray,
+    grid_coords: np.ndarray,
+    params: SGSIMParameters,
+    vario_func: Callable = None,
+) -> dict:
+    """Build KDTrees, query neighbours, and compute Simple Kriging weights
+    ONCE for all FFT-MA realizations.
+
+    Key improvements over the previous IDW-based implementation:
+      1. **Anisotropic search** — KDTree is built in variogram-anisotropy
+         space so the search ellipsoid matches the variogram ranges, not a
+         fixed isotropic sphere.
+      2. **Simple Kriging weights** — covariance-derived weights respect
+         the variogram spatial structure, eliminating the spherical
+         "bubble" artefacts that IDW produces around each drillhole.
+      3. **24 neighbours** (up from 8) — smoother conditioning field with
+         better overlap between data influence zones.
+      4. **Cholesky cache** — nodes sharing the same neighbour set reuse
+         the matrix factorisation, keeping the precompute fast.
+    """
+    import time as _time
+    from scipy.linalg import cho_factor, cho_solve
+
+    if len(data_coords) == 0:
+        return {}
+
+    t0 = _time.perf_counter()
+
+    # ------------------------------------------------------------------
+    # 1. Transform to anisotropy space (range → 1.0 in each direction)
+    # ------------------------------------------------------------------
+    data_aniso = apply_anisotropy(
+        data_coords, params.azimuth, params.dip,
+        params.range_major, params.range_minor, params.range_vert,
+    )
+    grid_aniso = apply_anisotropy(
+        grid_coords, params.azimuth, params.dip,
+        params.range_major, params.range_minor, params.range_vert,
+    )
+
+    # In anisotropy space the effective variogram range is 1.0.
+    # Search out to 3× that (generous, avoids edge artefacts).
+    max_range_world = max(params.range_major, params.range_minor,
+                          params.range_vert, 1e-6)
+    influence_radius = min(
+        params.max_search_radius / max_range_world, 3.0
+    )
+
+    # ------------------------------------------------------------------
+    # 2. KDTree queries (done once, reused every realisation)
+    # ------------------------------------------------------------------
+    tree_grid = cKDTree(grid_aniso)
+    _, data_grid_idx = tree_grid.query(data_aniso, k=1)
+
+    k_max = min(24, len(data_coords))
+    tree_data = cKDTree(data_aniso)
+    dists, indices = tree_data.query(
+        grid_aniso,
+        k=k_max,
+        distance_upper_bound=influence_radius,
+    )
+    if dists.ndim == 1:
+        dists = dists.reshape(-1, 1)
+        indices = indices.reshape(-1, 1)
+
+    n_grid = len(grid_coords)
+    n_k = dists.shape[1]
+    n_data = len(data_coords)
+    C0 = params.sill
+
+    if vario_func is None:
+        vario_func = get_variogram_function(params.variogram_type)
+
+    # ------------------------------------------------------------------
+    # 3. Precompute pairwise data covariances (small-data fast path)
+    # ------------------------------------------------------------------
+    if n_data <= 5000:
+        _dd = data_aniso[:, np.newaxis, :] - data_aniso[np.newaxis, :, :]
+        data_pair_dists = np.linalg.norm(_dd, axis=2)
+        data_pair_gamma = vario_func(data_pair_dists, 1.0, C0, params.nugget)
+        data_pair_cov = C0 - data_pair_gamma
+        use_precomputed_cov = True
+    else:
+        data_pair_cov = None
+        use_precomputed_cov = False
+
+    # ------------------------------------------------------------------
+    # 4. Identify informed nodes (sparse — skip the ~88 % that have no
+    #    neighbours to avoid allocating full (n_grid, k) arrays)
+    # ------------------------------------------------------------------
+    # valid_mask: (n_grid, n_k) — True where neighbour is real
+    valid_mask = (dists < influence_radius) & (indices < n_data)
+    n_valid_per_node = valid_mask.sum(axis=1)            # (n_grid,)
+    informed_mask = n_valid_per_node > 0                 # (n_grid,)
+    informed_idx = np.nonzero(informed_mask)[0]          # indices into grid
+    n_informed = len(informed_idx)
+
+    if n_informed == 0:
+        logger.info("SK precompute: no informed nodes — returning empty dict")
+        return {
+            'data_grid_idx': data_grid_idx,
+            'informed_idx': np.array([], dtype=np.int64),
+            'sp_weights': np.zeros((0, n_k), dtype=np.float64),
+            'sp_indices': np.zeros((0, n_k), dtype=np.int64),
+            'n_grid': n_grid,
+        }
+
+    # Extract the sparse sub-arrays (only informed rows)
+    sp_dists = dists[informed_idx]                       # (n_informed, n_k)
+    sp_raw_idx = indices[informed_idx]                   # (n_informed, n_k)
+    sp_valid = valid_mask[informed_idx]                  # (n_informed, n_k)
+
+    # ------------------------------------------------------------------
+    # 5. Compute Simple Kriging weights — vectorised outer, per-node solve
+    # ------------------------------------------------------------------
+    sp_weights = np.zeros((n_informed, n_k), dtype=np.float64)
+    sp_indices = np.zeros((n_informed, n_k), dtype=np.int64)
+
+    # Cholesky cache: sorted neighbour tuple → (cho_factor, lower)
+    chol_cache: dict = {}
+    cache_hits = 0
+
+    for ii in range(n_informed):
+        vmask = sp_valid[ii]
+        n_v = int(vmask.sum())
+        v_idx = sp_raw_idx[ii, vmask].astype(np.int64)
+        v_dists = sp_dists[ii, vmask]
+        sp_indices[ii, :n_v] = v_idx
+
+        # Right-hand side: c0[j] = Cov(node, data_j) in aniso space
+        gamma_0 = vario_func(v_dists, 1.0, C0, params.nugget)
+        c0 = C0 - gamma_0
+
+        if n_v == 1:
+            sp_weights[ii, 0] = c0[0] / max(C0, 1e-10)
+            continue
+
+        # Check Cholesky cache (same neighbour set → same C matrix)
+        cache_key = tuple(sorted(v_idx))
+        if cache_key in chol_cache:
+            try:
+                w = cho_solve(chol_cache[cache_key], c0)
+                sp_weights[ii, :n_v] = w
+                cache_hits += 1
+                continue
+            except Exception:
+                chol_cache.pop(cache_key, None)
+
+        # Build covariance sub-matrix for these neighbours
+        if use_precomputed_cov:
+            C_sub = data_pair_cov[np.ix_(v_idx, v_idx)].copy()
+        else:
+            nb = data_aniso[v_idx]
+            pd = np.linalg.norm(nb[:, None, :] - nb[None, :, :], axis=2)
+            gm = vario_func(pd, 1.0, C0, params.nugget)
+            C_sub = C0 - gm
+
+        # Regularise for numerical stability
+        max_diag = np.max(np.diag(C_sub))
+        reg = max(1e-6 * max_diag, 1e-10)
+        C_sub.flat[::n_v + 1] += reg
+
+        try:
+            L_lower = cho_factor(C_sub, lower=True)
+            if len(chol_cache) < 100000:
+                chol_cache[cache_key] = L_lower
+            w = cho_solve(L_lower, c0)
+        except Exception:
+            w, _, _, _ = np.linalg.lstsq(C_sub, c0, rcond=None)
+
+        sp_weights[ii, :n_v] = w
+
+    elapsed = _time.perf_counter() - t0
+    logger.info(
+        f"SK weight precomputation: {n_informed}/{n_grid} informed nodes, "
+        f"{len(chol_cache)} unique neighbour sets, "
+        f"{cache_hits} cache hits, {elapsed:.1f}s "
+        f"(sparse arrays: {sp_weights.nbytes / 1048576:.0f} MiB)"
+    )
+
+    return {
+        'data_grid_idx': data_grid_idx,
+        'informed_idx': informed_idx,       # (n_informed,) → row in full grid
+        'sp_weights': sp_weights,           # (n_informed, k)
+        'sp_indices': sp_indices,           # (n_informed, k)
+        'n_grid': n_grid,
+    }
+
+
+def _condition_field_to_data_fft_ma_cached(
+    uncond_field: np.ndarray,
+    data_values: np.ndarray,
+    params: SGSIMParameters,
+    precomputed: dict,
+) -> np.ndarray:
+    """Fast conditioning using pre-computed Simple Kriging weights.
+
+    Uses sparse storage: only the *informed* grid nodes (those with at
+    least one data neighbour) carry weight/index rows.  The per-
+    realisation cost is a chunked dot product over the informed subset,
+    keeping peak memory well under 100 MiB even for multi-million grids.
+    """
+    nx, ny, nz = params.nx, params.ny, params.nz
+    uncond_flat = uncond_field.ravel(order='F')
+
+    data_grid_idx = precomputed['data_grid_idx']
+    informed_idx = precomputed['informed_idx']   # (n_informed,)
+    sp_weights = precomputed['sp_weights']       # (n_informed, k)
+    sp_indices = precomputed['sp_indices']       # (n_informed, k)
+    n_grid = precomputed['n_grid']
+
+    # Residuals change per realisation (different unconditional field)
+    uncond_at_data = uncond_flat[data_grid_idx]
+    residuals = data_values - uncond_at_data     # (n_data,)
+
+    # --- Chunked SK interpolation to cap memory --------------------------
+    # Each chunk processes a slice of informed nodes.  Peak temporary
+    # allocation per chunk ≈ CHUNK × k × 8 bytes (float64).
+    CHUNK = 50_000  # ~9 MiB per temp array at k=24 (safe with 16 threads)
+    n_inf = len(informed_idx)
+    residual_at_informed = np.empty(n_inf, dtype=np.float64)
+
+    for lo in range(0, n_inf, CHUNK):
+        hi = min(lo + CHUNK, n_inf)
+        idx_chunk = sp_indices[lo:hi]                    # (chunk, k)
+        w_chunk = sp_weights[lo:hi]                      # (chunk, k)
+        safe = np.clip(idx_chunk, 0, len(residuals) - 1)
+        residual_at_informed[lo:hi] = np.sum(w_chunk * residuals[safe], axis=1)
+
+    # Write back into full grid
+    conditioned = uncond_flat.copy()
+    conditioned[informed_idx] += residual_at_informed
+
+    # Exact conditioning: force data values at nearest grid nodes
+    conditioned[data_grid_idx] = data_values
+
+    return conditioned.reshape(nz, ny, nx, order='F')
 
 
 # ============================================================================
@@ -663,8 +851,17 @@ def build_search_template(radius, dx, dy, dz):
     
     # Sort by distance
     offsets.sort(key=lambda x: x[3])
-    
+
     # Return as numpy array of integers (dx, dy, dz)
+    if len(offsets) == 0:
+        # No neighbours found — radius smaller than grid spacing.
+        # Return the 6 face-adjacent cells as minimum template.
+        offsets = [
+            [1, 0, 0], [-1, 0, 0],
+            [0, 1, 0], [0, -1, 0],
+            [0, 0, 1], [0, 0, -1],
+        ]
+        return np.array(offsets, dtype=np.int32)
     res = np.array(offsets)[:, :3].astype(np.int32)
     return res
 
@@ -883,15 +1080,15 @@ def _run_single_realization(
     np.ndarray
         Simulated values in grid shape (nz, ny, nx)
     """
-    # Set unique seed for this realization
+    # Use per-realization RandomState for thread safety
     if params.seed is not None:
-        np.random.seed(params.seed + seed_offset)
+        rng = np.random.RandomState(params.seed + seed_offset)
     else:
-        np.random.seed(seed_offset)
-    
+        rng = np.random.RandomState(None)
+
     n_grid = len(grid_coords_aniso)
     sim_vals = np.full(n_grid, np.nan)
-    path = np.random.permutation(n_grid)
+    path = rng.permutation(n_grid)
     
     # Pre-allocate buffers
     n_data = len(data_coords_aniso)
@@ -907,12 +1104,12 @@ def _run_single_realization(
     cur_size = n_data
     tree = None
     last_rebuild = 0
-    rebuild_interval = 10000
+    rebuild_interval = max(500, n_grid // 20)  # At least 20 rebuilds per simulation
     
     # Pre-compute constants
     C0 = params.sill
     sqrt_sill = np.sqrt(params.sill)
-    regularization = 1e-10
+    regularization = 1e-6
     
     # Cholesky decomposition cache for repeated kriging operations
     # Cache key: tuple(sorted(neighbor_distances)) -> Cholesky factorization
@@ -974,7 +1171,9 @@ def _run_single_realization(
                 c0 = C0 - gamma_0
                 
                 # Solve kriging system with Cholesky caching
-                C_matrix.flat[::n_nb + 1] += regularization
+                max_diag = np.max(np.diag(C_matrix))
+                reg_value = max(regularization * max_diag, 1e-10)
+                C_matrix.flat[::n_nb + 1] += reg_value
                 
                 # Create cache key from sorted neighbor distances (rounded for cache efficiency)
                 cache_key = tuple(np.round(nb_dists, decimals=2))
@@ -1019,24 +1218,22 @@ def _run_single_realization(
                 # Simple Kriging estimate and variance
                 sk_mean = np.dot(w, nb_vals)
                 
-                # Sanity check: if estimate is extreme, fall back to mean
-                data_mean = np.mean(nb_vals)
-                data_range = np.max(nb_vals) - np.min(nb_vals) if len(nb_vals) > 1 else 1.0
-                if data_range > 0 and abs(sk_mean - data_mean) > 10 * data_range:
-                    sk_mean = data_mean
-                
+                # Sanity check: clamp to [-6, 6] for normal-scored data
+                # (SK global mean is 0; using local neighbor mean introduces bias)
+                sk_mean = np.clip(sk_mean, -6.0, 6.0)
+
                 sk_var = C0 - np.dot(w, c0)
                 sk_std = np.sqrt(max(sk_var, 0.0)) if sk_var > 0 else 0.0
                 
-                # Generate random residual
-                residual = np.random.randn() * sk_std if sk_std > 0 else 0.0
+                # Generate random residual (thread-safe RNG)
+                residual = rng.randn() * sk_std if sk_std > 0 else 0.0
                 sim_vals[i_node] = sk_mean + residual
             else:
                 # Not enough neighbors - unconditional simulation
-                sim_vals[i_node] = np.random.randn() * sqrt_sill
+                sim_vals[i_node] = rng.randn() * sqrt_sill
         else:
             # No conditioning data - unconditional simulation
-            sim_vals[i_node] = np.random.randn() * sqrt_sill
+            sim_vals[i_node] = rng.randn() * sqrt_sill
         
         # Add simulated value to buffer
         coords_buf[cur_size] = node
@@ -1225,7 +1422,47 @@ def run_sgsim_simulation(
     GX, GY, GZ = np.meshgrid(gx, gy, gz, indexing="ij")
     grid_coords = np.column_stack([GX.ravel(), GY.ravel(), GZ.ravel()])
     n_grid = len(grid_coords)
-    
+
+    # ── Drillhole Grid Filtering ─────────────────────────────────────
+    # Validate that conditioning data falls within grid bounds.
+    # Samples outside the grid cause extrapolation errors.
+    if len(data_coords) > 0:
+        xmin_grid = params.xmin
+        xmax_grid = params.xmin + params.xinc * params.nx
+        ymin_grid = params.ymin
+        ymax_grid = params.ymin + params.yinc * params.ny
+        zmin_grid = params.zmin
+        zmax_grid = params.zmin + params.zinc * params.nz
+
+        within_bounds = (
+            (data_coords[:, 0] >= xmin_grid) & (data_coords[:, 0] <= xmax_grid) &
+            (data_coords[:, 1] >= ymin_grid) & (data_coords[:, 1] <= ymax_grid) &
+            (data_coords[:, 2] >= zmin_grid) & (data_coords[:, 2] <= zmax_grid)
+        )
+
+        n_original = len(data_coords)
+        n_outside = int(np.sum(~within_bounds))
+
+        if n_outside > 0:
+            logger.warning(
+                f"Grid filtering: {n_outside}/{n_original} samples outside grid "
+                f"[{xmin_grid:.1f}-{xmax_grid:.1f}, {ymin_grid:.1f}-{ymax_grid:.1f}, "
+                f"{zmin_grid:.1f}-{zmax_grid:.1f}] — excluded from conditioning."
+            )
+            data_coords = data_coords[within_bounds]
+            data_values = data_values[within_bounds]
+
+            if len(data_coords) == 0:
+                logger.warning(
+                    "CRITICAL: All samples fell outside grid bounds! "
+                    "SGSIM will run unconditional (no conditioning data)."
+                )
+        else:
+            logger.info(
+                f"Grid filtering: all {n_original} samples within bounds."
+            )
+    # ─────────────────────────────────────────────────────────────────
+
     # Get variogram function
     vario_func = get_variogram_function(params.variogram_type)
     
@@ -1237,7 +1474,10 @@ def run_sgsim_simulation(
     # ========================================================================
     if params.method == 'fft_ma':
         logger.info(f"Using FFT-MA method (fast, SGEMS-like) for {params.nreal} realizations")
-        
+
+        # Pre-compute KDTree queries and SK weights ONCE (avoids rebuilding per realization)
+        precomputed = _precompute_fft_ma_conditioning(data_coords, grid_coords, params, vario_func)
+
         if params.parallel and params.nreal > 1:
             # Parallel FFT-MA
             n_jobs = params.n_jobs
@@ -1270,8 +1510,9 @@ def run_sgsim_simulation(
             # Helper function for ThreadPoolExecutor
             def run_realization(ireal):
                 return (ireal, _run_single_realization_fft_ma(
-                    ireal, data_coords, data_values, grid_coords, 
-                    params, vario_func, seed_offset + ireal
+                    ireal, data_coords, data_values, grid_coords,
+                    params, vario_func, seed_offset + ireal,
+                    precomputed_conditioning=precomputed,
                 ))
             
             # Use ThreadPoolExecutor (works on Windows, avoids spawn issues)
@@ -1319,7 +1560,8 @@ def run_sgsim_simulation(
                     grid_coords,
                     params,
                     vario_func,
-                    params.seed + ireal if params.seed else ireal
+                    params.seed + ireal if params.seed else ireal,
+                    precomputed_conditioning=precomputed,
                 )
 
                 # Progress callback - THROTTLED to avoid UI freezing
@@ -1757,8 +1999,8 @@ def compute_exceedance_volume(
     """
     ⚠️ DEPRECATED: This function should NOT be called directly on Gaussian data.
     
-    Use execute_simulation_workflow() from workflow_manager.py instead, which handles
-    the complete workflow: Transform → Simulate → Back-transform → Post-process.
+    Use execute_standardized_simulation_workflow() from simulation_workflow_manager.py instead,
+    which handles the complete workflow: Transform → Simulate → Back-transform → Post-process.
     
     This function is kept for backward compatibility but will raise an error if
     called on Gaussian data without explicit confirmation.
@@ -1808,7 +2050,7 @@ def compute_exceedance_volume(
             "require physical units (g/t, %, ppm). A cutoff of 0.5 in Gaussian space is NOT\n"
             "the same as 0.5 g/t in physical space!\n\n"
             "✅ CORRECT WORKFLOW:\n"
-            "   1. Use execute_simulation_workflow() from workflow_manager.py\n"
+            "   1. Use execute_standardized_simulation_workflow() from simulation_workflow_manager.py\n"
             "   2. OR manually back-transform first:\n"
             "      raw_reals = transformer.back_transform(gaussian_reals)\n"
             "      result = compute_exceedance_volume(raw_reals, cutoff=0.5, is_gaussian=False)\n\n"
@@ -1968,7 +2210,11 @@ def export_summary_to_csv(
     }
     
     for stat_name, stat_data in summary.items():
-        df_data[stat_name.upper()] = stat_data.ravel(order='C')
+        # Summary stats have shape (nz, ny, nx) from compute_summary_statistics.
+        # Coordinates from meshgrid(indexing='ij') ravel as (nx, ny, nz) C-order
+        # = z fastest.  F-ravel of (nz, ny, nx) also gives z fastest, matching
+        # the coordinate ordering so each CSV row has the correct XYZ + value.
+        df_data[stat_name.upper()] = stat_data.ravel(order='F')
     
     df = pd.DataFrame(df_data)
     df.to_csv(output_path, index=False)
@@ -2034,252 +2280,169 @@ def run_full_sgsim_workflow(
     data_values: np.ndarray,
     params: SGSIMParameters,
     cutoffs: Optional[List[float]] = None,
-    transformation_metadata: Optional[Dict[str, Any]] = None,
     transformer: Optional['NormalScoreTransformer'] = None,
-    data_values_are_raw: bool = True,
-    progress_callback: Optional[Callable] = None
+    progress_callback: Optional[Callable] = None,
+    # Deprecated — kept only so old call-sites don't crash at import time.
+    transformation_metadata: Optional[Dict[str, Any]] = None,
+    data_values_are_raw: bool = False,
 ) -> Dict:
     """
-    Run complete SGSIM workflow: simulation + post-processing.
-    
-    ⚠️ RECOMMENDED: For new code, use execute_simulation_workflow() from workflow_manager.py
-    which follows the professional Datamine/Surpac/Isatis architecture more explicitly.
-    
-    This function is kept for backward compatibility and follows the same workflow:
-    1. Transform raw data → Gaussian space
-    2. Run SGSIM (Gaussian space)
-    3. Back-transform realizations → Physical space
-    4. Post-process metal/tonnage (on physical space - VALID)
-    
-    ⚠️ CRITICAL: This function now accepts RAW grade values and automatically handles
-    normal score transformation. For proper metal/tonnage calculations, raw values
-    are required (data_values_are_raw=True is default).
-    
+    Run SGSIM simulation in Gaussian space + back-transform to physical units.
+
+    ARCHITECTURE (matches Datamine / Surpac / Isatis):
+        1. User transforms raw data → Gaussian space  (Grade Transformation panel)
+        2. User fits variogram on Gaussian data         (Variogram panel)
+        3. This function receives GAUSSIAN data + the fitted transformer
+        4. Simulate in Gaussian space
+        5. Back-transform every realization using the PROVIDED transformer
+        6. Compute summary statistics in physical units
+
     Parameters
     ----------
     data_coords : np.ndarray
-        Conditioning data coordinates (N, 3)
+        Conditioning data coordinates (N, 3).
     data_values : np.ndarray
-        Conditioning data values (N,)
-        - If data_values_are_raw=True: Raw grade values (e.g., 0-50 g/t) - RECOMMENDED
-        - If data_values_are_raw=False: Already transformed to Gaussian space
+        Conditioning data values (N,) **in Gaussian / Normal-Score space**.
     params : SGSIMParameters
-        Simulation parameters
-    cutoffs : List[float], optional
-        Cutoff values for probability mapping and exceedance calculations
-        (in RAW grade units if data_values_are_raw=True)
-    transformation_metadata : dict, optional
-        DEPRECATED: Use transformer parameter instead.
-        Normal score transformation metadata for back-transformation.
-    transformer : NormalScoreTransformer, optional
-        Pre-fitted transformer. If None and data_values_are_raw=True, will be created automatically.
-    data_values_are_raw : bool, optional
-        If True, data_values are raw grades and will be transformed to Gaussian.
-        If False, data_values are already in Gaussian space. Default True.
-    progress_callback : Callable, optional
-        Progress callback function(percent, message)
-    
+        Simulation grid and variogram parameters.
+    cutoffs : list[float], optional
+        Cutoff values (in **physical** units) for probability / exceedance maps.
+    transformer : NormalScoreTransformer
+        Pre-fitted transformer from the Grade Transformation panel.
+        Its ``back_transform()`` method maps Gaussian → physical units.
+        **Required** — an error is raised if not provided.
+    progress_callback : callable, optional
+        ``progress_callback(percent: int, message: str)``
+
     Returns
     -------
     dict
-        Complete results including:
-        - 'realizations_gaussian': All simulated realizations (in Gaussian space)
-        - 'realizations_raw': Back-transformed realizations (in physical/raw space)
-        - 'summary': Summary statistics (on raw data - for mining reports)
-        - 'summary_gaussian': Summary statistics on Gaussian data (for quality check)
-        - 'probability_maps': Probability maps for each cutoff (on raw data)
-        - 'exceedance': Exceedance volume statistics (on raw data - valid metal/tonnage)
-        - 'transformer': Fitted transformer (for future use)
-    
-    Progress breakdown:
-        0-2%:   Setup and transformation (if raw data)
-        2-85%:  SGSIM simulation (per-realization progress)
-        85-88%: Back-transformation (if raw data)
-        88-90%: Summary statistics (raw data)
-        90-93%: Probability maps
-        93-100%: Exceedance volumes (on raw data)
+        'realizations_gaussian' — (nreal, nz, ny, nx) in Gaussian space
+        'realizations_raw'      — (nreal, nz, ny, nx) in physical units
+        'summary'               — dict of mean/std/p10/p50/p90 in physical units
+        'summary_gaussian'      — dict of mean/std in Gaussian space (QC only)
+        'probability_maps'      — {cutoff: array} on physical data
+        'exceedance'            — {cutoff: stats} on physical data
+        'transformer'           — the transformer that was used
+        'params'                — the SGSIMParameters
     """
+    # ------------------------------------------------------------------
+    # GATE: a transformer is mandatory for JORC/SAMREC compliance
+    # ------------------------------------------------------------------
+    if transformer is None:
+        raise ValueError(
+            "SGSIM requires a pre-fitted transformer for back-transformation.\n\n"
+            "The correct workflow is:\n"
+            "  1. Transform your data in the Grade Transformation panel\n"
+            "  2. Fit a variogram on the transformed data\n"
+            "  3. Run SGSIM — the transformer is passed automatically\n\n"
+            "If you are calling this function directly, pass:\n"
+            "  transformer=<NormalScoreTransformer fitted on raw data>"
+        )
+
+    if progress_callback:
+        progress_callback(0, f"Initializing SGSIM ({params.nreal} realizations)...")
+
     # ========================================================================
-    # STEP 1: SETUP TRANSFORMER (if raw data provided)
+    # STEP 1: RUN SIMULATION (Gaussian Space)
     # ========================================================================
-    if data_values_are_raw:
-        if transformer is None:
-            if progress_callback:
-                progress_callback(0, "Fitting Normal Score Transformer...")
-            
-            if NormalScoreTransformer is None:
-                raise ImportError(
-                    "NormalScoreTransformer not available. "
-                    "Cannot transform raw data to Gaussian space."
-                )
-            
-            transformer = NormalScoreTransformer()
-            transformer.fit(data_values)
-            logger.info("Normal Score Transformer fitted on raw data")
-        
-        if progress_callback:
-            progress_callback(1, "Transforming data to Gaussian space...")
-        
-        # Transform data to Gaussian for SGSIM
-        data_values_gauss = transformer.transform(data_values)
-        logger.info("Data transformed to Gaussian space")
-        
-        if progress_callback:
-            progress_callback(2, "Starting SGSIM simulation...")
-    else:
-        # Data is already in Gaussian space
-        data_values_gauss = data_values
-        logger.info("Using provided Gaussian data (no transformation needed)")
-        if progress_callback:
-            progress_callback(0, f"Initializing SGSIM ({params.nreal} realizations)...")
-    
-    # ========================================================================
-    # STEP 2: RUN SIMULATION (Gaussian Space)
-    # ========================================================================
-    # This returns Gaussian realizations
     reals_gaussian = run_sgsim_simulation(
         data_coords,
-        data_values_gauss,
+        data_values,       # already Gaussian
         params,
-        progress_callback
+        progress_callback,
     )
-    
+
     # ========================================================================
-    # STEP 3: BACK TRANSFORM (Raw Grade Space)
+    # STEP 2: BACK-TRANSFORM every realization → physical units
     # ========================================================================
-    # This is the CRITICAL step that was missing!
-    realizations_raw = None
-    is_gaussian = False
-    
-    if data_values_are_raw and transformer is not None:
-        if progress_callback:
-            progress_callback(85, "Back-transforming realizations to physical space...")
-        
-        logger.info("Back-transforming realizations from Gaussian to physical space...")
-        
-        # Back-transform all realizations
-        n_real, nz, ny, nx = reals_gaussian.shape
-        realizations_raw = np.zeros_like(reals_gaussian)
-        
-        for i in range(n_real):
-            realizations_raw[i] = transformer.back_transform(reals_gaussian[i])
-        
-        logger.info("Back-transformation complete. Realizations now in physical space.")
-        is_gaussian = False
-        
-        if progress_callback:
-            progress_callback(88, "Back-transformation complete")
-    elif transformation_metadata is not None:
-        # Fallback to old metadata-based approach
-        logger.warning(
-            "Using deprecated transformation_metadata. "
-            "Consider using transformer parameter instead."
-        )
-        if progress_callback:
-            progress_callback(85, "Back-transforming realizations (using metadata)...")
-        
-        n_real, nz, ny, nx = reals_gaussian.shape
-        realizations_raw = np.zeros_like(reals_gaussian)
-        
-        for i in range(n_real):
-            realizations_raw[i] = back_transform_normal_score(
-                reals_gaussian[i],
-                transformation_metadata
-            )
-        
-        is_gaussian = False
-    else:
-        # =========================================================================
-        # AUDIT FIX (W-002): MANDATORY Back-Transform for JORC/SAMREC Compliance
-        # =========================================================================
-        raise ValueError(
-            "SGSIM GATE FAILED (W-002): Back-transformation is REQUIRED for JORC/SAMREC compliance.\n"
-            "Realizations are in Gaussian space and cannot be used for metal/tonnage calculations.\n\n"
-            "SOLUTIONS:\n"
-            "1. Use data_values_are_raw=True (recommended) - transformer will be fitted automatically\n"
-            "2. Provide a pre-fitted transformer parameter\n"
-            "3. Provide transformation_metadata from a previous fit\n\n"
-            "Example:\n"
-            "  results = run_full_sgsim_workflow(\n"
-            "      data_coords, raw_grade_values, params,\n"
-            "      data_values_are_raw=True  # Automatic transform & back-transform\n"
-            "  )"
-        )
-    
+    if progress_callback:
+        progress_callback(85, "Back-transforming realizations to physical space...")
+
+    logger.info(
+        "Back-transforming %d realizations using transformer fitted on "
+        "raw data (range [%.4f, %.4f])...",
+        reals_gaussian.shape[0], transformer.min_val, transformer.max_val,
+    )
+
+    n_real, nz, ny, nx = reals_gaussian.shape
+    realizations_raw = np.zeros_like(reals_gaussian)
+
+    for i in range(n_real):
+        realizations_raw[i] = transformer.back_transform(reals_gaussian[i])
+
+    bt_min = float(np.nanmin(realizations_raw))
+    bt_max = float(np.nanmax(realizations_raw))
+    bt_mean = float(np.nanmean(realizations_raw))
+    logger.info(
+        "Back-transformation complete. Physical-unit range: "
+        "[%.4f, %.4f], Mean: %.4f",
+        bt_min, bt_max, bt_mean,
+    )
+
+    if progress_callback:
+        progress_callback(88, "Back-transformation complete")
+
     # ========================================================================
-    # STEP 4: POST PROCESSING (On Raw Data)
+    # STEP 3: SUMMARY STATISTICS (on physical-unit data)
     # ========================================================================
-    # Summary stats on raw data (CORRECT for mining reports)
     if progress_callback:
         progress_callback(88, "Computing summary statistics (physical space)...")
-    
+
     summary = compute_summary_statistics(realizations_raw)
-    
-    # Also compute on Gaussian for quality checking
-    summary_gaussian = compute_summary_statistics(reals_gaussian)
-    
+
+    # Gaussian summary: mean/std only, for QC
+    summary_gaussian = {
+        'mean': np.mean(reals_gaussian, axis=0),
+        'std': np.std(reals_gaussian, axis=0),
+    }
+
     if progress_callback:
         progress_callback(90, "Summary statistics complete")
-    
-    # Probability maps (on raw data for meaningful interpretation)
+
+    # ========================================================================
+    # STEP 4: PROBABILITY & EXCEEDANCE MAPS (on physical-unit data)
+    # ========================================================================
     prob_maps = {}
     if cutoffs:
         n_cutoffs = len(cutoffs)
         for i, cutoff in enumerate(cutoffs):
             if progress_callback:
-                pct = 90 + int((i / n_cutoffs) * 3)  # 90-93%
-                progress_callback(
-                    pct,
-                    f"Probability map {i+1}/{n_cutoffs} (cutoff={cutoff})..."
-                )
-            # Use raw data for probability maps (cutoffs are in raw units)
+                pct = 90 + int((i / n_cutoffs) * 3)
+                progress_callback(pct, f"Probability map {i+1}/{n_cutoffs} (cutoff={cutoff})...")
             prob_maps[cutoff] = compute_probability_map(realizations_raw, cutoff, above=True)
-    
-    # Exceedance volumes - MUST use raw data (already back-transformed)
+
     exceedance = {}
     if cutoffs:
         block_volume = params.xinc * params.yinc * params.zinc
         n_cutoffs = len(cutoffs)
-        
         for i, cutoff in enumerate(cutoffs):
             if progress_callback:
-                pct = 93 + int((i / n_cutoffs) * 7)  # 93-100%
-                progress_callback(
-                    pct,
-                    f"Exceedance volumes {i+1}/{n_cutoffs} (cutoff={cutoff})..."
-                )
-            # ✅ Use the actual is_gaussian flag - will error if data is still Gaussian
-            # This ensures metal/tonnage is only calculated on back-transformed data
+                pct = 93 + int((i / n_cutoffs) * 7)
+                progress_callback(pct, f"Exceedance volumes {i+1}/{n_cutoffs} (cutoff={cutoff})...")
             exceedance[cutoff] = compute_exceedance_volume(
-                realizations_raw, cutoff, block_volume, is_gaussian=is_gaussian
+                realizations_raw, cutoff, block_volume, is_gaussian=False,
             )
-    
+
     if progress_callback:
         progress_callback(100, f"Complete! {params.nreal} realizations generated")
-    
+
     logger.info(
-        f"SGSIM workflow complete: {params.nreal} realizations, "
-        f"{len(cutoffs) if cutoffs else 0} cutoffs"
+        "SGSIM workflow complete: %d realizations, %d cutoffs, "
+        "physical range [%.2f, %.2f]",
+        params.nreal, len(cutoffs) if cutoffs else 0, bt_min, bt_max,
     )
-    
-    # ========================================================================
-    # STEP 5: RETURN EVERYTHING
-    # ========================================================================
-    result = {
-        'realizations_gaussian': reals_gaussian,  # For validation/quality checks
-        'realizations_raw': realizations_raw,  # For mining reports
-        'summary': summary,  # On raw data - CORRECT for mining
-        'summary_gaussian': summary_gaussian,  # On Gaussian - for quality checks
-        'probability_maps': prob_maps,  # On raw data
-        'exceedance': exceedance,  # On raw data - VALID metal/tonnage
-        'params': params
+
+    return {
+        'realizations_gaussian': reals_gaussian,
+        'realizations_raw': realizations_raw,
+        'summary': summary,
+        'summary_gaussian': summary_gaussian,
+        'probability_maps': prob_maps,
+        'exceedance': exceedance,
+        'transformer': transformer,
+        'params': params,
     }
-    
-    # Add transformer if available
-    if transformer is not None:
-        result['transformer'] = transformer
-    
-    return result
 
 
 # ============================================================================

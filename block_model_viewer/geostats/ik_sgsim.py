@@ -62,17 +62,27 @@ def _sample_from_cdf(
     
     # Clip probabilities to [0, 1]
     sorted_probs = np.clip(sorted_probs, 0.0, 1.0)
-    
+
+    # Enforce monotonicity (CDF must be non-decreasing)
+    for k in range(1, len(sorted_probs)):
+        if sorted_probs[k] < sorted_probs[k - 1]:
+            sorted_probs[k] = sorted_probs[k - 1]
+
     # Draw uniform random numbers
     u = random_state.uniform(0.0, 1.0, size=n_samples)
-    
+
     # Interpolate to find quantiles
     # Handle edge cases
     if len(sorted_thresh) == 1:
         return np.full(n_samples, sorted_thresh[0])
-    
-    # Use linear interpolation
-    samples = np.interp(u, sorted_probs, sorted_thresh)
+
+    # Remove duplicate probability values for valid interpolation
+    unique_mask = np.concatenate(([True], np.diff(sorted_probs) > 1e-12))
+    if np.sum(unique_mask) < 2:
+        return np.full(n_samples, np.mean(sorted_thresh))
+
+    # Use linear interpolation on unique CDF points
+    samples = np.interp(u, sorted_probs[unique_mask], sorted_thresh[unique_mask])
     
     # Handle extrapolation (values outside CDF range)
     # For u < min(probs), use first threshold
@@ -81,24 +91,30 @@ def _sample_from_cdf(
     max_prob = np.max(sorted_probs)
     
     if min_prob > 0.0:
-        # Extrapolate below minimum
+        # Extrapolate below minimum (bounded)
         mask_low = u < min_prob
         if np.any(mask_low):
-            # Linear extrapolation: assume constant slope
             if len(sorted_thresh) > 1:
-                slope = (sorted_thresh[1] - sorted_thresh[0]) / (sorted_probs[1] - sorted_probs[0] + 1e-10)
-                samples[mask_low] = sorted_thresh[0] + (u[mask_low] - min_prob) * slope
+                dp = sorted_probs[1] - sorted_probs[0]
+                slope = (sorted_thresh[1] - sorted_thresh[0]) / dp if dp > 1e-6 else 0.0
+                extrapolated = sorted_thresh[0] + (u[mask_low] - min_prob) * slope
+                # Clamp: don't extrapolate further than one threshold interval below
+                lower_bound = sorted_thresh[0] - abs(sorted_thresh[1] - sorted_thresh[0])
+                samples[mask_low] = np.maximum(extrapolated, lower_bound)
             else:
                 samples[mask_low] = sorted_thresh[0]
-    
+
     if max_prob < 1.0:
-        # Extrapolate above maximum
+        # Extrapolate above maximum (bounded)
         mask_high = u > max_prob
         if np.any(mask_high):
-            # Linear extrapolation
             if len(sorted_thresh) > 1:
-                slope = (sorted_thresh[-1] - sorted_thresh[-2]) / (sorted_probs[-1] - sorted_probs[-2] + 1e-10)
-                samples[mask_high] = sorted_thresh[-1] + (u[mask_high] - max_prob) * slope
+                dp = sorted_probs[-1] - sorted_probs[-2]
+                slope = (sorted_thresh[-1] - sorted_thresh[-2]) / dp if dp > 1e-6 else 0.0
+                extrapolated = sorted_thresh[-1] + (u[mask_high] - max_prob) * slope
+                # Clamp: don't extrapolate further than one threshold interval above
+                upper_bound = sorted_thresh[-1] + abs(sorted_thresh[-1] - sorted_thresh[-2])
+                samples[mask_high] = np.minimum(extrapolated, upper_bound)
             else:
                 samples[mask_high] = sorted_thresh[-1]
     
@@ -140,7 +156,17 @@ def run_ik_sgsim(
         IKSGSIMResult with realization names
     """
     logger.info(f"Starting IK-SGSIM: {config.n_realizations} realizations for property '{property_name}'")
-    mode_str = "Sequential (spatial correlation)" if use_sequential else "Independent (no correlation)"
+    # SIM-08 FIX: sequential mode is documented but not yet implemented.
+    # The loop below always samples each block independently from its local CDF (equivalent
+    # to use_sequential=False). Emit a clear warning so callers are not misled.
+    if use_sequential:
+        logger.warning(
+            "IK-SGSIM: use_sequential=True is requested but sequential simulation "
+            "(random-path visitation with previously-simulated neighbours) is not yet "
+            "implemented. Falling back to independent block sampling. "
+            "Spatial correlation between blocks will NOT be reproduced."
+        )
+    mode_str = "Independent (no inter-block correlation; sequential path not implemented)" if use_sequential else "Independent (no correlation)"
     logger.info(f"Mode: {mode_str}")
     
     # =========================================================================
@@ -179,13 +205,23 @@ def run_ik_sgsim(
         
         for iblock in range(n_blocks):
             block_probs = probabilities[iblock, :]
-            
+
             # Skip if all probabilities are NaN
             if np.all(np.isnan(block_probs)):
                 continue
-            
-            # Sample from CDF
-            sample = _sample_from_cdf(thresholds, block_probs, n_samples=1, random_state=rng)
+
+            # Handle partial NaN: use only valid thresholds
+            valid_mask = ~np.isnan(block_probs)
+            if not np.all(valid_mask):
+                if np.sum(valid_mask) >= 2:
+                    sample = _sample_from_cdf(
+                        thresholds[valid_mask], block_probs[valid_mask],
+                        n_samples=1, random_state=rng
+                    )
+                else:
+                    continue
+            else:
+                sample = _sample_from_cdf(thresholds, block_probs, n_samples=1, random_state=rng)
             simulated_values[iblock] = sample[0]
         
         # Add to block model

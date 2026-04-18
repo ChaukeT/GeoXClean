@@ -243,9 +243,9 @@ def run_dbs(
     logger.info(f"Starting DBS: {config.n_realizations} realizations, {len(block_centroids)} blocks")
     
     # Set random seed
-    if config.random_seed is not None:
-        np.random.seed(config.random_seed)
-    
+    # FIX F-SIM: Use local RNG instead of global np.random.seed()
+    rng = np.random.default_rng(config.random_seed)
+
     n_blocks = len(block_centroids)
     
     # Compute block variance
@@ -283,7 +283,7 @@ def run_dbs(
             progress_callback(overall_progress, f"{ireal + 1}/{config.n_realizations}")
 
         # Random path through blocks
-        path = np.random.permutation(n_blocks)
+        path = rng.permutation(n_blocks)
 
         # Buffer for simulated blocks
         max_buffer = n_blocks + n_cond
@@ -368,14 +368,14 @@ def run_dbs(
                     sk_var = max(sk_var, 1e-10)
                     
                     # Draw from conditional distribution
-                    sim_values[i_block] = np.random.normal(sk_mean, np.sqrt(sk_var))
+                    sim_values[i_block] = rng.normal(sk_mean, np.sqrt(sk_var))
                 else:
                     # Not enough neighbors - unconditional draw
                     global_mean = np.mean(values_buf[:cur_size]) if cur_size > 0 else 0.0
-                    sim_values[i_block] = np.random.normal(global_mean, np.sqrt(block_variance))
+                    sim_values[i_block] = rng.normal(global_mean, np.sqrt(block_variance))
             else:
                 # No conditioning data - unconditional draw
-                sim_values[i_block] = np.random.normal(0, np.sqrt(block_variance))
+                sim_values[i_block] = rng.normal(0, np.sqrt(block_variance))
             
             # Add to buffer
             coords_buf[cur_size] = block_coord

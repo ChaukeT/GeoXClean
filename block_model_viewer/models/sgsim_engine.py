@@ -36,7 +36,7 @@ def calc_covariance(dist, rng, sill, nugget, model_type):
     rng : float
         Variogram range
     sill : float
-        Partial sill (total sill - nugget)
+        Total sill (partial sill + nugget). Caller passes total sill.
     nugget : float
         Nugget effect
     model_type : int
@@ -47,7 +47,11 @@ def calc_covariance(dist, rng, sill, nugget, model_type):
     float
         Covariance value
     """
-    total_sill = sill + nugget
+    # SIM-01 FIX: incoming sill IS total sill (caller convention); compute partial sill here
+    total_sill = sill
+    partial_sill = sill - nugget
+    if partial_sill < 0.0:
+        partial_sill = 0.0
 
     if dist < 1e-9:
         return total_sill
@@ -60,15 +64,15 @@ def calc_covariance(dist, rng, sill, nugget, model_type):
             gamma = total_sill
         else:
             ratio = dist / rng
-            gamma = nugget + sill * (1.5 * ratio - 0.5 * ratio**3)
+            gamma = nugget + partial_sill * (1.5 * ratio - 0.5 * ratio**3)
 
     # Exponential
     elif model_type == 1:
-        gamma = nugget + sill * (1.0 - np.exp(-3.0 * dist / rng))
+        gamma = nugget + partial_sill * (1.0 - np.exp(-3.0 * dist / rng))
 
     # Gaussian
     elif model_type == 2:
-        gamma = nugget + sill * (1.0 - np.exp(-3.0 * (dist / rng)**2))
+        gamma = nugget + partial_sill * (1.0 - np.exp(-3.0 * (dist / rng)**2))
 
     return total_sill - gamma
 
@@ -233,7 +237,7 @@ def run_sgsim_kernel(
         # --- SELECTION & KRIGING ---
         if count == 0:
             # Draw Unconditional (Mean 0, Var Sill)
-            sim_values[current_idx] = np.random.normal(0.0, np.sqrt(sill + nugget))
+            sim_values[current_idx] = np.random.normal(0.0, np.sqrt(sill))
             continue
 
         # Sort by distance and take closest k
@@ -257,8 +261,8 @@ def run_sgsim_kernel(
 
         # Fill LHS: Pairwise covariance between neighbors (symmetric)
         for r in range(k):
-            # Diagonal: C(0) = total_sill
-            mat_k[r, r] = sill + nugget
+            # Diagonal: C(0) = total_sill (sill already includes nugget)
+            mat_k[r, r] = sill
             for c in range(r + 1, k):
                 # Off-diagonal: C(h) where h is distance between neighbors
                 dx_nb = k_coords[r, 0] - k_coords[c, 0]
@@ -306,14 +310,14 @@ def run_sgsim_kernel(
                 else:
                     sk_mean = -6.0
 
-            sk_var = (sill + nugget) - np.dot(weights, rhs)
+            sk_var = sill - np.dot(weights, rhs)
             sk_var = max(sk_var, 0.0)
 
             # ── Additional safety: cap variance at total sill ────────
             # SK variance should never exceed C(0); if it does, solver
             # produced nonsensical weights.
-            if sk_var > (sill + nugget):
-                sk_var = sill + nugget
+            if sk_var > sill:
+                sk_var = sill
 
             # Draw from conditional distribution
             sim_std = np.sqrt(sk_var)

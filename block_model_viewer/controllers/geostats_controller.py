@@ -3440,3 +3440,199 @@ class GeostatsController:
     def run_rbf_interpolation(self, params: Dict[str, Any], callback=None, progress_callback=None) -> None:
         """Run RBF Interpolation via task system."""
         self._app.run_task("rbf", params, callback, progress_callback)
+
+    # =========================================================================
+    # ARBF (Adaptive Local RBF) Estimation
+    # =========================================================================
+
+    def _prepare_arbf_payload(
+        self,
+        params: Dict[str, Any],
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run the ARBF estimator (FastRBF v2 via ARBFEstimatorAdapter) and
+        package the results for ``ARBFEstimationPanel.on_results``.
+
+        Pure worker: must not touch the registry. The controller injects
+        'data' (filtered composite DataFrame) into params before dispatch.
+        """
+        from ..geostats.arbf_adapter import ARBFEstimatorAdapter
+        from ..models.shared_grid import SharedGridDefinition
+        from ..models.visualization import create_block_model
+
+        df = params.get("data")
+        if df is None or (hasattr(df, "empty") and df.empty):
+            raise ValueError(
+                "No drillhole data provided for ARBF estimation. "
+                "Controller must inject 'data' into params before dispatch."
+            )
+
+        variable = params.get("variable")
+        if not variable or variable not in df.columns:
+            raise ValueError(f"Selected variable '{variable}' not present in drillhole data.")
+
+        grid_spec = params.get("grid_spec")
+        if not grid_spec:
+            raise ValueError("Grid specification missing for ARBF estimation.")
+
+        for key in ("nx", "ny", "nz", "dx", "dy", "dz", "x0", "y0", "z0"):
+            if key not in grid_spec:
+                raise ValueError(f"grid_spec missing required key '{key}'.")
+
+        cleaned = df.dropna(subset=["X", "Y", "Z", variable])
+        if hasattr(df, "attrs") and df.attrs:
+            cleaned.attrs = df.attrs.copy()
+        if cleaned.empty:
+            raise ValueError("No valid samples after filtering missing coordinates or values.")
+
+        coords = cleaned[["X", "Y", "Z"]].to_numpy(dtype=float)
+        values = cleaned[variable].to_numpy(dtype=float)
+
+        grid_def = SharedGridDefinition(
+            nx=int(grid_spec["nx"]), ny=int(grid_spec["ny"]), nz=int(grid_spec["nz"]),
+            dx=float(grid_spec["dx"]), dy=float(grid_spec["dy"]), dz=float(grid_spec["dz"]),
+            x0=float(grid_spec["x0"]), y0=float(grid_spec["y0"]), z0=float(grid_spec["z0"]),
+        )
+        centroids = grid_def.build_centroids()
+        block_sizes = np.array([grid_def.dx, grid_def.dy, grid_def.dz], dtype=float)
+        nx, ny, nz = grid_def.nx, grid_def.ny, grid_def.nz
+
+        if progress_callback:
+            progress_callback(5, f"Configuring ARBF estimator ({len(coords)} composites, {nx*ny*nz} blocks)...")
+
+        # Adapter config: pass through every panel param EXCEPT the bulky 'data'
+        # frame. The adapter's _build_* methods read from this dict.
+        config = {k: v for k, v in params.items() if k not in ("data", "_progress_callback")}
+        config.setdefault("variable", variable)
+        config["block_sizes"] = block_sizes
+
+        adapter = ARBFEstimatorAdapter(config)
+        adapter.set_composites(coords, values)
+        adapter.set_block_model(centroids, block_sizes)
+
+        weights = params.get("declustering_weights")
+        if weights is not None and len(weights) == len(coords):
+            adapter.set_declustering_weights(np.asarray(weights, dtype=float))
+
+        if progress_callback:
+            adapter.set_progress_callback(progress_callback)
+
+        if progress_callback:
+            progress_callback(10, "Running ARBF estimation...")
+
+        raw = adapter.estimate()
+
+        if progress_callback:
+            progress_callback(90, "Building visualization grid...")
+
+        grades = np.asarray(raw["grades"], dtype=float)
+
+        # Centroids from build_centroids are ordered (ix, iy, iz) with iz fastest
+        # (meshgrid indexing='ij', ravel C-order). Reshape + transpose to the
+        # (nz, ny, nx) C-order layout that create_block_model expects.
+        grades_3d = grades.reshape(nx, ny, nz, order="C").transpose(2, 1, 0)
+
+        property_name = f"ARBF_{variable}"
+        variance_property = f"{property_name}_var"
+
+        grid = create_block_model(
+            values=grades_3d,
+            origin=(grid_def.x0, grid_def.y0, grid_def.z0),
+            spacing=(grid_def.dx, grid_def.dy, grid_def.dz),
+            dims=(nx, ny, nz),
+            name=property_name,
+        )
+
+        def _attach(name: str, arr: Any) -> None:
+            if arr is None:
+                return
+            a = np.asarray(arr)
+            if a.size != nx * ny * nz:
+                return
+            a3 = a.reshape(nx, ny, nz, order="C").transpose(2, 1, 0)
+            grid.cell_data[name] = a3.ravel(order="C")
+
+        _attach(variance_property, raw.get("variances"))
+        _attach(f"{property_name}_stitch_var", raw.get("stitching_variance"))
+        _attach(f"{property_name}_total_blend_var", raw.get("total_blending_variance"))
+        _attach(f"{property_name}_class", raw.get("classifications"))
+        _attach(f"{property_name}_neff", raw.get("neff"))
+        _attach(f"{property_name}_fail", raw.get("fail_flags"))
+
+        # Geostatistical gate (optional — only runs if audit_record has CV data)
+        gate_dict: Optional[Dict[str, Any]] = None
+        try:
+            from ..geostats.arbf_quality_gate import evaluate_geostatistical_gate
+            gate = evaluate_geostatistical_gate(
+                audit_record=raw.get("audit_record"),
+                diagnostics=raw.get("diagnostics"),
+                sample_values=values,
+                sample_coords=coords,
+                block_centroids=centroids,
+                domain_column=params.get("domain_column"),
+                estimation_mode=params.get("estimation_mode_name"),
+            )
+            gate_dict = gate.to_dict()
+        except Exception as exc:
+            logger.debug("ARBF quality gate evaluation skipped: %s", exc)
+
+        metadata = {
+            "variable": variable,
+            "method": "ARBF (Adaptive Local RBF)",
+            "n_samples": int(len(coords)),
+            "n_blocks": int(nx * ny * nz),
+            "grid_dims": (nx, ny, nz),
+            "grid_spacing": (grid_def.dx, grid_def.dy, grid_def.dz),
+            "grid_origin": (grid_def.x0, grid_def.y0, grid_def.z0),
+            "kernel_type": params.get("kernel_type"),
+            "drift_type": params.get("drift_type"),
+            "estimation_mode": params.get("estimation_mode_name", "standard"),
+            "use_normal_score": bool(params.get("use_normal_score")),
+            "workflow_kind": "estimation",
+            "message": f"ARBF estimated {int(nx * ny * nz)} blocks from {len(coords)} composites.",
+        }
+        raw_meta = raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else {}
+        if raw_meta:
+            metadata.update({f"diag_{k}": v for k, v in raw_meta.items()})
+
+        if progress_callback:
+            progress_callback(100, "ARBF complete")
+
+        payload: Dict[str, Any] = {
+            "name": "arbf",
+            "method": "ARBF Estimation",
+            "property_name": property_name,
+            "variance_property": variance_property,
+            "grid": grid,
+            "grades": grades,
+            "variances": raw.get("variances"),
+            "variances_raw": raw.get("variances_raw"),
+            "variances_calibrated": raw.get("variances_calibrated"),
+            "stitching_variance": raw.get("stitching_variance"),
+            "total_blending_variance": raw.get("total_blending_variance"),
+            "classifications": raw.get("classifications"),
+            "classification_names": raw.get("classification_names"),
+            "fail_flags": raw.get("fail_flags"),
+            "neff": raw.get("neff"),
+            "cv_result": raw.get("cv_result"),
+            "swath_data": raw.get("swath_data"),
+            "support_swath_data": raw.get("support_swath_data"),
+            "audit_record": raw.get("audit_record"),
+            "diagnostics": raw.get("diagnostics"),
+            "geostatistical_gate": gate_dict,
+            "x_coords": centroids[:, 0],
+            "y_coords": centroids[:, 1],
+            "z_coords": centroids[:, 2],
+            "block_sizes": block_sizes,
+            "metadata": metadata,
+            "visualization": {
+                "mesh": grid,
+                "layer_name": f"ARBF: {variable}",
+                "property": property_name,
+            },
+        }
+        return payload
+
+    def run_arbf(self, params: Dict[str, Any], callback=None, progress_callback=None) -> None:
+        """Run ARBF estimation via task system."""
+        self._app.run_task("arbf", params, callback, progress_callback)
