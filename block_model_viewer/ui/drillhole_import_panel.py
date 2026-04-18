@@ -100,6 +100,9 @@ class DrillholeImportPanel(BaseAnalysisPanel):
         self.assay_df = None
         self.lithology_df = None
         self.structures_df = None
+        # Legacy attrs read by main_window/file_mixin — populated when data is loaded
+        self.comp_domain_df = None  # Composites with domain codes (was on old compositing panel)
+        self.assay_xyz = None       # Desurveyed assays with X,Y,Z columns
         self.upload_thread = None
         self.file_cards = {}
 

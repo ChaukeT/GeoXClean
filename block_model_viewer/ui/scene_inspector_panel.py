@@ -462,6 +462,15 @@ class SceneInspectorPanel(BaseDisplayPanel):
             except Exception as e:
                 logger.error(f"Failed to connect overlay changed signal: {e}", exc_info=True)
 
+    def update_layer_controls(self):
+        """Refresh layer-related controls on renderer layer change.
+
+        Called by main_window when renderer active_layers change. Scene inspector
+        doesn't currently surface per-layer controls (those live in property_panel),
+        so this forwards to refresh() for legend/overlay sync.
+        """
+        self.refresh()
+
     def refresh(self):
         controller = getattr(self, "controller", None)
         if controller is None:

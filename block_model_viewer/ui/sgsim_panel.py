@@ -48,8 +48,22 @@ from ..utils.coordinate_utils import ensure_xyz_columns
 from ..utils.variable_utils import get_grade_columns, populate_variable_combo, validate_variable
 from .base_analysis_panel import BaseAnalysisPanel, log_registry_data_status
 from .modern_styles import get_theme_colors, get_analysis_panel_stylesheet, ModernColors
+from .mixins.domain_mask_mixin import DomainMaskMixin
 
 logger = logging.getLogger(__name__)
+
+# Suffixes produced by the Grade Transformation panel.  SGSIM requires
+# pre-transformed data as input — the variable combo shows ONLY columns
+# with these suffixes (plus any column that has a registered transformer).
+_TRANSFORM_SUFFIXES = (
+    "_NS", "_ns", "_LN", "_ln", "_BC", "_bc",
+    "_LOG", "_log", "_NSCORE", "_nscore",
+)
+
+
+def _is_transformed_column(col: str) -> bool:
+    """Return True if *col* looks like a Grade-Transform output."""
+    return any(col.endswith(s) for s in _TRANSFORM_SUFFIXES)
 
 
 def get_sgsim_panel_stylesheet() -> str:
@@ -113,7 +127,7 @@ def get_sgsim_panel_stylesheet() -> str:
     """
 
 
-class SGSIMPanel(BaseAnalysisPanel):
+class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
     """
     SGSIM Simulation & Uncertainty Analysis Panel.
     """
@@ -401,6 +415,10 @@ class SGSIMPanel(BaseAnalysisPanel):
         self._create_search_group(s_lay)
         self._create_cutoff_group(s_lay)
 
+        # Domain Masking group (from DomainMaskMixin)
+        mask_group = self._build_domain_mask_group(default_enabled=True)
+        s_lay.addWidget(mask_group)
+
         s_lay.addStretch()
         scroll.setWidget(cont)
         l_lay.addWidget(scroll)
@@ -525,12 +543,20 @@ class SGSIMPanel(BaseAnalysisPanel):
         # Property/Variable selection
         self.variable_combo = QComboBox()
         self.variable_combo.setToolTip(
-            "Select the grade variable to simulate using SGSIM.\n"
-            "Sequential Gaussian Simulation generates multiple equiprobable realizations\n"
-            "for uncertainty quantification and resource confidence intervals."
+            "Select the transformed variable (e.g. Cu_NS) to simulate.\n"
+            "SGSIM works in Gaussian space — your data must be\n"
+            "transformed first via Analysis → Grade Transformation."
         )
         self.variable_combo.currentTextChanged.connect(self._on_variable_changed)
         l.addRow("Property/Variable:", self.variable_combo)
+
+        self._transform_notice = QLabel(
+            "Select a transformed column (e.g. Cu_NS). "
+            "Transform your data first: Analysis \u2192 Grade Transformation."
+        )
+        self._transform_notice.setWordWrap(True)
+        self._transform_notice.setStyleSheet("color: #f0ad4e; font-size: 11px; padding: 0 0 4px 0;")
+        l.addRow("", self._transform_notice)
 
         self.nreal_spin = QSpinBox()
         self.nreal_spin.setRange(1, 1000)
@@ -914,118 +940,55 @@ class SGSIMPanel(BaseAnalysisPanel):
     # --- Back-Transform Methods ---
 
     def _back_transform_results(self):
-        """Manual back-transform: Convert Gaussian simulation results back to original grade scale."""
+        """Manual back-transform button handler (kept for UI compatibility).
+
+        The workflow now always back-transforms automatically, so this
+        just confirms the status.
+        """
         if not self.sgsim_results:
             QMessageBox.warning(self, "No Results", "Run SGSIM simulation first.")
             return
-
-        # Guard against double back-transform
-        if self.sgsim_results.get('realizations_raw') is not None:
-            QMessageBox.information(
-                self, "Already Back-Transformed",
-                "Summary statistics are already in physical units.\n"
-                "The model back-transformed realizations before computing summaries."
-            )
-            return
-
-        if not self.transformation_metadata:
-            QMessageBox.warning(
-                self, "No Transformation",
-                "No normal-score transformation metadata available.\n"
-                "Back-transform requires that data was normal-score transformed before simulation."
-            )
-            return
-
-        self._log_event("Back-transforming results (Gaussian → Grade)...", "progress")
-        try:
-            self._perform_back_transform()
-            self._log_event("✓ Back-transform complete - results are now in original grade units", "success")
-            self.back_transform_btn.setEnabled(False)
-            self.back_transform_btn.setText("✓ Back-Transformed")
-        except Exception as e:
-            self._log_event(f"ERROR: Back-transform failed: {e}", "error")
-            QMessageBox.critical(self, "Back-Transform Error", f"Failed to back-transform:\n{e}")
+        QMessageBox.information(
+            self, "Already Back-Transformed",
+            "Results are already in physical units.\n"
+            "SGSIM automatically back-transforms using the transformer\n"
+            "from the Grade Transformation panel."
+        )
 
     def _auto_back_transform(self):
-        """Auto-trigger back-transformation if transformation metadata is available in results.
-        
-        IMPORTANT: run_full_sgsim_workflow() already back-transforms realizations
-        and computes 'summary' on realizations_raw (physical space).  When
-        'realizations_raw' is present in the results, the summary is already
-        in physical units — applying inverse_transform again would CORRUPT
-        the values (double back-transform bug).
+        """Log back-transform status after simulation completes.
+
+        The workflow (``run_full_sgsim_workflow``) always back-transforms
+        every realization using the provided transformer and computes
+        summary statistics in physical units.  This method just validates
+        and reports the result — it never re-transforms.
         """
         if not self.sgsim_results:
             return
 
-        # ── Guard: if the model already returned raw realizations, the
-        #    summary is already in physical space → skip back-transform.
-        if self.sgsim_results.get('realizations_raw') is not None:
-            self._log_event("Summary already in physical units (model back-transformed realizations)", "info")
-            self.back_transform_btn.setEnabled(False)
-            self.back_transform_btn.setText("✓ Back-Transformed")
-            return
-
-        # Only back-transform if the summary is still in Gaussian space
-        transformer = self.sgsim_results.get('transformer') or self.sgsim_results.get('back_transformer')
-        has_transform = transformer is not None or bool(self.transformation_metadata)
-
-        if has_transform:
-            self._log_event("Auto-triggering back-transformation (TRF-005)...", "info")
-            try:
-                self._perform_back_transform()
-                self._log_event("✓ Auto back-transform complete", "success")
-                self.back_transform_btn.setEnabled(False)
-                self.back_transform_btn.setText("✓ Back-Transformed")
-            except Exception as e:
-                self._log_event(f"Warning: Auto back-transform failed: {e}", "warning")
-                logger.warning(f"SGSIM auto back-transform failed: {e}")
-                # Leave button enabled so user can retry manually
-                self.back_transform_btn.setEnabled(True)
-        else:
-            # No transformation available - enable manual button
-            self.back_transform_btn.setEnabled(True)
-            self._log_event("No transformation metadata - results are in original units", "info")
-
-    def _perform_back_transform(self):
-        """Perform the actual back-transformation on summary statistics."""
-        import numpy as np
-
-        transformer = self.sgsim_results.get('transformer') or self.sgsim_results.get('back_transformer')
         summary = self.sgsim_results.get('summary', {})
+        mean_arr = summary.get('mean')
 
-        if not summary:
-            raise ValueError("No summary statistics to back-transform")
-
-        if transformer is not None and hasattr(transformer, 'inverse_transform'):
-            # Use the stored transformer (e.g., QuantileTransformer)
-            for key in ['mean', 'p10', 'p50', 'p90']:
-                if key in summary and summary[key] is not None:
-                    flat = summary[key].flatten()
-                    transformed = transformer.inverse_transform(flat.reshape(-1, 1)).flatten()
-                    summary[key] = transformed.reshape(summary[key].shape)
-            self._log_event("  Used fitted transformer for back-transform", "info")
+        if self.sgsim_results.get('realizations_raw') is not None and mean_arr is not None:
+            mn = float(np.nanmin(mean_arr))
+            mx = float(np.nanmax(mean_arr))
+            avg = float(np.nanmean(mean_arr))
+            self._log_event(
+                f"Summary in physical units: min={mn:.2f}, max={mx:.2f}, mean={avg:.2f}",
+                "success",
+            )
+            logger.info(
+                "SGSIM back-transform validation: min=%.4f, max=%.4f, mean=%.4f",
+                mn, mx, avg,
+            )
+            self.back_transform_btn.setEnabled(False)
+            self.back_transform_btn.setText("Back-Transformed")
         else:
-            # Fallback: use transformation metadata (mean/std for simple normal-score)
-            meta = self.transformation_metadata
-            if meta:
-                # Get the variable's transformation info
-                var_meta = None
-                if isinstance(meta, dict):
-                    # Try to find metadata for current variable
-                    var_name = self.variable_combo.currentText()
-                    var_meta = meta.get(var_name, meta)
-                    if isinstance(var_meta, dict) and 'mean' in var_meta and 'std' in var_meta:
-                        orig_mean = var_meta['mean']
-                        orig_std = var_meta['std']
-                        for key in ['mean', 'p10', 'p50', 'p90']:
-                            if key in summary and summary[key] is not None:
-                                summary[key] = summary[key] * orig_std + orig_mean
-                        self._log_event(f"  Applied linear back-transform (mean={orig_mean:.3f}, std={orig_std:.3f})", "info")
-                    else:
-                        self._log_event("  Warning: Transformation metadata format not recognized", "warning")
-            else:
-                raise ValueError("No transformer or transformation metadata available")
+            self._log_event(
+                "WARNING: No back-transformed realizations — summary may be in Gaussian space",
+                "error",
+            )
+            self.back_transform_btn.setEnabled(False)
 
     # --- Right Panel Tabs ---
 
@@ -1312,38 +1275,59 @@ class SGSIMPanel(BaseAnalysisPanel):
         """Internal method to process drillhole data (called by both set_drillhole_data and _on_data_loaded)."""
         if df is not None and not df.empty:
             self.drillhole_data = ensure_xyz_columns(df)
-            
-            # Populate property combo box using centralized utility
+
+            # ----------------------------------------------------------
+            # Populate variable combo with ONLY transformed columns.
+            # SGSIM is a Gaussian-space engine — it requires data that
+            # has already been transformed via the Grade Transformation
+            # panel.  Raw columns (Cu, Au …) are excluded; only columns
+            # with transform suffixes (_NS, _LN, _BC …) are shown.
+            # ----------------------------------------------------------
+            valid_cols = []
             if self.drillhole_data is not None and hasattr(self, 'variable_combo'):
-                valid_cols = get_grade_columns(self.drillhole_data)
-                
-                # Use centralized utility to populate combo
-                selected = populate_variable_combo(self.variable_combo, self.drillhole_data, variable)
-            
-            # Check metadata for transformed vars - look for transformed column names
-            if self.transformation_metadata:
-                # First, check if any transformed columns exist in the data
-                for col in valid_cols:
-                    for k, v in self.transformation_metadata.items():
-                        if isinstance(v, dict):
-                            transformed_name = v.get('transformed_col_name')
-                            original_name = v.get('original_col_name', k)
-                            # If this column matches a transformed name, prefer it
-                            if transformed_name == col:
-                                variable = col
-                                break
-                            # If we're looking for a transformed column that doesn't exist,
-                            # check if the original exists and we can use it
-                            elif transformed_name == variable and original_name in valid_cols:
-                                # The transformed column doesn't exist, but original does
-                                # We'll use the original and transform it later if needed
-                                logger.info(f"Transformed column '{transformed_name}' not found, but original '{original_name}' exists")
-                                variable = original_name
-                                break
-                    if variable:
-                        break
-            
-            # Set the selected variable (may have been updated by transformation logic)
+                all_grade_cols = get_grade_columns(self.drillhole_data)
+                valid_cols = [c for c in all_grade_cols if _is_transformed_column(c)]
+
+                logger.info(
+                    "SGSIM: %d transformed columns available: %s  "
+                    "(excluded %d raw columns)",
+                    len(valid_cols), valid_cols,
+                    len(all_grade_cols) - len(valid_cols),
+                )
+
+                self.variable_combo.blockSignals(True)
+                try:
+                    self.variable_combo.clear()
+                    self.variable_combo.addItems(valid_cols)
+
+                    if variable and variable in valid_cols:
+                        self.variable_combo.setCurrentText(variable)
+                    elif valid_cols:
+                        self.variable_combo.setCurrentIndex(0)
+                finally:
+                    self.variable_combo.blockSignals(False)
+
+                selected = self.variable_combo.currentText() or (valid_cols[0] if valid_cols else None)
+
+            # Update notice label
+            if hasattr(self, '_transform_notice'):
+                if valid_cols:
+                    self._transform_notice.setText(
+                        f"Transformed columns available: {', '.join(valid_cols)}"
+                    )
+                    self._transform_notice.setStyleSheet(
+                        "color: #5cb85c; font-size: 11px; padding: 0 0 4px 0;"
+                    )
+                else:
+                    self._transform_notice.setText(
+                        "No transformed data found. "
+                        "Transform your data first: Analysis \u2192 Grade Transformation"
+                    )
+                    self._transform_notice.setStyleSheet(
+                        "color: #f0ad4e; font-size: 11px; padding: 0 0 4px 0;"
+                    )
+
+            # Set the selected variable
             if variable and variable in valid_cols:
                 self.variable_combo.setCurrentText(variable)
                 self.variable = variable
@@ -1353,7 +1337,7 @@ class SGSIMPanel(BaseAnalysisPanel):
                 self.variable = valid_cols[0]
             else:
                 self.variable = None
-        
+
         # Only update UI if it's been built
         if hasattr(self, 'run_btn') and hasattr(self, 'results_text'):
             if self.variable:
@@ -1362,9 +1346,9 @@ class SGSIMPanel(BaseAnalysisPanel):
                 self._log_event("SGSIM Panel Initialized", "success")
                 self._log_event(f"Data loaded: {len(self.drillhole_data)} samples", "info")
                 self._log_event(f"Variable: {self.variable}", "info")
-                self._log_event(f"Available columns: {len(valid_cols)}", "info")
+                self._log_event(f"Available transformed columns: {len(valid_cols)}", "info")
                 self._update_progress(0, "Ready to run")
-                
+
                 # Auto-detect grid from drillhole extent if checkbox is enabled
                 if hasattr(self, 'auto_fit_grid_check') and self.auto_fit_grid_check.isChecked():
                     try:
@@ -1375,8 +1359,12 @@ class SGSIMPanel(BaseAnalysisPanel):
                         logger.warning(f"SGSIM panel: Auto-fit grid failed: {e}")
             else:
                 self.run_btn.setEnabled(False)
-                self._log_event("No valid properties found in data", "warning")
-                logger.debug("SGSIM panel: No valid properties found")
+                self._log_event(
+                    "No transformed columns found. "
+                    "Transform your data first: Analysis \u2192 Grade Transformation",
+                    "warning",
+                )
+                logger.info("SGSIM panel: No transformed columns — Run button disabled")
     
     def _on_variable_changed(self, text):
         """Handle variable selection change."""
@@ -1485,39 +1473,27 @@ class SGSIMPanel(BaseAnalysisPanel):
             self._log_event("WARNING: Variogram may not be fitted on normal-score data", "warning")
             QMessageBox.warning(self, "Variogram Domain Warning", warning_msg)
 
-        # Check variable match
+        # Check variable match — the variogram should have been fitted on
+        # a transformed column (e.g. Cu_NS) which is exactly what SGSIM needs.
         v = res.get('variable')
         if v and v != self.variable:
-            # Try to set it in the combo box if it exists
             if hasattr(self, 'variable_combo') and self.drillhole_data is not None:
-                if v in self.drillhole_data.columns:
+                if self.variable_combo.findText(v) >= 0:
                     self.variable_combo.setCurrentText(v)
                     self.variable = v
                     if hasattr(self, 'results_text'):
                         self.results_text.append(f"Switched variable to {v} based on variogram.")
                 else:
-                    # Check transformation metadata to see if this is a transformed column
-                    original_col = None
-                    if self.transformation_metadata:
-                        for key, meta in self.transformation_metadata.items():
-                            if isinstance(meta, dict):
-                                transformed_name = meta.get('transformed_col_name')
-                                original_name = meta.get('original_col_name', key)
-                                if transformed_name == v and original_name in self.drillhole_data.columns:
-                                    original_col = original_name
-                                    break
-                    
-                    if original_col:
-                        logger.warning(f"Variogram variable '{v}' not found, but original '{original_col}' exists. "
-                                     f"Please ensure '{v}' is created via Grade Transformation panel before running SGSIM.")
-                        if hasattr(self, 'results_text'):
-                            self.results_text.append(f"⚠️ Warning: Variogram uses '{v}' but data only has '{original_col}'. "
-                                                    f"Please transform '{original_col}' to '{v}' first.")
-                        # Don't auto-switch, let user decide
-                    else:
-                        logger.warning(f"Variogram variable '{v}' not found in data columns. Available: {list(self.drillhole_data.columns)}")
-                        if hasattr(self, 'results_text'):
-                            self.results_text.append(f"⚠️ Warning: Variogram variable '{v}' not found in data.")
+                    logger.warning(
+                        "Variogram variable '%s' not in SGSIM variable list. "
+                        "Available: %s", v,
+                        [self.variable_combo.itemText(i) for i in range(self.variable_combo.count())],
+                    )
+                    if hasattr(self, 'results_text'):
+                        self.results_text.append(
+                            f"Variogram variable '{v}' not available. "
+                            f"Transform your data first (Analysis \u2192 Grade Transformation)."
+                        )
             else:
                 self.variable = v
                 if hasattr(self, 'results_text'):
@@ -1806,15 +1782,98 @@ class SGSIMPanel(BaseAnalysisPanel):
             "max_neighbors": self.max_n.value(),
             "max_search_radius": self.rad.value(),
             "cutoffs": cuts,
-            "transformation_metadata": self.transformation_metadata
+            "transformer": self._get_back_transformer(selected_variable),
         }
+
+    def _get_back_transformer(self, transformed_variable: str):
+        """Retrieve the NormalScoreTransformer that maps *transformed_variable* → raw.
+
+        The Grade Transformation panel stores transformers keyed by the
+        ORIGINAL raw column name (e.g. ``"Cu"``).  We look up which raw
+        column produced *transformed_variable* (e.g. ``"Cu_NS"``) via the
+        transformation metadata, then fetch the transformer for that column.
+        """
+        original_col = self._find_original_column(transformed_variable)
+        if original_col is None:
+            logger.warning(
+                "SGSIM: Could not determine original column for '%s' "
+                "from transformation metadata — no back-transformer.",
+                transformed_variable,
+            )
+            return None
+
+        try:
+            if self.registry:
+                # Try domain-specific transformer first (per-domain normal score)
+                domain_val = getattr(self, "_active_domain_filter_metadata", {})
+                if isinstance(domain_val, dict):
+                    domain_val = domain_val.get("domain_filter_value")
+                if domain_val and hasattr(self.registry, 'get_transformer_for_domain'):
+                    try:
+                        t = self.registry.get_transformer_for_domain(original_col, domain_val)
+                        if t is not None:
+                            logger.info(
+                                "SGSIM: Retrieved domain-specific back-transformer "
+                                "for '%s' → '%s' (domain='%s', raw range [%.2f, %.2f])",
+                                transformed_variable, original_col, domain_val,
+                                t.min_val, t.max_val,
+                            )
+                            return t
+                    except Exception:
+                        pass  # Fall through to global lookup
+
+                # Fall back to global transformer
+                if hasattr(self.registry, 'get_transformers'):
+                    transformers = self.registry.get_transformers()
+                    if transformers and original_col in transformers:
+                        t = transformers[original_col]
+                        logger.info(
+                            "SGSIM: Retrieved global back-transformer for '%s' → '%s' "
+                            "(raw range [%.2f, %.2f])",
+                            transformed_variable, original_col,
+                            t.min_val, t.max_val,
+                        )
+                        return t
+                    logger.warning(
+                        "SGSIM: No stored transformer for '%s'. "
+                        "Available: %s",
+                        original_col,
+                        list(transformers.keys()) if transformers else '(none)',
+                    )
+        except Exception as e:
+            logger.error("SGSIM: Failed to retrieve transformer: %s", e)
+        return None
+
+    def _find_original_column(self, transformed_col: str) -> Optional[str]:
+        """Look up the original raw column for a transformed column name.
+
+        Checks ``transformation_metadata["transformations"]`` where each
+        entry is ``{orig_col: {"new_col": "Cu_NS", ...}}``.
+        """
+        if not self.transformation_metadata:
+            return None
+        transformations = self.transformation_metadata.get("transformations", {})
+        if not transformations:
+            transformations = self.transformation_metadata
+        for orig_col, meta in transformations.items():
+            if isinstance(meta, dict):
+                new_col = meta.get("new_col") or meta.get("transformed_col_name")
+                if new_col == transformed_col:
+                    return orig_col
+        return None
 
     def validate_inputs(self) -> bool:
         # Check if variable combo exists and has a selection
         if hasattr(self, 'variable_combo'):
             selected = self.variable_combo.currentText()
             if not selected:
-                QMessageBox.warning(self, "Error", "Please select a property/variable to simulate from the dropdown.")
+                QMessageBox.warning(
+                    self, "No Transformed Variable",
+                    "No transformed variable available.\n\n"
+                    "SGSIM requires Normal-Score transformed data.\n"
+                    "Transform your data first:\n"
+                    "  Analysis \u2192 Grade Transformation"
+                )
                 return False
             # Verify it exists in data
             if self.drillhole_data is not None and selected not in self.drillhole_data.columns:
@@ -1824,10 +1883,49 @@ class SGSIMPanel(BaseAnalysisPanel):
         elif self.variable is None:
             QMessageBox.warning(self, "Error", "No variable selected. Please select a property from the dropdown.")
             return False
-        
+
         if self.drillhole_data is None:
             QMessageBox.warning(self, "Error", "No drillhole data loaded.")
             return False
+
+        # =====================================================================
+        # GATE: Transformer must exist for back-transformation
+        # =====================================================================
+        transformer = self._get_back_transformer(self.variable)
+        if transformer is None:
+            QMessageBox.warning(
+                self, "No Transformer",
+                f"No back-transformer found for '{self.variable}'.\n\n"
+                f"SGSIM needs the transformer from the Grade Transformation\n"
+                f"panel to convert results back to physical units.\n\n"
+                f"Please re-run: Analysis \u2192 Grade Transformation\n"
+                f"and push the transformed data to the registry."
+            )
+            return False
+
+        # =====================================================================
+        # GATE: Verify data is approximately Gaussian (mean ≈ 0, std ≈ 1)
+        # =====================================================================
+        values = self.drillhole_data[self.variable].dropna().to_numpy(dtype=np.float64)
+        values = values[np.isfinite(values)]
+        if len(values) > 10:
+            data_mean = float(np.mean(values))
+            data_std = float(np.std(values))
+            if abs(data_mean) > 0.5 or abs(data_std - 1.0) > 0.5:
+                reply = QMessageBox.warning(
+                    self, "Data May Not Be Gaussian",
+                    f"Variable '{self.variable}' statistics:\n"
+                    f"  Mean = {data_mean:.3f}  (expected ≈ 0)\n"
+                    f"  Std  = {data_std:.3f}  (expected ≈ 1)\n\n"
+                    f"SGSIM expects Normal-Score transformed data.\n"
+                    f"If this data has not been transformed, results\n"
+                    f"will be geostatistically invalid.\n\n"
+                    f"Continue anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return False
         
         # ✅ Validate variogram parameters to prevent NaN results
         nugget = self.nug.value()
@@ -2188,6 +2286,30 @@ class SGSIMPanel(BaseAnalysisPanel):
         # is available in the results.
         self._auto_back_transform()
         
+        # =====================================================================
+        # DOMAIN MASKING: NaN-out blocks outside data support
+        # =====================================================================
+        has_mask_ui = hasattr(self, 'mask_checkbox')
+        mask_checked = has_mask_ui and self.mask_checkbox.isChecked()
+        logger.info(
+            "SGSIM domain mask gate: has_ui=%s, checked=%s, has_results=%s",
+            has_mask_ui, mask_checked, self.sgsim_results is not None,
+        )
+        if self.sgsim_results and mask_checked:
+            summary = self.sgsim_results.get('summary', {})
+            logger.info("SGSIM domain mask: summary keys=%s", list(summary.keys()) if summary else 'EMPTY')
+            if summary:
+                self.sgsim_results['summary'] = self._apply_domain_masking(
+                    summary,
+                    grade_keys=['mean', 'p10', 'p50', 'p90'],
+                    variance_keys=['std', 'var', 'cv'],
+                )
+                self._log_event(
+                    f"Domain masking applied to summary statistics", "info"
+                )
+            else:
+                self._log_event("Domain masking skipped: no summary in results", "warning")
+
         # Enable Controls (back_transform button may be disabled by auto-back-transform)
         self.export_btn.setEnabled(True)
         for b in [self.viz_mean, self.viz_std, self.viz_p10, self.viz_p50, self.viz_p90]:
@@ -2531,11 +2653,67 @@ class SGSIMPanel(BaseAnalysisPanel):
             property_name = f"{element}_SGSIM_{stat.upper()}"
             grid.cell_data[property_name] = stat_flat
 
+            # ── Add DistToHole array for Block Model Filter panel ──
+            try:
+                data_coords = self._get_conditioning_coords()
+                if data_coords.shape[0] > 0:
+                    from scipy.spatial import cKDTree
+                    block_centroids = self._get_block_centroids()
+                    # Align coordinates if needed
+                    data_center = data_coords.mean(axis=0)
+                    block_center = block_centroids.mean(axis=0)
+                    offset = data_center - block_center
+                    if np.linalg.norm(offset) > np.linalg.norm(block_centroids.max(0) - block_centroids.min(0)) * 0.5:
+                        data_coords = data_coords - offset
+                    tree = cKDTree(data_coords)
+                    dists, _ = tree.query(block_centroids, k=1)
+                    grid.cell_data["DistToHole"] = dists.astype(np.float32)
+            except Exception as e:
+                logger.debug("Could not compute DistToHole: %s", e)
+
             if abs(xmin) < 1000 and abs(ymin) < 1000:
                 grid._coordinate_shifted = True
 
+            # ── Strip outside-mask blocks (DomainMaskMixin) ──
+            if hasattr(self, '_strip_unmasked_cells'):
+                grid = self._strip_unmasked_cells(grid)
+
+            # ── Convert ImageData → UnstructuredGrid for per-cell rendering ──
+            # VTK renders ImageData as a solid outer shell; individual cells
+            # are not visible. extract_cells() strips NaN blocks AND converts
+            # to UnstructuredGrid. For all-valid grids, cast directly.
+            if isinstance(grid, pv.ImageData):
+                valid_mask = np.isfinite(stat_flat)
+                n_valid = int(valid_mask.sum())
+                n_total = len(stat_flat)
+                coord_shifted = getattr(grid, '_coordinate_shifted', False)
+
+                if n_valid == 0:
+                    self._log_event("All blocks are NaN — nothing to show", "warning")
+                    return
+                elif n_valid < n_total:
+                    # Domain case: strip NaN cells → UnstructuredGrid
+                    grid = grid.extract_cells(np.where(valid_mask)[0])
+                    self._log_event(
+                        f"  Filtered: {n_valid:,} / {n_total:,} blocks "
+                        f"({100.0 * n_valid / n_total:.1f}% inside data support)",
+                        "info",
+                    )
+                else:
+                    # All cells valid: convert type only (no filtering needed)
+                    grid = grid.cast_to_unstructured_grid()
+
+                # Preserve coordinate-shift flag (extract_cells/cast lose custom attrs)
+                if coord_shifted:
+                    grid._coordinate_shifted = True
+
             n_cells = grid.n_cells
+            # Log value range for back-transform verification
+            vmin = float(np.nanmin(stat_flat[np.isfinite(stat_flat)])) if np.any(np.isfinite(stat_flat)) else 0.0
+            vmax = float(np.nanmax(stat_flat[np.isfinite(stat_flat)])) if np.any(np.isfinite(stat_flat)) else 0.0
+            vmean = float(np.nanmean(stat_flat[np.isfinite(stat_flat)])) if np.any(np.isfinite(stat_flat)) else 0.0
             self._log_event(f"  Created grid: {n_cells:,} cells, property={property_name}", "success")
+            self._log_event(f"  Value range: min={vmin:.2f}, max={vmax:.2f}, mean={vmean:.2f}", "info")
             self._log_event(f"  → Sending {stat.upper()} to 3D viewer...", "progress")
 
             QTimer.singleShot(100, lambda: self._emit_visualization_safe(grid, property_name, stat))
@@ -2589,6 +2767,24 @@ class SGSIMPanel(BaseAnalysisPanel):
 
             if abs(xmin) < 1000 and abs(ymin) < 1000:
                 grid._coordinate_shifted = True
+
+            # ── Convert ImageData → UnstructuredGrid for per-cell rendering ──
+            if isinstance(grid, pv.ImageData):
+                valid_mask = np.isfinite(prob_flat)
+                n_valid = int(valid_mask.sum())
+                n_total = len(prob_flat)
+                coord_shifted = getattr(grid, '_coordinate_shifted', False)
+
+                if n_valid == 0:
+                    self._log_event("All probability blocks are NaN — nothing to show", "warning")
+                    return
+                elif n_valid < n_total:
+                    grid = grid.extract_cells(np.where(valid_mask)[0])
+                else:
+                    grid = grid.cast_to_unstructured_grid()
+
+                if coord_shifted:
+                    grid._coordinate_shifted = True
 
             self._log_event(f"  → Sending Prob>{cut} to 3D viewer...", "progress")
             QTimer.singleShot(100, lambda: self._emit_visualization_safe(grid, property_name, f"Prob>{cut}"))

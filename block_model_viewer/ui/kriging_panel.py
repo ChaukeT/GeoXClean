@@ -717,6 +717,16 @@ class KrigingPanel(BaseAnalysisPanel):
         self.compute_qa_check.setChecked(True)  # Enabled by default for professional standard
         vbox.addWidget(self.compute_qa_check)
 
+        # Constrain estimates to a registered IRBF domain (Option A integration).
+        self.irbf_domain_check = QCheckBox("Constrain to IRBF domain")
+        self.irbf_domain_check.setToolTip(
+            "After kriging, NaN any estimate whose block centre lies outside the\n"
+            "registered Indicator RBF domain (probability < iso-value).\n"
+            "Build the domain from Data -> Domain Modelling -> Indicator RBF Domain."
+        )
+        self.irbf_domain_check.setChecked(False)
+        vbox.addWidget(self.irbf_domain_check)
+
         layout.addWidget(group)
 
     def _toggle_max_dist(self, state):
@@ -1851,7 +1861,34 @@ class KrigingPanel(BaseAnalysisPanel):
             variable = transform_info.get('original_col_name', variable)
         
         estimates_to_store = estimates_back if estimates_back is not None else estimates
-        
+
+        # Optional: constrain estimates to a registered IRBF domain
+        if getattr(self, 'irbf_domain_check', None) is not None and self.irbf_domain_check.isChecked():
+            try:
+                from .panel_utils import apply_irbf_domain_mask, registry_has_irbf_domain
+                if registry_has_irbf_domain(self.registry):
+                    xyz = np.column_stack([grid_x.ravel(), grid_y.ravel(), grid_z.ravel()])
+                    n_before = int(np.isfinite(estimates_to_store).sum())
+                    estimates_to_store = apply_irbf_domain_mask(
+                        estimates_to_store.ravel().copy(), xyz, self.registry
+                    ).reshape(estimates_to_store.shape)
+                    if variances is not None:
+                        variances = apply_irbf_domain_mask(
+                            variances.ravel().copy(), xyz, self.registry
+                        ).reshape(variances.shape)
+                    n_after = int(np.isfinite(estimates_to_store).sum())
+                    self._log_event(
+                        f"IRBF domain mask applied: {n_before - n_after:,} of {n_before:,} cells dropped",
+                        "info",
+                    )
+                else:
+                    self._log_event(
+                        "IRBF domain checkbox is on but no IRBF domain is registered — skipping mask",
+                        "warning",
+                    )
+            except Exception as exc:
+                logger.warning("IRBF domain masking failed: %s", exc)
+
         # Basic sanity check
         est_finite = estimates_to_store[np.isfinite(estimates_to_store)]
         est_min = est_finite.min() if len(est_finite) else np.nan

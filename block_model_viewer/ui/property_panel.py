@@ -27,10 +27,7 @@ from ..visualization import ColorMapper
 from ..controllers.app_state import AppState, get_empty_state_message
 from .collapsible_group import CollapsibleGroup
 from .signals import UISignals
-from .modern_styles import (
-    get_theme_colors, ModernColors, get_complete_panel_stylesheet, get_button_stylesheet,
-    apply_modern_style
-)
+from .modern_styles import ModernColors, apply_modern_style
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +123,10 @@ class PropertyPanel(QWidget):
 
         # Application state tracking
         self._app_state: AppState = AppState.EMPTY
+
+        # Controller binding and drillhole data cache (used by main_window)
+        self._controller = None
+        self.drillhole_df = None
 
         self._setup_ui()
 
@@ -368,10 +369,7 @@ class PropertyPanel(QWidget):
             self._block_signals(False)
 
     def _setup_ui(self):
-        """Setup the UI layout with modern styling and proper scrolling architecture."""
-        # Apply modern stylesheet to the entire panel
-        self.setStyleSheet(get_complete_panel_stylesheet())
-        
+        """Setup the UI layout — app-level QSS handles appearance."""
         # Root layout for the PropertyPanel widget
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -412,62 +410,38 @@ class PropertyPanel(QWidget):
     # --- UI Group Creation Helpers ---
 
     def _add_labeled_row(self, layout: QFormLayout, label_text: str, widget: QWidget, tooltip: str = ""):
-        """Standardized row creation with modern styling."""
+        """Standardized form row — app-level QSS styles `QLabel#form_label`."""
         label = QLabel(label_text)
-        label.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_SECONDARY};
-                font-size: 11px;
-                font-weight: 500;
-            }}
-        """)
+        label.setObjectName("form_label")
         if tooltip:
             label.setToolTip(tooltip)
             widget.setToolTip(tooltip)
         layout.addRow(label, widget)
 
-    def _create_slider_row(self, layout: QVBoxLayout, label_text: str, min_val: int, max_val: int, 
+    def _create_slider_row(self, layout: QVBoxLayout, label_text: str, min_val: int, max_val: int,
                            init_val: int, callback, unit_scale: float = 1.0) -> Tuple[QSlider, QLabel]:
-        """Creates a modern styled slider row with label and value display."""
+        """Slider row with label and value pill — styling delegated to app QSS."""
         container = QWidget()
         h_layout = QHBoxLayout(container)
         h_layout.setContentsMargins(0, 0, 0, 0)
         h_layout.setSpacing(12)
-        
-        # Label with modern styling (if provided)
+
         if label_text:
             lbl = QLabel(label_text)
+            lbl.setObjectName("form_label")
             lbl.setMinimumWidth(60)
-            lbl.setStyleSheet(f"""
-                QLabel {{
-                    color: {ModernColors.TEXT_SECONDARY};
-                    font-size: 11px;
-                    font-weight: 500;
-                }}
-            """)
             h_layout.addWidget(lbl)
-        
-        # Slider with modern styling
+
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(min_val, max_val)
         slider.setValue(init_val)
         slider.setMinimumHeight(24)
         slider.setCursor(Qt.CursorShape.PointingHandCursor)
-        
-        # Value label with modern styling
+
         val_lbl = QLabel(f"{init_val * unit_scale:.2f}")
+        val_lbl.setObjectName("value_pill")
         val_lbl.setMinimumWidth(50)
         val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        val_lbl.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_PRIMARY};
-                font-weight: 600;
-                font-size: 13px;
-                padding: 4px 8px;
-                background-color: {ModernColors.ELEVATED_BG};
-                border-radius: 4px;
-            }}
-        """)
         
         # Connection logic
         def on_change(val):
@@ -486,51 +460,40 @@ class PropertyPanel(QWidget):
     # --- Group Implementations ---
 
     def _create_quick_toggle_group(self, parent_layout: QVBoxLayout):
-        """Create quick visibility toggle buttons for common layers with modern styling."""
-        self.quick_toggle_group = CollapsibleGroup("⚡ Quick Layers", collapsed=False)
+        """Create quick visibility toggle buttons for common layers (flat Pictures style)."""
+        self.quick_toggle_group = CollapsibleGroup("Quick Layers", collapsed=False)
         layout = QVBoxLayout()
         layout.setSpacing(10)
-        
-        # Description with modern styling
+
         hint = QLabel("Toggle layer visibility:")
-        hint.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_HINT};
-                font-size: 11px;
-                font-style: italic;
-            }}
-        """)
+        hint.setObjectName("hint_label")
         layout.addWidget(hint)
-        
-        # Button container with grid layout for better alignment
+
         btn_container = QHBoxLayout()
         btn_container.setSpacing(8)
-        
-        # Drillholes toggle with modern styling
-        self.drillholes_toggle = QPushButton("🔷 Drillholes")
+
+        self.drillholes_toggle = QPushButton("Drillholes")
+        self.drillholes_toggle.setObjectName("layer_toggle_button")
         self.drillholes_toggle.setCheckable(True)
-        self.drillholes_toggle.setChecked(True)  # Default visible
-        self.drillholes_toggle.setStyleSheet(get_button_stylesheet("toggle"))
+        self.drillholes_toggle.setChecked(True)
         self.drillholes_toggle.setMinimumHeight(42)
         self.drillholes_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.drillholes_toggle.clicked.connect(self._on_drillholes_toggle)
         btn_container.addWidget(self.drillholes_toggle)
-        
-        # Block Model toggle with modern styling
-        self.block_model_toggle = QPushButton("🧊 Block Model")
+
+        self.block_model_toggle = QPushButton("Block Model")
+        self.block_model_toggle.setObjectName("layer_toggle_button")
         self.block_model_toggle.setCheckable(True)
-        self.block_model_toggle.setChecked(True)  # Default visible
-        self.block_model_toggle.setStyleSheet(get_button_stylesheet("toggle"))
+        self.block_model_toggle.setChecked(True)
         self.block_model_toggle.setMinimumHeight(42)
         self.block_model_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.block_model_toggle.clicked.connect(self._on_block_model_toggle)
         btn_container.addWidget(self.block_model_toggle)
-        
-        # Geology toggle with modern styling
-        self.geology_toggle = QPushButton("🏔️ Geology")
+
+        self.geology_toggle = QPushButton("Geology")
+        self.geology_toggle.setObjectName("layer_toggle_button")
         self.geology_toggle.setCheckable(True)
-        self.geology_toggle.setChecked(True)  # Default visible
-        self.geology_toggle.setStyleSheet(get_button_stylesheet("toggle"))
+        self.geology_toggle.setChecked(True)
         self.geology_toggle.setMinimumHeight(42)
         self.geology_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.geology_toggle.clicked.connect(self._on_geology_toggle)
@@ -719,51 +682,29 @@ class PropertyPanel(QWidget):
 
     def _create_file_info_group(self, parent_layout: QVBoxLayout):
         """Create file information group with modern card-style layout."""
-        self.file_info_group = CollapsibleGroup("📁 File Information", collapsed=True)
+        self.file_info_group = CollapsibleGroup("File Information", collapsed=True)
         layout = QFormLayout()
         layout.setVerticalSpacing(12)
         layout.setHorizontalSpacing(12)
         
-        # File name with prominent styling
         self.file_name_label = QLabel("No file loaded")
-        self.file_name_label.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_PRIMARY};
-                font-weight: 600;
-                font-size: 12px;
-            }}
-        """)
+        self.file_name_label.setObjectName("file_name_label")
         self.file_name_label.setWordWrap(True)
         
         # Other info labels with secondary styling
         self.file_format_label = QLabel("-")
-        self.file_format_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY};")
-        
+        self.file_format_label.setObjectName("value_label")
+
         self.block_count_label = QLabel("-")
-        self.block_count_label.setStyleSheet(f"color: {ModernColors.TEXT_SECONDARY};")
-        
+        self.block_count_label.setObjectName("value_label")
+
         self.bounds_label = QLabel("-")
+        self.bounds_label.setObjectName("bounds_label")
         self.bounds_label.setWordWrap(True)
-        self.bounds_label.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_HINT};
-                font-size: 11px;
-                font-family: 'Consolas', 'Courier New', monospace;
-            }}
-        """)
-        
-        # Create styled labels for form field names
+
         def create_field_label(text: str) -> QLabel:
             label = QLabel(text)
-            label.setStyleSheet(f"""
-                QLabel {{
-                    color: {ModernColors.TEXT_SECONDARY};
-                    font-size: 11px;
-                    font-weight: 500;
-                    text-transform: uppercase;
-                    letter-spacing: 0.5px;
-                }}
-            """)
+            label.setObjectName("form_label")
             return label
         
         layout.addRow(create_field_label("File:"), self.file_name_label)
@@ -776,7 +717,7 @@ class PropertyPanel(QWidget):
 
     def _create_property_group(self, parent_layout: QVBoxLayout):
         """Create property visualization group with modern styling."""
-        self.property_group = CollapsibleGroup("🎨 Property Visualization", collapsed=False)
+        self.property_group = CollapsibleGroup("Property Visualization", collapsed=False)
         layout = QVBoxLayout()
         layout.setSpacing(12)
 
@@ -812,9 +753,9 @@ class PropertyPanel(QWidget):
         
         layout.addLayout(layer_layout)
         
-        # Apply Button with primary styling
-        apply_btn = QPushButton("🔄 Update Visualization")
-        apply_btn.setStyleSheet(get_button_stylesheet("primary"))
+        # Apply Button — QSS styles buttons[objectName=primary_button]
+        apply_btn = QPushButton("Update Visualization")
+        apply_btn.setObjectName("primary_button")
         apply_btn.setMinimumHeight(38)
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.clicked.connect(lambda: self._on_property_changed(self.property_combo.currentText()))
@@ -824,7 +765,7 @@ class PropertyPanel(QWidget):
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background-color: {ModernColors.DIVIDER}; border: none;")
+        separator.setObjectName("divider")
         layout.addWidget(separator)
 
         # Color settings section
@@ -869,15 +810,15 @@ class PropertyPanel(QWidget):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
         
-        self.custom_colors_btn = QPushButton("🎨 Define Colors")
-        self.custom_colors_btn.setStyleSheet(get_button_stylesheet("secondary"))
+        self.custom_colors_btn = QPushButton("Define Colors")
+        self.custom_colors_btn.setObjectName("secondary_button")
         self.custom_colors_btn.setMinimumHeight(36)
         self.custom_colors_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.custom_colors_btn.clicked.connect(self._on_custom_colors_clicked)
         self.custom_colors_btn.setVisible(False)
-        
-        self.clear_custom_colors_btn = QPushButton("↺ Reset")
-        self.clear_custom_colors_btn.setStyleSheet(get_button_stylesheet("secondary"))
+
+        self.clear_custom_colors_btn = QPushButton("Reset")
+        self.clear_custom_colors_btn.setObjectName("secondary_button")
         self.clear_custom_colors_btn.setMinimumHeight(36)
         self.clear_custom_colors_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_custom_colors_btn.clicked.connect(self._on_clear_custom_colors_clicked)
@@ -894,7 +835,7 @@ class PropertyPanel(QWidget):
 
     def _create_visualization_group(self, parent_layout: QVBoxLayout):
         """Create visualization settings group with modern styling."""
-        self.visualization_group = CollapsibleGroup("⚙️ Display Settings", collapsed=True)
+        self.visualization_group = CollapsibleGroup("Display Settings", collapsed=True)
         layout = QVBoxLayout()
         layout.setSpacing(12)
 
@@ -905,14 +846,7 @@ class PropertyPanel(QWidget):
         opacity_layout.setSpacing(6)
         
         opacity_label_header = QLabel("Opacity")
-        opacity_label_header.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_SECONDARY};
-                font-size: 11px;
-                font-weight: 500;
-                text-transform: uppercase;
-            }}
-        """)
+        opacity_label_header.setObjectName("form_label")
         opacity_layout.addWidget(opacity_label_header)
         
         self.opacity_slider, self.opacity_label = self._create_slider_row(
@@ -924,7 +858,7 @@ class PropertyPanel(QWidget):
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background-color: {ModernColors.DIVIDER}; border: none;")
+        separator.setObjectName("divider")
         layout.addWidget(separator)
 
         # Additional display controls
@@ -987,32 +921,19 @@ class PropertyPanel(QWidget):
         parent_layout.addWidget(self.visualization_group)
     
     def _create_field_label(self, text: str) -> QLabel:
-        """Create a styled field label for form layouts."""
+        """Create a form field label — styling via app-level QSS."""
         label = QLabel(text)
-        label.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_SECONDARY};
-                font-size: 11px;
-                font-weight: 500;
-            }}
-        """)
+        label.setObjectName("form_label")
         return label
 
     def _create_block_size_group(self, parent_layout: QVBoxLayout):
-        """Create block geometry override group with modern styling."""
-        self.block_size_group = CollapsibleGroup("📏 Block Geometry Override", collapsed=True)
+        """Create block geometry override group — app-level QSS styles it."""
+        self.block_size_group = CollapsibleGroup("Block Geometry Override", collapsed=True)
         layout = QVBoxLayout()
         layout.setSpacing(10)
-        
-        # Add hint text
+
         hint = QLabel("Override block dimensions for visualization:")
-        hint.setStyleSheet(f"""
-            QLabel {{
-                color: {ModernColors.TEXT_HINT};
-                font-size: 11px;
-                font-style: italic;
-            }}
-        """)
+        hint.setObjectName("hint_label")
         layout.addWidget(hint)
         
         form = QFormLayout()
@@ -1042,8 +963,8 @@ class PropertyPanel(QWidget):
 
         layout.addLayout(form)
         
-        apply_btn = QPushButton("✓ Apply Resize")
-        apply_btn.setStyleSheet(get_button_stylesheet("primary"))
+        apply_btn = QPushButton("Apply Resize")
+        apply_btn.setObjectName("primary_button")
         apply_btn.setMinimumHeight(38)
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.clicked.connect(self._emit_block_size)
@@ -1242,6 +1163,18 @@ class PropertyPanel(QWidget):
             self.filter_property_combo.addItems(props)
 
     # --- Layer Management ---
+
+    def bind_controller(self, controller):
+        """Bind the AppController reference so panel can access registry/task system.
+
+        Called by main_window during _setup_ui(). Stores controller for later use
+        by visualization signal handlers.
+        """
+        self._controller = controller
+
+    def update_active_layers(self):
+        """Alias for update_layer_controls — legacy name used by main_window fallbacks."""
+        self.update_layer_controls()
 
     def update_layer_controls(self):
         """Populate active layer combobox based on renderer state.
@@ -2472,7 +2405,7 @@ class PropertyPanel(QWidget):
         # Instructions
         hint = QLabel("Define color ranges for value bins. Each range maps values to a color.")
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {ModernColors.TEXT_HINT}; font-style: italic; margin-bottom: 10px;")
+        hint.setObjectName("hint_label")
         dlg.layout().addWidget(hint)
 
         # Scroll area for ranges
@@ -2599,6 +2532,5 @@ class PropertyPanel(QWidget):
         self._updating_from_legend = False
 
     def refresh_theme(self) -> None:
-        """Refresh styles when theme changes."""
-        from .modern_styles import get_analysis_panel_stylesheet, get_theme_colors, ModernColors
-        self.setStyleSheet(get_analysis_panel_stylesheet())
+        """App-level QSS is the single source of truth — no per-widget override needed."""
+        return None

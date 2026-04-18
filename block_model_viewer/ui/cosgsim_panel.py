@@ -1247,6 +1247,25 @@ class CoSGSIMPanel(BaseAnalysisPanel):
             
             if grid is not None:
                 property_name = viz.get('property', 'CoSGSIM_Mean')
+
+                # Convert ImageData → UnstructuredGrid for per-cell rendering
+                # (VTK renders ImageData as outer shell only)
+                import pyvista as pv
+                if isinstance(grid, pv.ImageData):
+                    coord_shifted = getattr(grid, '_coordinate_shifted', False)
+                    grade_data = grid.cell_data.get(property_name)
+                    if grade_data is not None:
+                        valid_mask = np.isfinite(grade_data)
+                        n_valid = int(valid_mask.sum())
+                        if n_valid < len(grade_data) and n_valid > 0:
+                            grid = grid.extract_cells(np.where(valid_mask)[0])
+                        elif n_valid > 0:
+                            grid = grid.cast_to_unstructured_grid()
+                    else:
+                        grid = grid.cast_to_unstructured_grid()
+                    if coord_shifted:
+                        grid._coordinate_shifted = True
+
                 self._log_event("Sending results to 3D viewer...", "info")
                 self.request_visualization.emit(grid, property_name)
                 self._log_event("✓ Visualization request sent", "success")

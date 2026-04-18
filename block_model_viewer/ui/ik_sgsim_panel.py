@@ -19,27 +19,24 @@ QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QMessageBox, QWidget, QTextEdit, QFileDialog, QCheckBox,
     QSplitter, QFrame, QScrollArea, QProgressBar
 )
-from .panel_manager import PanelCategory, DockArea
 
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from datetime import datetime
 
 from .base_analysis_panel import BaseAnalysisPanel
+from .modern_styles import ModernColors
+from .mixins.domain_mask_mixin import DomainMaskMixin
 
-from .modern_styles import get_theme_colors, ModernColors
 logger = logging.getLogger(__name__)
 
 
-class IKSGSIMPanel(BaseAnalysisPanel):
+class IKSGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
     """
     IK-based Sequential Gaussian Simulation Panel.
     """
     # PanelManager metadata
     PANEL_ID = "IKSGSIMPanel"
     PANEL_NAME = "IKSGSIM Panel"
-    PANEL_CATEGORY = PanelCategory.OTHER
-    PANEL_DEFAULT_VISIBLE = False
-    PANEL_DEFAULT_DOCK_AREA = DockArea.RIGHT
 
 
 
@@ -55,26 +52,15 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         self.simulation_results: Optional[Dict[str, Any]] = None
         
         super().__init__(parent=parent, panel_id="ik_sgsim")
-
-    def refresh_theme(self):
-        """Update colors when theme changes."""
-        colors = get_theme_colors()
-        # Re-apply stylesheet with new theme colors
-        if hasattr(self, 'setStyleSheet'):
-            self.setStyleSheet(self.styleSheet())
-        # Refresh child widgets
-        for child in self.findChildren(QWidget):
-            if hasattr(child, 'refresh_theme'):
-                child.refresh_theme()
         self.setWindowTitle("IK-based Sequential Gaussian Simulation")
         self.resize(1000, 700)
-        
-        # Build UI (required when using _build_ui pattern)
-        self._build_ui()
-        
         self._init_registry_connections()
+
+    def refresh_theme(self):
+        """No-op. App QSS handles theming."""
+        pass
     
-    def _build_ui(self):
+    def setup_ui(self):
         """Build custom split-pane UI. Called by base class."""
         self._setup_ui()
 
@@ -147,7 +133,8 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         self._create_grid_group(s_lay)
         self._create_sim_group(s_lay)
         self._create_mode_group(s_lay)
-        
+        s_lay.addWidget(self._build_domain_mask_group(default_enabled=True))
+
         s_lay.addStretch()
         scroll.setWidget(cont)
         l_lay.addWidget(scroll)
@@ -159,15 +146,12 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         
         # Progress Bar
         prog_group = QGroupBox("Progress")
-        prog_group.setStyleSheet("QGroupBox { font-weight: bold; color: #ffb74d; }")
         prog_lay = QVBoxLayout(prog_group)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet(f"QProgressBar {{ border: 1px solid #555; border-radius: 4px; background-color: {ModernColors.PANEL_BG}; text-align: center; color: white; height: 22px; }} QProgressBar::chunk {{ background-color: #4CAF50; }}")
         prog_lay.addWidget(self.progress_bar)
         self.progress_label = QLabel("Ready")
-        self.progress_label.setStyleSheet("color: #90a4ae;")
         prog_lay.addWidget(self.progress_label)
         r_lay.addWidget(prog_group)
         
@@ -177,7 +161,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(120)
-        self.log_text.setStyleSheet(f"background-color: #2b2b2b; color: {ModernColors.TEXT_PRIMARY}; font-family: Consolas; font-size: 9pt;")
         log_lay.addWidget(self.log_text)
         r_lay.addWidget(log_group)
         
@@ -185,7 +168,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         r_box_l = QVBoxLayout(r_box)
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
-        self.results_text.setStyleSheet(f"background-color: #2b2b2b; color: {ModernColors.TEXT_PRIMARY}; font-family: Consolas;")
         self.results_text.setPlaceholderText("1. Load Data\n2. Select IK Result\n3. Run Simulation")
         r_box_l.addWidget(self.results_text)
         r_lay.addWidget(r_box, stretch=1)
@@ -193,7 +175,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         # Actions
         act_lay = QHBoxLayout()
         self.run_btn = QPushButton("RUN IK-SGSIM")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 12px;")
         self.run_btn.clicked.connect(self.run_analysis)
         self.run_btn.setEnabled(False)
         
@@ -220,7 +201,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
 
     def _create_input_group(self, layout):
         g = QGroupBox("1. Input Data & Model")
-        g.setStyleSheet("QGroupBox { font-weight: bold; color: #4fc3f7; border: 1px solid #444; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l = QVBoxLayout(g)
         
         f = QFormLayout()
@@ -240,12 +220,10 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         """Create Grid & Block Size configuration group (same as SGSIM)."""
         import numpy as np
         g = QGroupBox("2. Grid & Block Size")
-        g.setStyleSheet("QGroupBox { font-weight: bold; color: #ffb74d; border: 1px solid #444; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l = QVBoxLayout(g)
         
         # Grid Origin
         origin_label = QLabel("Grid Origin:")
-        origin_label.setStyleSheet("color: #aaa; font-size: 9pt;")
         l.addWidget(origin_label)
         
         h0 = QHBoxLayout()
@@ -271,7 +249,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         
         # Number of blocks
         blocks_label = QLabel("Number of Blocks:")
-        blocks_label.setStyleSheet("color: #aaa; font-size: 9pt;")
         l.addWidget(blocks_label)
         
         h1 = QHBoxLayout()
@@ -294,7 +271,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         
         # Block size
         size_label = QLabel("Block Size (m):")
-        size_label.setStyleSheet("color: #aaa; font-size: 9pt;")
         l.addWidget(size_label)
         
         h2 = QHBoxLayout()
@@ -322,47 +298,43 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         layout.addWidget(g)
 
     def _auto_detect_grid(self):
-        """Auto-detect grid parameters from drillhole data."""
+        """Auto-detect grid parameters from drillhole data with collars fallback."""
         import numpy as np
         if self.drillhole_data is None:
             self._log_event("No drillhole data loaded", "warning")
             return
-        
-        df = self.drillhole_data
-        x_col = next((c for c in df.columns if c.upper() in ['X', 'MIDX', 'EAST', 'EASTING']), None)
-        y_col = next((c for c in df.columns if c.upper() in ['Y', 'MIDY', 'NORTH', 'NORTHING']), None)
-        z_col = next((c for c in df.columns if c.upper() in ['Z', 'MIDZ', 'ELEV', 'ELEVATION', 'RL']), None)
-        
-        if not all([x_col, y_col, z_col]):
-            self._log_event("Could not find X, Y, Z columns", "warning")
+
+        from ..utils.coordinate_utils import get_spatial_extent
+        extent = get_spatial_extent(self.drillhole_data, registry=self.get_registry())
+        if extent is None:
+            self._log_event("Could not determine spatial extent from data or collars", "warning")
             return
-        
-        x_vals = df[x_col].dropna()
-        y_vals = df[y_col].dropna()
-        z_vals = df[z_col].dropna()
-        
+
+        x_min, x_max = extent['x_min'], extent['x_max']
+        y_min, y_max = extent['y_min'], extent['y_max']
+        z_min, z_max = extent['z_min'], extent['z_max']
+
         dx, dy, dz = self.dx_spin.value(), self.dy_spin.value(), self.dz_spin.value()
-        
-        xmin = float(x_vals.min() - dx / 2)
-        ymin = float(y_vals.min() - dy / 2)
-        zmin = float(z_vals.min() - dz / 2)
-        
-        nx = int(np.ceil((x_vals.max() - x_vals.min()) / dx)) + 1
-        ny = int(np.ceil((y_vals.max() - y_vals.min()) / dy)) + 1
-        nz = int(np.ceil((z_vals.max() - z_vals.min()) / dz)) + 1
-        
+
+        xmin = float(x_min - dx / 2)
+        ymin = float(y_min - dy / 2)
+        zmin = float(z_min - dz / 2)
+
+        nx = int(np.ceil((x_max - x_min) / dx)) + 1
+        ny = int(np.ceil((y_max - y_min) / dy)) + 1
+        nz = int(np.ceil((z_max - z_min) / dz)) + 1
+
         self.xmin_spin.setValue(xmin)
         self.ymin_spin.setValue(ymin)
         self.zmin_spin.setValue(zmin)
         self.nx_spin.setValue(nx)
         self.ny_spin.setValue(ny)
         self.nz_spin.setValue(nz)
-        
-        self._log_event(f"✓ Grid: {nx}×{ny}×{nz}, origin=({xmin:.1f}, {ymin:.1f}, {zmin:.1f})", "success")
+
+        self._log_event(f"Grid: {nx}x{ny}x{nz}, origin=({xmin:.1f}, {ymin:.1f}, {zmin:.1f})", "success")
 
     def _create_sim_group(self, layout):
         g = QGroupBox("3. Simulation Parameters")
-        g.setStyleSheet("QGroupBox { font-weight: bold; color: #ffb74d; border: 1px solid #444; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         f = QFormLayout(g)
         
         self.n_reals = QSpinBox()
@@ -390,7 +362,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
 
     def _create_mode_group(self, layout):
         g = QGroupBox("4. Algorithm Settings")
-        g.setStyleSheet("QGroupBox { font-weight: bold; color: #81c784; border: 1px solid #444; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l = QVBoxLayout(g)
         
         self.sequential_check = QCheckBox("Sequential Simulation")
@@ -399,7 +370,6 @@ class IKSGSIMPanel(BaseAnalysisPanel):
         l.addWidget(self.sequential_check)
         
         lbl = QLabel("Checked: Sequential (Slower, Correlated)\nUnchecked: Independent (Faster, Local Only)")
-        lbl.setStyleSheet("color: #888; font-size: 10px; font-style: italic;")
         l.addWidget(lbl)
         
         layout.addWidget(g)
@@ -626,8 +596,9 @@ class IKSGSIMPanel(BaseAnalysisPanel):
     def _log_event(self, message: str, level: str = "info"):
         if not hasattr(self, 'log_text') or not self.log_text: return
         timestamp = datetime.now().strftime("%H:%M:%S")
-        colors = {"info": f"{ModernColors.TEXT_PRIMARY}", "success": "#81c784", "warning": "#ffb74d", "error": "#e57373", "progress": "#4fc3f7"}
-        self.log_text.append(f'<span style="color: #888;">[{timestamp}]</span> <span style="color: {colors.get(level, f"{ModernColors.TEXT_PRIMARY}")};">{message}</span>')
+        color_map = {"info": ModernColors.TEXT_SECONDARY, "success": ModernColors.SUCCESS, "warning": ModernColors.WARNING, "error": ModernColors.ERROR, "progress": ModernColors.INFO}
+        color = color_map.get(level, ModernColors.TEXT_SECONDARY)
+        self.log_text.append(f'<span style="color: {ModernColors.TEXT_HINT};">[{timestamp}]</span> <span style="color: {color};">{message}</span>')
     
     def _update_progress(self, percent: int, message: str = ""):
         if not hasattr(self, 'progress_bar') or self.progress_bar is None:
@@ -664,17 +635,27 @@ class IKSGSIMPanel(BaseAnalysisPanel):
 
     def on_results(self, payload):
         self.simulation_results = payload
+
+        # --- Domain masking ---
+        if isinstance(self.simulation_results, dict):
+            self.simulation_results = self._apply_domain_masking(
+                self.simulation_results,
+                grade_keys=['mean', 'p10', 'p50', 'p90', 'category', 'probabilities'],
+                variance_keys=['std', 'conditional_variance'],
+            )
+            payload = self.simulation_results
+
         self._update_progress(100, "Complete!")
         self._log_event("✓ IK-SGSIM COMPLETE", "success")
         n = payload.get('realization_names', [])
-        
+
         txt = f"IK-SGSIM COMPLETE\nRealizations: {len(n)}\n"
         txt += f"Method: {'Sequential' if self.sequential_check.isChecked() else 'Independent'}\n"
         self.results_text.setText(txt)
-        
+
         self.viz_btn.setEnabled(True)
         self.exp_btn.setEnabled(True)
-        
+
         if self.registry:
             try:
                 self.registry.register_sgsim_results(payload, source_panel="IK-SGSIM")
@@ -694,11 +675,34 @@ class IKSGSIMPanel(BaseAnalysisPanel):
             
             if grid is not None:
                 property_name = viz.get('property', f"{self.prefix.currentText()}_mean")
+
+                # Strip outside-mask blocks (DomainMaskMixin)
+                if hasattr(self, '_strip_unmasked_cells'):
+                    grid = self._strip_unmasked_cells(grid)
+
+                # Convert ImageData → UnstructuredGrid for per-cell rendering
+                # (VTK renders ImageData as outer shell only)
+                import pyvista as pv
+                if isinstance(grid, pv.ImageData):
+                    coord_shifted = getattr(grid, '_coordinate_shifted', False)
+                    grade_data = grid.cell_data.get(property_name)
+                    if grade_data is not None:
+                        valid_mask = np.isfinite(grade_data)
+                        n_valid = int(valid_mask.sum())
+                        if n_valid < len(grade_data) and n_valid > 0:
+                            grid = grid.extract_cells(np.where(valid_mask)[0])
+                        elif n_valid > 0:
+                            grid = grid.cast_to_unstructured_grid()
+                    else:
+                        grid = grid.cast_to_unstructured_grid()
+                    if coord_shifted:
+                        grid._coordinate_shifted = True
+
                 self._log_event("Sending results to 3D viewer...", "info")
                 self.request_visualization.emit(grid, property_name)
                 self._log_event("✓ Visualization request sent", "success")
             else:
-                QMessageBox.info(self, "Viz", "Results added to block model. Use Property Panel.")
+                QMessageBox.information(self, "Viz", "Results added to block model. Use Property Panel.")
         except Exception as e:
             logger.error(f"Visualization error: {e}", exc_info=True)
             QMessageBox.critical(self, "Visualization Error", f"Error visualizing results:\n{str(e)}")
@@ -774,7 +778,7 @@ class IKSGSIMPanel(BaseAnalysisPanel):
             return
         f, _ = QFileDialog.getSaveFileName(self, "Export", "ik_sgsim.csv", "CSV (*.csv)")
         if f:
-            QMessageBox.info(self, "Export", f"Saved to {f}")
+            QMessageBox.information(self, "Export", f"Saved to {f}")
 
     def _clear_results(self):
         self.simulation_results = None
@@ -797,9 +801,9 @@ class IKSGSIMPanel(BaseAnalysisPanel):
             settings['prefix'] = get_safe_widget_value(self, 'prefix')
             
             # Simulation parameters
-            settings['nreal'] = get_safe_widget_value(self, 'nreal_spin')
-            settings['seed'] = get_safe_widget_value(self, 'seed_spin')
-            
+            settings['nreal'] = get_safe_widget_value(self, 'n_reals')
+            settings['seed'] = get_safe_widget_value(self, 'seed')
+
             # Grid
             settings['xmin'] = get_safe_widget_value(self, 'xmin_spin')
             settings['ymin'] = get_safe_widget_value(self, 'ymin_spin')
@@ -810,9 +814,9 @@ class IKSGSIMPanel(BaseAnalysisPanel):
             settings['nx'] = get_safe_widget_value(self, 'nx_spin')
             settings['ny'] = get_safe_widget_value(self, 'ny_spin')
             settings['nz'] = get_safe_widget_value(self, 'nz_spin')
-            
+
             # Mode selection
-            settings['simulation_mode'] = get_safe_widget_value(self, 'mode_combo')
+            settings['use_sequential'] = get_safe_widget_value(self, 'sequential_check')
             
             # Filter out None values
             settings = {k: v for k, v in settings.items() if v is not None}
@@ -836,9 +840,9 @@ class IKSGSIMPanel(BaseAnalysisPanel):
             set_safe_widget_value(self, 'prefix', settings.get('prefix'))
             
             # Simulation parameters
-            set_safe_widget_value(self, 'nreal_spin', settings.get('nreal'))
-            set_safe_widget_value(self, 'seed_spin', settings.get('seed'))
-            
+            set_safe_widget_value(self, 'n_reals', settings.get('nreal'))
+            set_safe_widget_value(self, 'seed', settings.get('seed'))
+
             # Grid
             set_safe_widget_value(self, 'xmin_spin', settings.get('xmin'))
             set_safe_widget_value(self, 'ymin_spin', settings.get('ymin'))
@@ -849,9 +853,9 @@ class IKSGSIMPanel(BaseAnalysisPanel):
             set_safe_widget_value(self, 'nx_spin', settings.get('nx'))
             set_safe_widget_value(self, 'ny_spin', settings.get('ny'))
             set_safe_widget_value(self, 'nz_spin', settings.get('nz'))
-            
+
             # Mode selection
-            set_safe_widget_value(self, 'mode_combo', settings.get('simulation_mode'))
+            set_safe_widget_value(self, 'sequential_check', settings.get('use_sequential'))
                 
             logger.info("Restored IK-SGSIM panel settings from project")
             
