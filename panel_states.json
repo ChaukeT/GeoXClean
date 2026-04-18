@@ -25,7 +25,7 @@
       "floating": false,
       "geometry": null
     },
-    "BaseDockPanel": {
+    "DisplaySettingsPanel": {
       "visible": false,
       "floating": false,
       "geometry": null
@@ -65,6 +65,176 @@
       "floating": false,
       "geometry": null
     },
+    "KrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SimpleKrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "UniversalKrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "IndicatorKrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "CoKrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SoftKrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "VariogramAnalysisPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "VariogramAssistantPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GRFPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SISPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "IKSGSIMPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SGSIMPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "CoSGSIMPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "TurningBandsPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "MPSPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DBSPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DeclusteringPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "scan_panel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "SurveyDeformationPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ARBFPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ARBFEstimationPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "IndicatorRBFPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "FastRBFPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BayesianKrigingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GeologicalModelPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "LithologyManagerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BlockModelFilterPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ClipPlaneWindow": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DefineBlockModelPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "FragImportPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "FragPreprocessingPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "FragSegmentationPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "FragResultsPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "FragEditorPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
     "DrillholePanel": {
       "visible": false,
       "floating": false,
@@ -76,6 +246,11 @@
       "geometry": null
     },
     "DrillholeControlPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "DrillholeInfoPanel": {
       "visible": false,
       "floating": false,
       "geometry": null
@@ -96,6 +271,76 @@
       "geometry": null
     },
     "CompositingWindow": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ESGDashboardPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "NPVSPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ShortTermSchedulePanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "StrategicSchedulePanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "TacticalSchedulePanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "PlanningDashboardPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ProductionDashboardPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ResearchDashboardPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "PitOptimisationPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "PitOptimizerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "PushbackDesignerPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "BenchDesignPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GradeControlPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "GCDecisionPanel": {
       "visible": false,
       "floating": false,
       "geometry": null
@@ -126,6 +371,16 @@
       "geometry": null
     },
     "SlopeStabilityPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "JORCClassificationPanel": {
+      "visible": false,
+      "floating": false,
+      "geometry": null
+    },
+    "ResourceReportingPanel": {
       "visible": false,
       "floating": false,
       "geometry": null
@@ -166,5 +421,5 @@
       "geometry": null
     }
   },
-  "timestamp": "1776334541.0659554"
+  "timestamp": "1776407363.7060275"
 }

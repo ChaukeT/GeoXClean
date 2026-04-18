@@ -86,7 +86,18 @@
       "Bash(\".venv\\\\Scripts\\\\python.exe\" -c \"from block_model_viewer.geostats.domain_block_classifier import get_domain_mask; print\\('OK'\\)\")",
       "Bash(\".venv\\\\Scripts\\\\python.exe\" -c \"from block_model_viewer.controllers.geostats_controller import GeostatsController; print\\('OK'\\)\")",
       "Bash(\".venv\\\\Scripts\\\\python.exe\" -c \"from block_model_viewer.visualization.renderer.renderers.block_model_renderer import BlockModelRenderer; print\\('OK'\\)\")",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(awk '{print $NF}')",
+      "Bash(/c/Users/chauk/anaconda3/python.exe -c ':*)",
+      "Bash(/c/Users/chauk/anaconda3/python.exe)",
+      "Bash(git tag *)",
+      "Bash(git branch *)",
+      "Bash(awk '$1==\"D\" {print $2}')",
+      "Bash(awk '{print $1}')",
+      "Bash(git reset *)",
+      "Bash(xargs git *)",
+      "Bash(git commit -m ' *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\chauk\\Documents\\GeoX_Clean"

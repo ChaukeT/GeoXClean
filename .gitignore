@@ -97,3 +97,55 @@ docs/_templates/
 Thumbs.db
 .DS_Store
 
+# GeoX runtime telemetry
+audit_logs/
+
+# Local recovery / scratch directories (safe to delete)
+_REDUNDANT/
+recovered/
+GEOX_RECOVERY_*/
+.claude/worktrees/
+
+# Root-level generated reports
+/*.docx
+/*.xlsx
+/*.pdf
+
+# Backup files left by recovery scripts
+*.bak_*
+*.backup_*
+
+# Throwaway debug / repro test scripts at repo root
+/test_arbf_*.py
+/test_drillhole_load.py
+/test_estimations.py
+/test_pit_optimize_synthetic.py
+/test_variogram_*.py
+/variogram_*.png
+/sgsim_*.png
+
+# Root-level diagnostic / monitoring scripts (move into scripts/ to track)
+/diag_*.py
+/run_live_benchmark.py
+/session_monitor.py
+/_build_prd_docx.py
+
+# Root-level scratch markdown / data outputs
+/BLOCK_MODEL_*.md
+/MAIN_WINDOW_WIRING_AUDIT.md
+/CLAUDE_CODE_PROMPT_*.md
+/PRD_v2.md
+/ARBF_audit_record.json
+/ARBF_results.csv
+/claude_sessions_*.json
+/requirements_filtered.tmp
+/modeling_logs/
+/project_drillholes/
+
+# Windows reserved-name / lock files
+nul
+desktop.ini
+.~lock.*
+
+# Bundled archives
+geostats/arbf.zip
