@@ -68,6 +68,7 @@ class UISignals(QObject):
     drillholeColorModeChanged = pyqtSignal(str)  # color_mode
     drillholeAssayFieldChanged = pyqtSignal(str)  # assay_field
     drillholeShowIdsToggled = pyqtSignal(bool)  # show_ids
+    drillholeDisplayModeChanged = pyqtSignal(str)  # Full Trace / Intervals Only / Points
     drillholeCollarToggled = pyqtSignal(bool)  # show/hide collars
     drillholePbrToggled = pyqtSignal(bool)  # PBR rendering toggle
     drillholeSsaoToggled = pyqtSignal(bool)  # SSAO toggle

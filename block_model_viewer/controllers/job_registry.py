@@ -122,6 +122,7 @@ class JobRegistry:
             "grf": lambda params: geostats._prepare_grf_payload(params, params.get("_progress_callback")),
             "cosgsim": lambda params: geostats._prepare_cosgsim_payload(params, params.get("_progress_callback")),
             "rbf": lambda params: geostats._prepare_rbf_payload(params, params.get("_progress_callback")),
+            "arbf": lambda params: geostats._prepare_arbf_payload(params, params.get("_progress_callback")),
             "economic_uncert": lambda params: geostats._prepare_economic_uncertainty_payload(params),
 
             # ==================================================================

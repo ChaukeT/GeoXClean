@@ -57,6 +57,12 @@ class _SignalEmitter(QObject if _QT_AVAILABLE else object):
 
         domainModelLoaded = pyqtSignal(object)
         domainModelCleared = pyqtSignal()
+        # NB: name uses uppercase "RBF" — 6 consumer panels (arbf_panel,
+        # arbf_estimation_panel, bayesian_kriging_panel, fastrbf_panel,
+        # variogram_analysis_panel, file_mixin) all do
+        # hasattr(registry, "indicatorRBFDomainLoaded"); do not rename.
+        indicatorRBFDomainLoaded = pyqtSignal(object)
+        indicatorRBFDomainCleared = pyqtSignal()
         contactSetLoaded = pyqtSignal(object)
 
         variogramResultsLoaded = pyqtSignal(object)
@@ -92,6 +98,10 @@ class _SignalEmitter(QObject if _QT_AVAILABLE else object):
         experimentResultsLoaded = pyqtSignal(object)
         categoryLabelMapsChanged = pyqtSignal(str)  # namespace
 
+        # Shared grid — single source of truth for block model geometry,
+        # published by estimation/simulation panels via DomainMaskMixin.
+        sharedGridChanged = pyqtSignal(object)  # SharedGridDefinition
+
         def __init__(self) -> None:  # pragma: no cover - trivial
             super().__init__()
             logger.debug("DataRegistry signal emitter initialised")
@@ -111,6 +121,7 @@ class DataRegistry(QObject if _QT_AVAILABLE else object, DataRegistrySimple):
         "drillhole_data",
         "block_model",
         "domain_model",
+        "indicator_rbf_domain",
         "contact_set",
         "variogram_results",
         "transformation_metadata",
@@ -561,6 +572,47 @@ class DataRegistry(QObject if _QT_AVAILABLE else object, DataRegistrySimple):
         super().clear_domain_model()
         self._emit("domainModelCleared")
 
+    # ---------------------------------------------------------------- indicator RBF domain
+    def register_indicator_rbf_domain(
+        self,
+        payload: Dict[str, Any],
+        source_panel: str = "IndicatorRBFPanel",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Store an IRBF domain payload so sim/est panels can constrain to it.
+
+        The payload is whatever ``IndicatorRBFPanel._register_domain`` builds:
+        ``inside_mask_shared`` (flat bool array), ``probability_field`` (3D
+        ``prob`` volume), axes ``x, y, z``, ``iso_value``, ``iso_surface_verts``,
+        ``iso_surface_faces``, ``statistics``, ``domain_name``.  Downstream
+        consumers should call :py:meth:`get_indicator_rbf_domain` and interpolate
+        the probability field onto their grid to obtain a per-cell mask.
+        """
+        success = super().register_model(
+            "indicator_rbf_domain", payload, metadata, source_panel
+        )
+        if success:
+            self._emit("indicatorRBFDomainLoaded", payload)
+        return success
+
+    def get_indicator_rbf_domain(self, copy_data: bool = False) -> Optional[Dict[str, Any]]:
+        """Return the registered IRBF domain payload, or ``None``.
+
+        Default is ``copy_data=False`` because these payloads contain large
+        ``numpy`` arrays (the probability volume) and callers only read them.
+        """
+        return super().get_data("indicator_rbf_domain", copy_data=copy_data)
+
+    def clear_indicator_rbf_domain(self) -> None:
+        """Clear any registered IRBF domain and emit signal."""
+        try:
+            with self._lock:
+                self._data_store.pop("indicator_rbf_domain", None)
+                self._status_flags["indicator_rbf_domain"] = False
+        except Exception:
+            logger.debug("clear_indicator_rbf_domain: underlying store rejected clear")
+        self._emit("indicatorRBFDomainCleared")
+
     def register_contact_set(
         self,
         contact_set: Any,
@@ -576,6 +628,35 @@ class DataRegistry(QObject if _QT_AVAILABLE else object, DataRegistrySimple):
     def get_contact_set(self, copy_data: bool = True) -> Optional[Any]:
         """Get contact set - delegates to base class."""
         return super().get_data("contact_set", copy_data=copy_data)
+
+    # ---------------------------------------------------------------- shared grid
+    def register_shared_grid(
+        self,
+        grid_def: Any,
+        source_panel: str = "unknown",
+    ) -> bool:
+        """Register the shared block-model grid definition.
+
+        Used by estimation/simulation panels (ARBF, Kriging, SGSIM, IK, ...)
+        via DomainMaskMixin so every panel operates on the same grid.
+        """
+        if grid_def is None:
+            return False
+        if source_panel:
+            try:
+                grid_def.source_panel = source_panel
+            except Exception:
+                pass
+        success = super().register_model(
+            "shared_grid", grid_def, metadata=None, source_panel=source_panel
+        )
+        if success:
+            self._emit("sharedGridChanged", grid_def)
+        return success
+
+    def get_shared_grid(self, copy_data: bool = False) -> Optional[Any]:
+        """Return the last registered SharedGridDefinition, or None."""
+        return super().get_data("shared_grid", copy_data=copy_data)
 
     # ---------------------------------------------------------------- variogram & estimation
     def register_variogram_results(
