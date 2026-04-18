@@ -49,6 +49,7 @@ from ..utils.variable_utils import get_grade_columns, populate_variable_combo, v
 from .base_analysis_panel import BaseAnalysisPanel, log_registry_data_status
 from .modern_styles import get_theme_colors, get_analysis_panel_stylesheet, ModernColors
 from .mixins.domain_mask_mixin import DomainMaskMixin
+from .mixins.coded_domain_filter_mixin import CodedDomainFilterMixin
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ def get_sgsim_panel_stylesheet() -> str:
     """
 
 
-class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
+class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
     """
     SGSIM Simulation & Uncertainty Analysis Panel.
     """
@@ -236,7 +237,21 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
                 except Exception:
                     # Older registry versions may not expose this signal
                     pass
-            
+
+            # IRBF domain integration (CodedDomainFilterMixin slots).
+            if hasattr(self.registry, 'indicatorRBFDomainLoaded'):
+                try:
+                    self.registry.indicatorRBFDomainLoaded.connect(
+                        self._on_indicator_rbf_domain_loaded
+                    )
+                except Exception:
+                    pass
+            if hasattr(self.registry, 'compositesLoaded'):
+                try:
+                    self.registry.compositesLoaded.connect(self._on_composites_refreshed)
+                except Exception:
+                    pass
+
             # Source-toggle panels must load full drillhole payload for proper source switching.
             d = self.registry.get_drillhole_data()
             if d is not None:
@@ -558,6 +573,21 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
         self._transform_notice.setStyleSheet("color: #f0ad4e; font-size: 11px; padding: 0 0 4px 0;")
         l.addRow("", self._transform_notice)
 
+        # Domain filter (powered by CodedDomainFilterMixin) — exposes lithology
+        # codes and Indicator-RBF "Inside / Outside" entries when an IRBF
+        # domain has been registered.
+        self.domain_combo = QComboBox()
+        self.domain_combo.addItem("All Data")
+        self.domain_combo.setToolTip(
+            "Filter conditioning data by domain (lithology code or IRBF "
+            "Inside/Outside). When an IRBF domain is registered, only the "
+            "samples in the selected domain are used to condition the "
+            "simulation, and grid cells outside the IRBF probability mask "
+            "are skipped (set to NaN)."
+        )
+        self.domain_combo.currentTextChanged.connect(self._on_domain_filter_selection_changed)
+        l.addRow("Domain:", self.domain_combo)
+
         self.nreal_spin = QSpinBox()
         self.nreal_spin.setRange(1, 1000)
         self.nreal_spin.setValue(50)
@@ -592,6 +622,37 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
         
         l.addRow("Realizations:", self.nreal_spin)
         l.addRow("Seed (required):", seed_widget)
+
+        # ── Simulation method selector (FFT-MA vs Sequential) ──────────
+        # Engine supports both methods (sgsim3d.SGSIMParameters.method);
+        # default is FFT-MA which is O(N log N) and 100-1000x faster than
+        # sequential for large grids. Sequential is the classic SGSIM
+        # algorithm — slower but conditions every node against previously-
+        # simulated nodes for the highest fidelity.
+        self.method_fft_radio = QRadioButton("FFT-MA (fast, default)")
+        self.method_seq_radio = QRadioButton("Sequential (classic SGSIM, slow)")
+        self.method_fft_radio.setChecked(True)
+        self.method_fft_radio.setToolTip(
+            "Fast Fourier Transform Moving Average — generates an "
+            "unconditional Gaussian field via FFT then conditions to the "
+            "data points. O(N log N), 100-1000x faster than sequential."
+        )
+        self.method_seq_radio.setToolTip(
+            "Classic Sequential Gaussian Simulation — visits every node "
+            "in random order, conditioning each one on data + previously-"
+            "simulated nodes. Slower but the textbook reference."
+        )
+        self._method_btn_group = QButtonGroup(self)
+        self._method_btn_group.addButton(self.method_fft_radio, 0)
+        self._method_btn_group.addButton(self.method_seq_radio, 1)
+        method_box = QWidget()
+        method_lay = QVBoxLayout(method_box)
+        method_lay.setContentsMargins(0, 0, 0, 0)
+        method_lay.setSpacing(2)
+        method_lay.addWidget(self.method_fft_radio)
+        method_lay.addWidget(self.method_seq_radio)
+        l.addRow("Method:", method_box)
+
         layout.addWidget(g)
 
     def _create_grid_group(self, layout):
@@ -1338,6 +1399,18 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
             else:
                 self.variable = None
 
+            # Refresh the IRBF / lithology domain combo for the new dataframe
+            # (mixin returns silently if no domain columns or IRBF payload).
+            if hasattr(self, "domain_combo"):
+                try:
+                    self._populate_domain_filter_combo(
+                        self.drillhole_data,
+                        combo=self.domain_combo,
+                        all_label="All Data",
+                    )
+                except Exception:
+                    logger.debug("Domain combo population failed", exc_info=True)
+
         # Only update UI if it's been built
         if hasattr(self, 'run_btn') and hasattr(self, 'results_text'):
             if self.variable:
@@ -1708,7 +1781,32 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
     def gather_parameters(self) -> Dict[str, Any]:
         if self.drillhole_data is None:
             raise ValueError("No data")
-        
+
+        # Apply IRBF / lithology domain filter (CodedDomainFilterMixin).
+        # When the user selected "IRBF_Domain: Inside" the filter prunes the
+        # conditioning data to only the samples inside the IRBF domain;
+        # _active_domain_filter_metadata is then read by
+        # _get_back_transformer to pick the per-domain NS transformer.
+        try:
+            filtered_df, _ = self._get_current_domain_filtered_data(
+                df=self.drillhole_data,
+                registry_payload=getattr(self, "_registry_data", None),
+                combo=getattr(self, "domain_combo", None),
+                all_label="All Data",
+            )
+        except Exception:
+            logger.debug("Domain filter application failed", exc_info=True)
+            filtered_df = self.drillhole_data
+
+        if filtered_df is None or (
+            isinstance(filtered_df, pd.DataFrame) and filtered_df.empty
+        ):
+            raise ValueError(
+                "Selected domain has no samples — pick a different domain or 'All Data'."
+            )
+
+        data_for_run = filtered_df if isinstance(filtered_df, pd.DataFrame) else self.drillhole_data
+
         # Get selected variable from combo box
         selected_variable = None
         if hasattr(self, 'variable_combo') and self.variable_combo.currentText():
@@ -1718,8 +1816,8 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
         else:
             raise ValueError("No variable/property selected. Please select a property from the dropdown.")
         
-        # Verify the variable exists in the data
-        if selected_variable not in self.drillhole_data.columns:
+        # Verify the variable exists in the (filtered) data
+        if selected_variable not in data_for_run.columns:
             # Check if it's a transformed column that should exist
             original_col = None
             if self.transformation_metadata:
@@ -1730,8 +1828,8 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
                         if transformed_name == selected_variable:
                             original_col = original_name
                             break
-            
-            if original_col and original_col in self.drillhole_data.columns:
+
+            if original_col and original_col in data_for_run.columns:
                 raise ValueError(
                     f"Selected variable '{selected_variable}' (transformed version of '{original_col}') not found in data. "
                     f"Please apply the transformation to '{original_col}' using the Grade Transformation panel first, "
@@ -1739,26 +1837,34 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
                 )
             else:
                 raise ValueError(
-                    f"Selected variable '{selected_variable}' not found in data columns: {list(self.drillhole_data.columns)}"
+                    f"Selected variable '{selected_variable}' not found in data columns: {list(data_for_run.columns)}"
                 )
-        
+
         # Cutoffs
         try:
             cuts = [float(x) for x in self.cutoff_edit.text().split(',') if x.strip()]
         except ValueError:
             cuts = []
-        
+
         # Use origin values from the UI spinboxes (user can edit these)
         xmin = self.xmin_spin.value()
         ymin = self.ymin_spin.value()
         zmin = self.zmin_spin.value()
-        
+
+        # Method choice (FFT-MA vs sequential). Engine default is fft_ma —
+        # we always pass an explicit value so the controller doesn't fall
+        # back to the dataclass default.
+        method = "sequential" if (
+            hasattr(self, "method_seq_radio") and self.method_seq_radio.isChecked()
+        ) else "fft_ma"
+
         return {
-            "data_df": self.drillhole_data,
+            "data_df": data_for_run,
             "variable": selected_variable,
             "nreal": self.nreal_spin.value(),
             "seed": self.seed_spin.value(),  # AUDIT FIX (W-001): Seed is always required
-            
+            "method": method,
+
             "nx": self.nx.value(),
             "ny": self.ny.value(),
             "nz": self.nz.value(),
@@ -1768,7 +1874,7 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
             "xinc": self.dx.value(),
             "yinc": self.dy.value(),
             "zinc": self.dz.value(),
-            
+
             "variogram_type": self.vario_type.currentText().lower(),
             "range_major": self.rmaj.value(),
             "range_minor": self.rmin.value(),
@@ -1777,7 +1883,7 @@ class SGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
             "dip": self.dip.value(),
             "nugget": self.nug.value(),
             "sill": self.sill.value(),
-            
+
             "min_neighbors": self.min_n.value(),
             "max_neighbors": self.max_n.value(),
             "max_search_radius": self.rad.value(),

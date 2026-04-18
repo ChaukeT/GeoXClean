@@ -1108,6 +1108,10 @@ class GeostatsController:
             max_neighbors=params["max_neighbors"],
             max_search_radius=params["max_search_radius"],
             seed=params.get("seed"),
+            # Pass through panel-selected method (FFT-MA / sequential).
+            # Falls back to the dataclass default if the panel didn't set it.
+            method=params.get("method", "fft_ma"),
+            domain_mask=params.get("domain_mask"),
         )
         
         cutoffs = params.get("cutoffs", [])
