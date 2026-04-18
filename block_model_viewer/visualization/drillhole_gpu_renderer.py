@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import pyvista as pv
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+from .color_mapper import safe_get_cmap
 
 logger = logging.getLogger(__name__)
 
@@ -1301,8 +1302,7 @@ class DrillholeGPURenderer:
                 # Update lookup table
                 mapper = self._main_actor.GetMapper()
                 if mapper:
-                    import matplotlib.cm as cm
-                    cmap_obj = cm.get_cmap(colormap)
+                    cmap_obj = safe_get_cmap(colormap)
                     
                     lut = mapper.GetLookupTable()
                     if lut:
@@ -1812,6 +1812,11 @@ class DrillholeGPURendererWithLOD(DrillholeGPURenderer):
                     pass
                 self._main_actor = None
             
+            # Guard: no intervals loaded yet
+            if not self.state.intervals:
+                logger.warning("No intervals loaded for LOD rendering")
+                return
+
             # Update LODs based on camera
             self.lod_manager.update_lods(self.state.intervals)
             
@@ -1972,40 +1977,57 @@ def create_intervals_from_polyline_data(
     else:
         logger.warning("GPU Renderer: No registry provided - using temporary counter (UNSAFE for picking after reload)")
     
-    # Fallback counter
-    temp_id_counter = 1  # 0 reserved for background
-    
+    # Fallback counter — start high to avoid collision with persistent IDs
+    temp_id_counter = 100000  # 0 reserved for background, 1-99999 for persistent IDs
+
     hole_polys = polyline_data.get("hole_polys", {})
     hole_segment_lith = polyline_data.get("hole_segment_lith", {})
     hole_segment_assay = polyline_data.get("hole_segment_assay", {})
-    
+    hole_segment_from_depth = polyline_data.get("hole_segment_from_depth", {})
+    hole_segment_to_depth = polyline_data.get("hole_segment_to_depth", {})
+
+    n_nan_skipped = 0
+
     for hid, poly in hole_polys.items():
         if poly is None or poly.n_points < 2:
             continue
-        
+
         points = np.asarray(poly.points)
         liths = hole_segment_lith.get(hid, [])
         assays = hole_segment_assay.get(hid, [])
-        
+        from_depths = hole_segment_from_depth.get(hid, [])
+        to_depths = hole_segment_to_depth.get(hid, [])
+
         # Build intervals from line segments
         if hasattr(poly, 'lines') and poly.lines is not None:
             lines = np.asarray(poly.lines)
             i = 0
             segment_idx = 0
-            
+
             while i < len(lines):
                 n_pts = lines[i]
                 if n_pts >= 2:
+                    # Each polyline segment maps to ONE lith/assay entry.
+                    # Multi-point segments (n_pts > 2) subdivide into
+                    # point-to-point sub-segments that share the same
+                    # lithology/assay/depth data.
+                    seg_lith = liths[segment_idx] if segment_idx < len(liths) else "Unknown"
+                    seg_assay = assays[segment_idx] if segment_idx < len(assays) else 0.0
+                    seg_from = from_depths[segment_idx] if segment_idx < len(from_depths) else 0.0
+                    seg_to = to_depths[segment_idx] if segment_idx < len(to_depths) else 0.0
+
                     for j in range(n_pts - 1):
                         idx1 = lines[i + 1 + j]
                         idx2 = lines[i + 1 + j + 1]
-                        
+
                         start = points[idx1]
                         end = points[idx2]
-                        
-                        lith = liths[segment_idx] if segment_idx < len(liths) else "Unknown"
-                        assay = assays[segment_idx] if segment_idx < len(assays) else 0.0
-                        
+
+                        # Skip intervals with NaN coordinates
+                        if np.any(np.isnan(start)) or np.any(np.isnan(end)):
+                            n_nan_skipped += 1
+                            continue
+
                         # CRITICAL: Use persistent ID if available
                         key = (hid, segment_idx)
                         if use_persistent_ids and key in id_mapping:
@@ -2013,23 +2035,36 @@ def create_intervals_from_polyline_data(
                         else:
                             color_id = temp_id_counter
                             temp_id_counter += 1
-                        
+
+                        # Interpolate depth for sub-segments within a multi-point segment
+                        if n_pts > 2 and seg_to > seg_from:
+                            frac_start = j / (n_pts - 1)
+                            frac_end = (j + 1) / (n_pts - 1)
+                            sub_from = seg_from + frac_start * (seg_to - seg_from)
+                            sub_to = seg_from + frac_end * (seg_to - seg_from)
+                        else:
+                            sub_from = seg_from
+                            sub_to = seg_to
+
                         interval = DrillholeInterval(
                             hole_id=hid,
                             interval_index=segment_idx,
                             start_point=start,
                             end_point=end,
-                            depth_from=0.0,  # Would need depth info
-                            depth_to=np.linalg.norm(end - start),
+                            depth_from=sub_from,
+                            depth_to=sub_to,
                             radius=radius,
-                            color_id=color_id,  # NOW PERSISTENT!
-                            lith_code=lith,
-                            assay_value=assay,
+                            color_id=color_id,
+                            lith_code=seg_lith,
+                            assay_value=seg_assay,
                         )
                         intervals.append(interval)
-                        segment_idx += 1
-                
+                    segment_idx += 1
+
                 i += n_pts + 1
+
+    if n_nan_skipped > 0:
+        logger.warning(f"GPU Renderer: Skipped {n_nan_skipped} intervals with NaN coordinates")
     
     status = "PERSISTENT" if use_persistent_ids else "TEMPORARY (UNSAFE)"
     logger.info(f"Created {len(intervals)} GPU intervals with {status} IDs")

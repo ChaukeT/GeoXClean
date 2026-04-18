@@ -25,6 +25,12 @@ from ..drillholes.datamodel import DrillholeDatabase
 from matplotlib.colors import ListedColormap
 from .picking_controller import get_picking_controller
 
+# Modular drillhole renderer (Pictures pipeline).
+# The Renderer orchestrator delegates all drillhole layer work to this class,
+# which produces Leapfrog-quality spline-smoothed tubes and coordinates with
+# DrillholeGPURenderer for large datasets.
+from .renderer.renderers.drillhole_renderer import DrillholeRenderer
+
 logger = logging.getLogger(__name__)
 
 
@@ -410,7 +416,15 @@ class Renderer:
         except Exception as e:
             logger.debug(f"Could not initialize drillhole state manager: {e}")
             self._drillhole_state_manager = None
-        
+
+        # Modular drillhole renderer — PRIMARY drillhole pipeline (Pictures
+        # architecture).  Produces spline-smoothed Leapfrog-quality tubes with
+        # individual hole actors for instant visibility toggling; delegates to
+        # DrillholeGPURenderer only for very large datasets via the existing
+        # _use_gpu_drillholes gate inside DrillholeRenderer.add_drillhole_layer.
+        self._drillhole_renderer: Optional[DrillholeRenderer] = DrillholeRenderer(self)
+        self._use_modular_drillhole: bool = True
+
         # Measurement system
         self.measure_mode = None  # 'distance' or 'area' or None
         self.measure_points = []  # List of clicked points
@@ -9484,10 +9498,19 @@ class Renderer:
             except Exception:
                 pass
         
+        # FIX: Reset _global_shift to prevent stale coordinate offsets
+        # on project reload (root cause of float32 precision artifacts
+        # when switching between projects with different UTM zones)
+        if hasattr(self, '_global_shift_lock'):
+            with self._global_shift_lock:
+                self._global_shift = None
+        elif hasattr(self, '_global_shift'):
+            self._global_shift = None
+
         # Defer render - PyVista will render on next frame automatically
         # This improves performance during bulk layer clearing
-        
-        logger.info("Cleared all layers, reset property state, cleared legend")
+
+        logger.info("Cleared all layers, reset property state, cleared legend and global shift")
         
         # Notify UI to update layer controls
         if self.layer_change_callback:
@@ -9544,16 +9567,29 @@ class Renderer:
     ) -> Optional[Dict[str, Any]]:
         """
         Add drillholes as a layer to the renderer.
-        Uses individual hole actors for instant visibility toggling.
-        
-        Args:
-            database: DrillholeDatabase containing collars, surveys, assays, lithology
-            composite_df: Optional DataFrame with composite data
-            radius: Tube radius for drillholes
-            color_mode: "Lithology" or "Assay"
-            visible_holes: Set of hole IDs to show (None = show all)
-            lith_filter: Optional list of lithology codes to show (empty list or None = show all)
+
+        Delegates to the modular :class:`DrillholeRenderer` (Pictures pipeline),
+        which produces spline-smoothed Leapfrog-quality tubes and keeps
+        individual hole actors for instant visibility toggling.  For very
+        large datasets it falls through to :class:`DrillholeGPURenderer`.
+
+        Set ``self._use_modular_drillhole = False`` to force the legacy
+        inline path preserved below (fallback only).
         """
+        if self._use_modular_drillhole and self._drillhole_renderer is not None:
+            return self._drillhole_renderer.add_drillhole_layer(
+                database=database,
+                composite_df=composite_df,
+                radius=radius,
+                color_mode=color_mode,
+                assay_field=assay_field,
+                visible_holes=visible_holes,
+                legend_title=legend_title,
+                progress_callback=progress_callback,
+                lith_filter=lith_filter,
+            )
+
+        # ─── Legacy inline path (fallback) ────────────────────────────
         if self.plotter is None:
             logger.warning("Cannot add drillhole layer: plotter not initialized")
             return
@@ -9967,7 +10003,18 @@ class Renderer:
                 # Build tube with adaptive quality
                 # Use capping=False for smooth tube junctions between segments
                 # This prevents the "stacked boxes" appearance from capped segment ends
-                tube = poly.tube(radius=radius, capping=False, n_sides=n_sides)
+                # FIX: Cap tube radius at 45% of shortest segment to prevent
+                # self-intersection artifacts (degenerate triangles → scattered dots)
+                effective_radius = radius
+                if poly.n_points >= 2:
+                    pts = poly.points
+                    seg_lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+                    seg_lengths = seg_lengths[seg_lengths > 0]
+                    if len(seg_lengths) > 0:
+                        max_safe = float(np.min(seg_lengths)) * 0.45
+                        if effective_radius > max_safe > 0:
+                            effective_radius = max_safe
+                tube = poly.tube(radius=effective_radius, capping=False, n_sides=n_sides)
                 if tube.n_cells < 1:
                     continue
                 
@@ -14573,3 +14620,231 @@ class Renderer:
             pass
 
         return None
+
+    # ------------------------------------------------------------------
+    # SSAO / EDL — Screen-Space Ambient Occlusion & Eye-Dome Lighting
+    # Ported from Pictures viewer_core.py to match main_window API calls
+    # ------------------------------------------------------------------
+
+    _ssao_enabled: bool = False
+    _ssao_params: dict = None
+    _edl_enabled: bool = False
+
+    def enable_ssao(self, radius: float = 15, bias: float = 0.5, kernel_size: int = 128) -> bool:
+        """Enable screen-space ambient occlusion for soft inter-object shadows.
+
+        Requires OpenGL 3.2+. Silently returns False on older GPUs.
+        """
+        if self.plotter is None:
+            return False
+        try:
+            self.plotter.enable_ssao(radius=radius, bias=bias, kernel_size=kernel_size)
+            self._ssao_enabled = True
+            self._ssao_params = {"radius": radius, "bias": bias, "kernel_size": kernel_size}
+            logger.info("SSAO enabled (radius=%.1f, bias=%.2f)", radius, bias)
+            return True
+        except Exception as e:
+            logger.warning(f"SSAO not supported on this GPU: {e}")
+            return False
+
+    def disable_ssao(self) -> None:
+        """Disable screen-space ambient occlusion via VTK renderer pass."""
+        self._ssao_enabled = False
+        if self.plotter is None:
+            return
+        try:
+            if hasattr(self.plotter, 'disable_ssao'):
+                self.plotter.disable_ssao()
+            else:
+                ren = self.plotter.renderer
+                if ren is not None:
+                    ren.SetPass(None)
+            logger.info("SSAO disabled")
+        except Exception as e:
+            logger.debug(f"Could not disable SSAO: {e}")
+
+    def enable_edl(self) -> bool:
+        """Enable eye-dome lighting for subtle edge halos."""
+        if self.plotter is None:
+            return False
+        try:
+            self.plotter.enable_eye_dome_lighting()
+            self._edl_enabled = True
+            logger.info("Eye-dome lighting enabled")
+            return True
+        except Exception as e:
+            logger.warning(f"EDL not supported on this GPU: {e}")
+            return False
+
+    def disable_edl(self) -> None:
+        """Disable eye-dome lighting via VTK renderer pass."""
+        self._edl_enabled = False
+        if self.plotter is None:
+            return
+        try:
+            if hasattr(self.plotter, 'disable_eye_dome_lighting'):
+                self.plotter.disable_eye_dome_lighting()
+            else:
+                ren = self.plotter.renderer
+                if ren is not None:
+                    ren.SetPass(None)
+            logger.info("Eye-dome lighting disabled")
+        except Exception as e:
+            logger.debug(f"Could not disable EDL: {e}")
+
+    def reapply_scene_effects(self) -> None:
+        """Re-apply SSAO/EDL after mesh rebuild (add_mesh resets render passes)."""
+        if self._ssao_enabled:
+            params = self._ssao_params or {}
+            try:
+                self.plotter.enable_ssao(**params)
+                logger.debug("Re-applied SSAO after mesh rebuild")
+            except Exception:
+                pass
+        if self._edl_enabled:
+            try:
+                self.plotter.enable_eye_dome_lighting()
+                logger.debug("Re-applied EDL after mesh rebuild")
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # COLLAR VISIBILITY
+    # ------------------------------------------------------------------
+
+    def set_collar_visibility(self, visible: bool) -> None:
+        """Toggle visibility of drillhole collar markers."""
+        if self.plotter is None:
+            return
+        for name, actor in list(self.plotter.actors.items()):
+            if 'collar' in str(name).lower():
+                actor.SetVisibility(visible)
+        try:
+            self.plotter.render()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # SESSION STATE — project save / load
+    # ------------------------------------------------------------------
+
+    def set_state_change_callback(self, callback) -> None:
+        """Register a callback for renderer state changes."""
+        self._state_change_callback = callback
+
+    def get_session_state(self) -> dict:
+        """Capture all renderer display state as a JSON-serialisable dict."""
+        state = {}
+        try:
+            state['current_property'] = self.current_property
+            state['current_colormap'] = getattr(self, 'current_colormap', 'viridis')
+            state['current_opacity'] = getattr(self, 'current_opacity', 1.0)
+            state['background_color'] = getattr(self, 'background_color', 'lightgrey')
+            state['edge_color'] = getattr(self, 'edge_color', 'black')
+            state['edge_width'] = getattr(self, 'edge_width', 2.0)
+            try:
+                state['edge_visibility'] = self.get_edge_visibility()
+            except Exception:
+                state['edge_visibility'] = True
+
+            for attr in ('show_axes', 'show_bounds', 'show_grid',
+                         'lighting_enabled', 'ambient', 'diffuse',
+                         'specular', 'specular_power', 'smooth_shading'):
+                state[attr] = getattr(self, attr, None)
+
+            for attr in ('legend_position', 'legend_location',
+                         'legend_font_size', 'legend_visible'):
+                state[attr] = getattr(self, attr, None)
+
+            state['default_opacity'] = dict(getattr(self, 'default_opacity', {}))
+            state['camera'] = self.get_camera_info()
+
+            if hasattr(self, '_global_shift') and self._global_shift is not None:
+                state['global_shift'] = self._global_shift.tolist()
+            else:
+                state['global_shift'] = None
+
+            state['active_layer_names'] = list(getattr(self, 'active_layers', {}).keys())
+        except Exception as e:
+            logger.error(f"[SESSION STATE] Error capturing state: {e}", exc_info=True)
+        return state
+
+    def apply_session_state(self, state: dict) -> None:
+        """Restore renderer display state from a previously saved dict."""
+        if not state:
+            return
+        try:
+            gs = state.get('global_shift')
+            if gs is not None and hasattr(self, '_global_shift_lock'):
+                import numpy as np
+                with self._global_shift_lock:
+                    self._global_shift = np.array(gs, dtype=np.float64)
+                    self._local_origin = self._global_shift
+
+            for key in ('current_property', 'current_colormap', 'current_opacity',
+                        'background_color', 'edge_color', 'edge_width',
+                        'show_axes', 'show_bounds', 'show_grid',
+                        'lighting_enabled', 'ambient', 'diffuse',
+                        'specular', 'specular_power', 'smooth_shading',
+                        'legend_position', 'legend_location',
+                        'legend_font_size', 'legend_visible'):
+                if key in state:
+                    setattr(self, key, state[key])
+
+            if 'default_opacity' in state and isinstance(state['default_opacity'], dict):
+                if hasattr(self, 'default_opacity'):
+                    self.default_opacity.update(state['default_opacity'])
+
+            if self.plotter is not None:
+                try:
+                    self.plotter.set_background(getattr(self, 'background_color', 'lightgrey'))
+                except Exception:
+                    pass
+                if 'edge_visibility' in state:
+                    try:
+                        self.set_edge_visibility(state['edge_visibility'])
+                    except Exception:
+                        pass
+                cam = state.get('camera')
+                if cam and cam.get('position') and cam.get('focal_point') and cam.get('up'):
+                    try:
+                        self.set_camera_position(
+                            cam['position'], cam['focal_point'], cam['up']
+                        )
+                        if 'view_angle' in cam:
+                            self.plotter.camera.view_angle = cam['view_angle']
+                    except Exception as e:
+                        logger.debug(f"[SESSION STATE] Camera restore deferred: {e}")
+
+            logger.info(f"[SESSION STATE] Restored: property={getattr(self, 'current_property', '?')}")
+        except Exception as e:
+            logger.error(f"[SESSION STATE] Error applying state: {e}", exc_info=True)
+
+    def rebuild_scene_from_manifest(self, manifest, registry, kind_handlers=None) -> int:
+        """Rebuild the 3D scene from a saved project manifest.
+
+        Args:
+            manifest: List of layer descriptors from saved project.
+            registry: Data registry with loaded data.
+            kind_handlers: Dict mapping layer kind to handler callable.
+
+        Returns:
+            Number of layers successfully rebuilt.
+        """
+        if not manifest:
+            return 0
+        count = 0
+        kind_handlers = kind_handlers or {}
+        for entry in manifest:
+            kind = entry.get('kind', '')
+            handler = kind_handlers.get(kind)
+            if handler:
+                try:
+                    handler(entry, registry)
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[SCENE REBUILD] Failed to rebuild layer '{kind}': {e}")
+            else:
+                logger.debug(f"[SCENE REBUILD] No handler for kind='{kind}', skipping")
+        logger.info(f"[SCENE REBUILD] Rebuilt {count}/{len(manifest)} layers")
+        return count

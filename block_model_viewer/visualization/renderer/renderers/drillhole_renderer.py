@@ -179,8 +179,6 @@ class DrillholeRenderer:
             hole_polys = result["hole_polys"]
             hole_segment_lith = result["hole_segment_lith"]
             hole_segment_assay = result["hole_segment_assay"]
-            hole_segment_from_depth = result.get("hole_segment_from_depth", {})
-            hole_segment_to_depth = result.get("hole_segment_to_depth", {})
             lith_colors = result["lith_colors"]
             lith_to_index = result["lith_to_index"]
             assay_field = result["assay_field"]
@@ -253,8 +251,6 @@ class DrillholeRenderer:
                 "hole_polys": hole_polys,
                 "hole_segment_lith": hole_segment_lith,
                 "hole_segment_assay": hole_segment_assay,
-                "hole_segment_from_depth": hole_segment_from_depth,
-                "hole_segment_to_depth": hole_segment_to_depth,
                 "lith_colors": lith_colors,
                 "lith_to_index": lith_to_index,
                 "assay_field": assay_field,
@@ -263,7 +259,7 @@ class DrillholeRenderer:
                 "assay_p98": assay_p98,
                 "database": database,
                 "composite_df": composite_df,
-                "color_mode": color_mode,
+                "color_mode": color_mode,  # Store color_mode for later color application
                 "collar_coords": collar_coords,
                 "radius": radius,
             }
@@ -698,8 +694,6 @@ class DrillholeRenderer:
                 "hole_polys": hole_polys,
                 "hole_segment_lith": hole_segment_lith,
                 "hole_segment_assay": hole_segment_assay,
-                "hole_segment_from_depth": hole_segment_from_depth,
-                "hole_segment_to_depth": hole_segment_to_depth,
                 "lith_colors": lith_colors,
                 "lith_to_index": lith_to_index,
                 "assay_field": assay_field or result.get("assay_field"),
@@ -874,15 +868,9 @@ class DrillholeRenderer:
                         # ResetCameraClippingRange() which uses ALL renderer actors (including
                         # any overlay actors at wrong coordinates) and can produce a near clip
                         # larger than the camera-to-data distance, making everything invisible.
-                        near = max(0.001, cam_distance * 0.0001)
-                        far = cam_distance * 10.0 + size * 5.0
+                        near = max(0.001, size * 0.001)
+                        far = max(size * 100.0, cam_distance * 100.0)
                         camera.SetClippingRange(near, far)
-                        # Re-run clipping maintenance AFTER positioning so the
-                        # guard logic operates on the final camera state.
-                        try:
-                            self._renderer._maintain_clipping_range()
-                        except Exception:
-                            pass
                         logger.debug(
                             "[DRILLHOLE DEBUG] Camera positioned for drillholes: pos=%s focal=%s clip=(%s, %s)",
                             camera.GetPosition(),
@@ -1289,21 +1277,10 @@ class DrillholeRenderer:
         # Add new merged mesh
         try:
             scalar_name = "lith_id" if "lith_id" in merged_mesh.cell_data else None
-            # Categorical clim: ensure colormap maps correctly to category indices
-            clim = None
-            try:
-                _vals = merged_mesh[scalar_name]
-                if _vals is not None:
-                    _finite = _vals[np.isfinite(_vals.astype(float))]
-                    if len(_finite) > 0:
-                        clim = [float(_finite.min()), float(_finite.max())]
-            except Exception:
-                pass
             new_actor = self._renderer.plotter.add_mesh(
                 merged_mesh,
                 scalars=scalar_name,
                 cmap="tab20",
-                clim=clim,
                 show_scalar_bar=False,
                 name="drillholes_merged_visible"
             )
@@ -1577,7 +1554,7 @@ class DrillholeRenderer:
         elif total > 200:
             n_sides = 14
 
-        hide_barren = getattr(self._renderer, '_hide_barren_intervals', False)
+        hide_barren = getattr(self._renderer, '_hide_barren_intervals', True)
 
         tubes_to_merge = []
         for hid, poly in hole_polys.items():
@@ -1744,7 +1721,7 @@ class DrillholeRenderer:
             n_sides = 14
         
         # Build spline-smoothed tubes per hole with cell scalars
-        hide_barren = getattr(self._renderer, '_hide_barren_intervals', False)
+        hide_barren = getattr(self._renderer, '_hide_barren_intervals', True)
         tubes_to_merge = []
 
         for hid in hole_polys.keys():
@@ -1792,19 +1769,8 @@ class DrillholeRenderer:
 
         if color_mode == "Lithology":
             lith_cmap = self._renderer._build_lithology_colormap(current_colormap, lith_colors, lith_to_index)
-            # Categorical clim: ensure colormap maps correctly to category indices
-            clim = None
-            try:
-                _vals = merged[scalar_name]
-                if _vals is not None:
-                    _finite = _vals[np.isfinite(_vals.astype(float))]
-                    if len(_finite) > 0:
-                        clim = [float(_finite.min()), float(_finite.max())]
-            except Exception:
-                pass
             actor = self._renderer.plotter.add_mesh(
                 merged, scalars=scalar_name, cmap=lith_cmap,
-                clim=clim,
                 show_scalar_bar=False, reset_camera=False,
                 smooth_shading=True, pbr=True, metallic=0.1, roughness=0.5,
                 nan_color=nan_clr, name="drillholes_batched",

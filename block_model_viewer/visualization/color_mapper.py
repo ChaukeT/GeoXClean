@@ -11,6 +11,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def safe_get_cmap(name, fallback: str = "viridis"):
+    """Return a matplotlib colormap by name, falling back if unknown."""
+    try:
+        return plt.get_cmap(name)
+    except Exception:
+        try:
+            return plt.get_cmap(fallback)
+        except Exception:
+            return cm.viridis
+
+
 class ColorMapper:
     """
     Handles color mapping for block model properties.
