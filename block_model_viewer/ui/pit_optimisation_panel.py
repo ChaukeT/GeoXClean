@@ -45,7 +45,116 @@ def _has_model_data(model: Any) -> bool:
         return True
 
 
-# PitOptimisationWorker and NestedShellsWorker removed - logic moved to controller
+# ── NestedShellsWorker ─────────────────────────────────────────────────
+# MEMORY.md (2026-03-03 PIT_OPTIMISATION_FULL_REWRITE) called for an
+# inline _NestedShellsWorker on the panel. The previous comment claimed
+# it had been "moved to the controller" but the panel still calls
+# `NestedShellsWorker(...)` at the bottom of `_run_nested_shells_analysis`,
+# which would crash. The inline implementation below restores that
+# contract: it sweeps a decreasing range of revenue factors, runs the
+# Lerchs-Grossmann optimisation per factor, and emits one
+# (revenue_factor, selected_blocks_3d, layer_name) tuple per shell.
+# ───────────────────────────────────────────────────────────────────────
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal as _pqs
+except ImportError:  # pragma: no cover
+    QThread = object  # type: ignore
+    _pqs = lambda *a, **k: None  # type: ignore
+
+
+class NestedShellsWorker(QThread):
+    """Run the Lerchs-Grossmann optimiser across a sweep of revenue factors.
+
+    Emits signals:
+        progress(int, str)           — percentage 0-100 + status message
+        shell_ready(float, np.ndarray, str) — factor + 3D selected mask + layer name
+        finished(list)               — list of summary dicts (one per shell)
+        error(str)                   — error message if anything fails
+    """
+
+    progress = _pqs(int, str)
+    shell_ready = _pqs(float, object, str)
+    finished = _pqs(list)
+    error = _pqs(str)
+
+    def __init__(self, block_df, grid_spec, base_params, factors,
+                 column_mapping, optimizer):
+        super().__init__()
+        self._df = block_df
+        self._grid_spec = grid_spec
+        self._base = base_params
+        self._factors = factors
+        self._column_mapping = column_mapping
+        self._optimizer = optimizer
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        try:
+            n = len(self._factors)
+            summary: list = []
+            for i, factor in enumerate(self._factors):
+                if self._cancel:
+                    self.progress.emit(100, "Cancelled")
+                    break
+
+                pct = int(round((i / max(1, n)) * 100))
+                self.progress.emit(
+                    pct, f"Shell {i + 1}/{n} (factor={factor:.3f})"
+                )
+
+                # Scale the optimiser's element price by the revenue factor
+                # so each shell sees a different effective economy.
+                try:
+                    if self._optimizer.elements:
+                        original_price = self._optimizer.elements[0].price_per_unit
+                        self._optimizer.elements[0].price_per_unit = float(original_price) * float(factor)
+                except Exception as exc:
+                    logger.debug("Could not scale price for shell %d: %s", i, exc)
+
+                try:
+                    result = self._optimizer.optimize_pit(self._df.copy())
+                finally:
+                    # Always restore the original price so subsequent shells
+                    # don't compound the scaling.
+                    try:
+                        if self._optimizer.elements:
+                            self._optimizer.elements[0].price_per_unit = original_price
+                    except Exception:
+                        pass
+
+                selected_3d = np.asarray(result.get('selected'))
+                if selected_3d is None or selected_3d.size == 0:
+                    continue
+
+                layer_name = f"Pit Shell {i + 1} (rf={factor:.2f})"
+                self.shell_ready.emit(float(factor), selected_3d, layer_name)
+
+                # Per-shell summary stats
+                try:
+                    block_value = np.asarray(result.get('block_value', np.zeros(selected_3d.size)))
+                    selected_flat = selected_3d.ravel(order='F') if selected_3d.ndim > 1 else selected_3d
+                    n_blocks = int(np.count_nonzero(selected_flat))
+                    total_value = float(np.sum(block_value[selected_flat[: len(block_value)]]))
+                except Exception:
+                    n_blocks = int(np.count_nonzero(selected_3d))
+                    total_value = 0.0
+
+                summary.append({
+                    'Shell': i + 1,
+                    'Revenue_Factor': float(factor),
+                    'Blocks': n_blocks,
+                    'Total_Value': total_value,
+                    'Layer': layer_name,
+                })
+
+            self.progress.emit(100, "Nested shells complete")
+            self.finished.emit(summary)
+        except Exception as exc:
+            logger.error("NestedShellsWorker failed: %s", exc, exc_info=True)
+            self.error.emit(str(exc))
 
 
 class PitOptimisationPanel(BaseAnalysisPanel):
