@@ -192,6 +192,144 @@ class SignalCoordinator(QObject):
         except Exception as e:
             logger.debug(f"Could not connect scene inspector signals: {e}")
 
+        # ── MAIN_WINDOW_WIRING_AUDIT (2026-04-16) — 9 panel signals were ──
+        # firing into the void after the menu/panel refactor. Wire them to
+        # the matching handlers on MainWindow (created here as small
+        # forwarding methods on the coordinator if MW lacks them).
+        self._connect_audit_panel_signals()
+
+    def _connect_audit_panel_signals(self) -> None:
+        """Wire the 9 panel signals flagged in MAIN_WINDOW_WIRING_AUDIT.md.
+
+        Each connection is guarded by ``hasattr`` so the wiring is safe
+        even if a panel hasn't been registered yet.
+        """
+        mw = self._mw
+
+        # Block-Model Filter panel — apply filters to the renderer
+        try:
+            panel = getattr(mw, 'block_model_filter_panel', None)
+            if panel is not None and hasattr(panel, 'filtersChanged'):
+                panel.filtersChanged.connect(self._on_filters_changed)
+                logger.debug("Wired block_model_filter_panel.filtersChanged")
+        except Exception as exc:
+            logger.debug("filter-panel wiring failed: %s", exc)
+
+        # Cross-section panel — refresh slice on edit
+        try:
+            panel = getattr(mw, 'cross_section_panel', None)
+            if panel is not None and hasattr(panel, 'section_updated'):
+                panel.section_updated.connect(self._on_cross_section_updated)
+                logger.debug("Wired cross_section_panel.section_updated")
+        except Exception as exc:
+            logger.debug("cross-section wiring failed: %s", exc)
+
+        # Interactive slicer panel — range / clipping
+        try:
+            panel = getattr(mw, 'interactive_slicer_panel', None)
+            if panel is not None:
+                if hasattr(panel, 'rangeChanged'):
+                    panel.rangeChanged.connect(self._on_slicer_range_changed)
+                if hasattr(panel, 'clipping_changed'):
+                    panel.clipping_changed.connect(self._on_slicer_clipping_changed)
+                logger.debug("Wired interactive_slicer_panel signals")
+        except Exception as exc:
+            logger.debug("slicer wiring failed: %s", exc)
+
+        # Lithology manager — domain-code assignment
+        try:
+            panel = getattr(mw, 'lithology_manager_panel', None)
+            if panel is not None and hasattr(panel, 'domainCodesAssigned'):
+                panel.domainCodesAssigned.connect(self._on_domain_codes_assigned)
+                logger.debug("Wired lithology_manager_panel.domainCodesAssigned")
+        except Exception as exc:
+            logger.debug("lithology wiring failed: %s", exc)
+
+        # Fragmentation pipeline (4 panels)
+        for attr, signal_name, handler in (
+            ('frag_import_panel',         'import_completed',         self._on_frag_import_completed),
+            ('frag_preprocessing_panel',  'preprocessing_completed',  self._on_frag_preprocessing_completed),
+            ('frag_segmentation_panel',   'segmentation_completed',   self._on_frag_segmentation_completed),
+            ('frag_results_panel',        'fragment_selected',        self._on_frag_fragment_selected),
+        ):
+            try:
+                panel = getattr(mw, attr, None)
+                if panel is not None and hasattr(panel, signal_name):
+                    getattr(panel, signal_name).connect(handler)
+                    logger.debug("Wired %s.%s", attr, signal_name)
+            except Exception as exc:
+                logger.debug("%s.%s wiring failed: %s", attr, signal_name, exc)
+
+    # ── Audit-signal handlers ──────────────────────────────────────────
+    # These default to logging + delegation. If MainWindow grows a more
+    # specific handler (e.g. `on_filters_changed`), it takes precedence.
+
+    def _delegate(self, mw_method_name: str, *args, fallback_log: str = ""):
+        mw = self._mw
+        handler = getattr(mw, mw_method_name, None)
+        if callable(handler):
+            try:
+                handler(*args)
+                return
+            except Exception as exc:
+                logger.warning("%s failed: %s", mw_method_name, exc)
+        if fallback_log:
+            logger.info(fallback_log)
+
+    def _on_filters_changed(self, *args) -> None:
+        self._delegate(
+            'on_filters_changed', *args,
+            fallback_log=f"Block model filters changed (no main_window handler) args={args}",
+        )
+
+    def _on_cross_section_updated(self, *args) -> None:
+        self._delegate(
+            'on_cross_section_updated', *args,
+            fallback_log="Cross-section updated (no main_window handler)",
+        )
+
+    def _on_slicer_range_changed(self, *args) -> None:
+        self._delegate(
+            'on_slicer_range_changed', *args,
+            fallback_log="Slicer range changed (no main_window handler)",
+        )
+
+    def _on_slicer_clipping_changed(self, *args) -> None:
+        self._delegate(
+            'on_slicer_clipping_changed', *args,
+            fallback_log="Slicer clipping changed (no main_window handler)",
+        )
+
+    def _on_domain_codes_assigned(self, *args) -> None:
+        self._delegate(
+            'on_domain_codes_assigned', *args,
+            fallback_log="Domain codes assigned (no main_window handler)",
+        )
+
+    def _on_frag_import_completed(self, *args) -> None:
+        self._delegate(
+            'on_frag_import_completed', *args,
+            fallback_log="Fragmentation import completed (no main_window handler)",
+        )
+
+    def _on_frag_preprocessing_completed(self, *args) -> None:
+        self._delegate(
+            'on_frag_preprocessing_completed', *args,
+            fallback_log="Fragmentation preprocessing completed (no main_window handler)",
+        )
+
+    def _on_frag_segmentation_completed(self, *args) -> None:
+        self._delegate(
+            'on_frag_segmentation_completed', *args,
+            fallback_log="Fragmentation segmentation completed (no main_window handler)",
+        )
+
+    def _on_frag_fragment_selected(self, *args) -> None:
+        self._delegate(
+            'on_frag_fragment_selected', *args,
+            fallback_log="Fragment selected (no main_window handler)",
+        )
+
     # ═══════════════════════════════════════════════════════════════
     # HANDLER METHODS
     # ═══════════════════════════════════════════════════════════════
