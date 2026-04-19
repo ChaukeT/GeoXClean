@@ -1054,12 +1054,15 @@ class ViewerWidget(QWidget):
                         bounds = None
                 except Exception:
                     bounds = None
-                # Fallback to current model bounds
-                if not bounds and self.current_model is not None:
+                # Fallback to current model bounds. Use explicit None /
+                # length checks because `bounds` may be a numpy array, where
+                # `not bounds` raises "truth value is ambiguous"
+                # (RUNTIME_BUG_FIXES.md bug 6).
+                if bounds is None and self.current_model is not None:
                     try:
                         bounds = getattr(self.current_model, 'bounds', None) or getattr(self.current_model, 'get_bounds', lambda: None)()
                         # Cache the bounds
-                        if bounds:
+                        if bounds is not None and len(bounds) > 0:
                             self._cached_bounds = bounds
                             self._bounds_cache_time = current_time
                     except Exception:
@@ -1756,8 +1759,9 @@ class ViewerWidget(QWidget):
                     bounds = None
             except Exception:
                 bounds = None
-            # Fallback to model-provided bounds if available
-            if not bounds:
+            # Fallback to model-provided bounds if available — explicit None
+            # check because bounds may be a numpy array (RUNTIME_BUG_FIXES.md bug 6).
+            if bounds is None:
                 try:
                     bounds = getattr(block_model, 'bounds', None) or getattr(block_model, 'get_bounds', lambda: None)()
                 except Exception:

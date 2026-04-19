@@ -274,7 +274,10 @@ class PyQtGraphGridPanel(BaseDialogPanel):
     
     def _on_block_model_changed(self):
         """Handle block model change - populate property dropdown."""
-        if not self.block_model or not PYQTGRAPH_AVAILABLE:
+        # Use explicit None check — bare truth-value on a BlockModel raises
+        # "The truth value of a DataFrame is ambiguous" once the model wraps
+        # a pandas/numpy array. See RUNTIME_BUG_FIXES.md bug 6.
+        if self.block_model is None or not PYQTGRAPH_AVAILABLE:
             return
         
         self.property_combo.blockSignals(True)
@@ -296,7 +299,7 @@ class PyQtGraphGridPanel(BaseDialogPanel):
         # LAG FIX: Skip update if panel is hidden to avoid unnecessary work
         if not self.isVisible():
             return
-        if not self.block_model or not PYQTGRAPH_AVAILABLE:
+        if self.block_model is None or not PYQTGRAPH_AVAILABLE:
             return
         
         # Get current property

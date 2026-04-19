@@ -999,7 +999,9 @@ class PropertyPanel(QWidget):
         self._update_file_info()
         self._update_property_lists()
         
-        if block_model.bounds:
+        # Explicit None check — block_model.bounds is a tuple/array and
+        # bare truth-value would raise on numpy arrays (RUNTIME_BUG_FIXES.md bug 6).
+        if block_model.bounds is not None:
             # Reset slice sliders (if they exist)
             if hasattr(self, 'x_slice_slider') and hasattr(self, 'y_slice_slider') and hasattr(self, 'z_slice_slider'):
                 for slider in [self.x_slice_slider, self.y_slice_slider, self.z_slice_slider]:

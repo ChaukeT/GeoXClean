@@ -263,8 +263,8 @@ class GeometPanel(BaseAnalysisPanel):
         # Update results table
         self._update_results_table(geomet_attrs)
         
-        # Attach to block model
-        if self.block_model and self.controller:
+        # Attach to block model — explicit None check (RUNTIME_BUG_FIXES.md bug 6).
+        if self.block_model is not None and self.controller is not None:
             from ..geomet.geomet_block_model import attach_geomet_to_block_model
             attach_geomet_to_block_model(self.block_model, geomet_attrs)
             self.emit_status("Geomet attributes attached to block model.")
@@ -342,7 +342,7 @@ class GeometPanel(BaseAnalysisPanel):
     
     def _push_to_irr(self):
         """Push geomet values to IRR/NPV analysis."""
-        if not self.block_model:
+        if self.block_model is None:
             self.show_error("No Block Model", "Please load a block model first.")
             return
         
@@ -365,7 +365,7 @@ class GeometPanel(BaseAnalysisPanel):
     
     def _push_to_pit(self):
         """Push geomet values to pit optimizer."""
-        if not self.block_model:
+        if self.block_model is None:
             self.show_error("No Block Model", "Please load a block model first.")
             return
         
