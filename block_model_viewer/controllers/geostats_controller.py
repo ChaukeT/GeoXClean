@@ -961,13 +961,29 @@ class GeostatsController:
     # =========================================================================
     
     def _prepare_bayesian_kriging_payload(self, params: Dict[str, Any], progress_callback: Optional[Callable[[int, str], None]] = None) -> Dict[str, Any]:
-        """Prepare Bayesian/Soft Kriging payload."""
+        """Prepare Bayesian/Soft Kriging payload.
+
+        Honours the param keys actually emitted by ``BayesianKrigingPanel.gather_parameters``:
+            grid_origin / grid_spacing / grid_counts (panel-side spinners)
+            variogram_params (sill+nugget+range+model_type)
+            search_params (n_neighbors, max_distance, min_neighbors)
+            config (prior_type, soft_weighting)
+            base_method, secondary_variable, drift_type
+            domain_mask (resampled IRBF inside-mask, flat bool array on grid)
+            soft_source / soft_path
+
+        Previously this method:
+        * defaulted the grid to a hard-coded 10×10×10 and re-derived bounds
+          from the data — silently overriding the panel's grid spinners,
+        * looked up `params['bayesian']` and `params['variogram']` (legacy
+          keys the panel never emits),
+        * dropped `domain_mask` entirely.
+        """
         from ..geostats.bayesian_kriging import run_bayesian_kriging_job
 
         if progress_callback:
             progress_callback(10, "Preparing Bayesian Kriging...")
 
-        # Extract data from data_df (like other kriging methods)
         data_df = params.get("data_df")
         if data_df is None or data_df.empty:
             raise ValueError("No drillhole data provided for Bayesian Kriging.")
@@ -976,9 +992,7 @@ class GeostatsController:
         if not variable or variable not in data_df.columns:
             raise ValueError(f"Variable '{variable}' not found in data.")
 
-        # Clean and extract coordinates and values
         cleaned = data_df.dropna(subset=["X", "Y", "Z", variable])
-        # CRITICAL: Preserve attrs for JORC/SAMREC data lineage tracking
         if hasattr(data_df, 'attrs') and data_df.attrs:
             cleaned.attrs = data_df.attrs.copy()
         if cleaned.empty:
@@ -987,69 +1001,68 @@ class GeostatsController:
         coords = cleaned[["X", "Y", "Z"]].to_numpy(dtype=np.float64)
         values = cleaned[variable].to_numpy(dtype=np.float64)
 
-        # Create target grid (simple approach - can be enhanced)
-        grid_spec = params.get("grid", (10, 10, 10))  # (nx, ny, nz)
-        nx, ny, nz = int(grid_spec[0]), int(grid_spec[1]), int(grid_spec[2])
+        # ---- Grid: prefer panel spinners, fall back to data-bounds heuristic ----
+        grid_origin = params.get("grid_origin")
+        grid_spacing = params.get("grid_spacing")
+        grid_counts = params.get("grid_counts")
+        if grid_origin and grid_spacing and grid_counts:
+            x_min, y_min, z_min = (float(v) for v in grid_origin)
+            dx, dy, dz = (float(v) for v in grid_spacing)
+            nx, ny, nz = (int(v) for v in grid_counts)
+        else:
+            # Legacy fallback (kept for callers that haven't been updated).
+            grid_spec = params.get("grid", (10, 10, 10))
+            nx, ny, nz = int(grid_spec[0]), int(grid_spec[1]), int(grid_spec[2])
+            x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+            y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+            z_min, z_max = coords[:, 2].min(), coords[:, 2].max()
+            x_pad = (x_max - x_min) * 0.1
+            y_pad = (y_max - y_min) * 0.1
+            z_pad = (z_max - z_min) * 0.1
+            x_min -= x_pad; x_max += x_pad
+            y_min -= y_pad; y_max += y_pad
+            z_min -= z_pad; z_max += z_pad
+            dx = (x_max - x_min) / max(nx - 1, 1)
+            dy = (y_max - y_min) / max(ny - 1, 1)
+            dz = (z_max - z_min) / max(nz - 1, 1)
 
-        # Simple grid generation (can be enhanced with proper bounds)
-        x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
-        y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
-        z_min, z_max = coords[:, 2].min(), coords[:, 2].max()
-
-        # Add some padding
-        x_pad = (x_max - x_min) * 0.1
-        y_pad = (y_max - y_min) * 0.1
-        z_pad = (z_max - z_min) * 0.1
-
-        x_min -= x_pad; x_max += x_pad
-        y_min -= y_pad; y_max += y_pad
-        z_min -= z_pad; z_max += z_pad
-
-        dx = (x_max - x_min) / max(nx - 1, 1)
-        dy = (y_max - y_min) / max(ny - 1, 1)
-        dz = (z_max - z_min) / max(nz - 1, 1)
-
-        gx = np.linspace(x_min, x_max, nx)
-        gy = np.linspace(y_min, y_max, ny)
-        gz = np.linspace(z_min, z_max, nz)
-
+        gx = x_min + np.arange(nx) * dx
+        gy = y_min + np.arange(ny) * dy
+        gz = z_min + np.arange(nz) * dz
         GX, GY, GZ = np.meshgrid(gx, gy, gz, indexing='ij')
         target_coords = np.column_stack([GX.ravel(), GY.ravel(), GZ.ravel()])
 
-        # Map soft kriging panel parameters to bayesian kriging format
-        bayesian_params = params.get('bayesian', {})
-        mode = bayesian_params.get('mode', 'Mean & Variance')
-        weight = bayesian_params.get('weight', 0.5)
+        # ---- Variogram + search + config: read from the panel's actual keys ----
+        variogram_params = params.get("variogram_params") or params.get("variogram") or {}
+        search_params = params.get("search_params") or {}
+        config = dict(params.get("config") or {})
+        base_method = params.get("base_method", "OK")
+        # Strip OK/UK/IK/CoK suffixes the panel may have appended
+        for suffix in (" (Bayesian)", " (Soft)"):
+            if base_method.endswith(suffix):
+                base_method = base_method[: -len(suffix)]
+        config['base_method'] = base_method
 
-        # Map UI mode to bayesian config
-        prior_type = 'mean_var' if mode == 'Mean & Variance' else 'mean_only'
-
-        config = {
-            'base_method': 'OK',  # Default to OK for soft kriging
-            'prior_type': prior_type,
-            'soft_weighting': weight
-        }
-
-        # Prepare parameters for bayesian kriging job
         job_params = {
+            'base_method': base_method,
             'coords': coords,
             'values': values,
             'locations': target_coords,
-            'variogram_model': params.get('variogram', {}),
+            'variogram_model': variogram_params,
+            'search_params': search_params,
             'config': config,
+            'drift_type': params.get('drift_type', 'constant'),
+            'secondary_variable': params.get('secondary_variable'),
             'grid_info': {
                 'nx': nx, 'ny': ny, 'nz': nz,
                 'dx': dx, 'dy': dy, 'dz': dz,
-                'x_min': x_min, 'y_min': y_min, 'z_min': z_min
-            }
+                'x_min': x_min, 'y_min': y_min, 'z_min': z_min,
+            },
         }
 
-        # Handle soft data if provided
+        # Soft data
         soft_source = params.get('soft_source')
-        if soft_source == "From Block Model":
-            # TODO: Implement block model soft data extraction
-            pass
-        elif soft_source == "From External CSV":
+        if soft_source == "From External CSV":
             soft_path = params.get('soft_path')
             if soft_path:
                 try:
@@ -1064,10 +1077,33 @@ class GeostatsController:
 
         result = run_bayesian_kriging_job(job_params)
 
+        # ---- Apply IRBF domain mask post-results (engine has no native support) ----
+        # Panel emits a flat bool array of size nx*ny*nz. Set NaN outside.
+        domain_mask = params.get("domain_mask")
+        if domain_mask is not None and 'error' not in result:
+            try:
+                mask = np.asarray(domain_mask, dtype=bool).ravel()
+                if mask.size == nx * ny * nz:
+                    for key in ('estimates', 'variance', 'kriging_variance', 'mean'):
+                        arr = result.get(key)
+                        if arr is None:
+                            continue
+                        a = np.asarray(arr, dtype=float).ravel()
+                        if a.size == mask.size:
+                            a = a.copy()
+                            a[~mask] = np.nan
+                            result[key] = a.reshape((nx, ny, nz)) if a.size == nx*ny*nz else a
+                    n_inside = int(mask.sum())
+                    logger.info(
+                        "Bayesian: applied IRBF domain mask (%d/%d blocks Inside)",
+                        n_inside, mask.size,
+                    )
+            except Exception as exc:
+                logger.warning("Bayesian: domain_mask post-processing failed: %s", exc, exc_info=True)
+
         if progress_callback:
             progress_callback(100, "Complete")
 
-        # Add grid information for visualization
         if 'error' not in result:
             result.update({
                 'grid_x': GX,
@@ -1076,7 +1112,7 @@ class GeostatsController:
                 'grid_info': job_params['grid_info'],
                 'variable': variable,
                 'property_name': f'{variable}_soft_kriging',
-                'variance_property': f'{variable}_soft_kriging_var'
+                'variance_property': f'{variable}_soft_kriging_var',
             })
 
         return {
