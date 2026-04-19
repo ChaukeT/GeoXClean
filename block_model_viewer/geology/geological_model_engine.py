@@ -1877,7 +1877,7 @@ class GeologicalModelEngine:
             else:
                 formation_names[i] = f"Unit_{i}"
 
-        return {
+        unified = {
             'vertices': verts_world,
             'formation_ids': formation_ids,
             'formation_names': formation_names,
@@ -1888,6 +1888,29 @@ class GeologicalModelEngine:
             '_pyvista_grid': grid,
             '_scaler': self.scaler,
         }
+
+        # CONTINUITY_AND_PANEL_AUDIT (2026-04-18) BUG GEO-07 fix:
+        # enforce lithological continuity right after building the unified
+        # mesh. Removes geologically-impossible disconnected "islands"
+        # (small blobs of one lithology floating inside another) by
+        # running 3D connected-component labelling and reassigning
+        # island cells to the correct neighbour. formation_ids is
+        # mutated in place; the audit report is attached so panels
+        # can show per-formation continuity stats.
+        try:
+            from .lithological_continuity import enforce_lithological_continuity
+            continuity_report = enforce_lithological_continuity(
+                unified_mesh=unified,
+                min_island_fraction=0.05,
+                min_island_cells=10,
+                enable_reassignment=True,
+            )
+            unified['continuity_report'] = continuity_report
+            grid.cell_data['Formation_ID'] = formation_ids  # refresh in case mutated in place
+        except Exception as exc:
+            logger.debug("Lithological continuity enforcement skipped: %s", exc)
+
+        return unified
 
     # ═══════════════════════════════════════════════════════════════════
     # VALIDATION

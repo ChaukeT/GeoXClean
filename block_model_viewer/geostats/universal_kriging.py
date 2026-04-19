@@ -701,8 +701,13 @@ def run_universal_kriging_job(params: Dict[str, Any]) -> Dict[str, Any]:
         y0 = grid_y[0, 0, 0] - dy / 2
         z0 = grid_z[0, 0, 0] - dz / 2
     
-    estimates = estimates_flat.reshape((nx, ny, nz), order='F')
-    variances = variances_flat.reshape((nx, ny, nz), order='F')
+    # KRIGING_AUDIT BUG K-02 fix: the meshgrid that produced the input
+    # uses indexing='ij' and the targets were raveled C-order (z fastest).
+    # Reshaping with order='F' here (x fastest) mapped every UK estimate
+    # to the WRONG spatial block — every non-corner block received some
+    # other block's grade. Matches the OK engine (kriging3d.py:878).
+    estimates = estimates_flat.reshape((nx, ny, nz), order='C')
+    variances = variances_flat.reshape((nx, ny, nz), order='C')
 
     # === OPTIONAL POST-PROCESSING FILTERS ===
     # Apply post-processing to handle edge instabilities

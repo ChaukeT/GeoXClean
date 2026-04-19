@@ -57,7 +57,12 @@ def _find_nearest_soft_data(
     Returns:
         Tuple of (soft_means, soft_variances, soft_coords) arrays
     """
-    if len(soft_data.points) == 0:
+    # ADVANCED_KRIGING_AUDIT BUG A-01: SoftDataSet.points is a legacy
+    # compatibility shim that always returns []. Using it here meant every
+    # Bayesian update path silently fell through to standard kriging with
+    # all soft data discarded. SoftDataSet uses SoA storage (coords/means/
+    # variances) — `n_points` reads from coords directly.
+    if soft_data.n_points == 0:
         return np.array([]), np.array([]), np.array([])
     
     soft_coords = soft_data.get_coords()
@@ -122,7 +127,7 @@ def run_bayesian_ok(
     max_distance = search_params.get('max_distance') if search_params else None
     model_type = variogram_model.get('model_type', 'spherical') if variogram_model else 'spherical'
     
-    if soft_data is None or len(soft_data.points) == 0:
+    if soft_data is None or soft_data.n_points == 0:  # BUG A-01 fix
         # Fallback to standard OK
         logger.info("No soft data provided, using standard OK")
         estimates, variances, _ = ordinary_kriging_3d(  # Ignore QA metrics
@@ -270,7 +275,7 @@ def run_bayesian_uk(
     )
     uk_estimates, uk_variances = uk.estimate(locations)
     
-    if soft_data is None or len(soft_data.points) == 0:
+    if soft_data is None or soft_data.n_points == 0:  # BUG A-01 fix
         logger.info("No soft data provided, using standard UK")
         return uk_estimates, uk_variances
     
@@ -499,7 +504,7 @@ def run_bayesian_ik(
         metadata=ik_result_dict.get('metadata', {})
     )
     
-    if soft_data is None or len(soft_data.points) == 0:
+    if soft_data is None or soft_data.n_points == 0:  # BUG A-01 fix
         logger.info("No soft data provided, using standard IK")
         return ik_result
     
@@ -656,7 +661,7 @@ def run_bayesian_cok(
     )
     cok_result = cok.estimate(locations)
     
-    if soft_data is None or len(soft_data.points) == 0:
+    if soft_data is None or soft_data.n_points == 0:  # BUG A-01 fix
         logger.info("No soft data provided, using standard CoK")
         return cok_result
     

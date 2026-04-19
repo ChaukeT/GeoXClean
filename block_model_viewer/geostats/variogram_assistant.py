@@ -277,14 +277,21 @@ def _fit_directional_models(
                     }
                 }
             else:
-                # Single structure fit
-                nugget, sill, rng = fit_variogram(lags, semivars, model_type=model_type)
-                total_sill = sill
+                # Single structure fit.
+                # VARIOGRAM_AUDIT BUG V-01 fix: fit_variogram returns
+                # (nugget, PARTIAL_SILL, range) — not (nugget, total_sill,
+                # range). Naming the second value `sill` then computing
+                # `sill - nugget` for the partial-sill field
+                # double-subtracted the nugget AND stored the partial as
+                # total. Kriging engines downstream then received a sill
+                # that was systematically too low, biasing every estimate.
+                nugget, partial_sill, rng = fit_variogram(lags, semivars, model_type=model_type)
+                total_sill = nugget + partial_sill
                 fitted[dir_key] = {
                     model_type: {
                         "model_type": model_type,
                         "nugget": float(nugget),
-                        "sill": float(sill - nugget),
+                        "sill": float(partial_sill),
                         "total_sill": float(total_sill),
                         "range": float(rng),
                     }
