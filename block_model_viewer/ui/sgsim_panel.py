@@ -1881,6 +1881,15 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
             "max_search_radius": self.rad.value(),
             "cutoffs": cuts,
             "transformer": self._get_back_transformer(selected_variable),
+            # Pass the registered IRBF domain payload through so the
+            # controller can resample it onto the simulation grid and
+            # set SGSIMParameters.domain_mask. Without this, blocks
+            # outside the IRBF domain would be simulated unconditionally
+            # even when the panel had filtered conditioning samples to
+            # "IRBF_Domain: Inside".
+            "irbf_domain_raw": self._get_registry_indicator_rbf_domain(
+                getattr(self, "_registry_data", None)
+            ),
         }
 
     def _get_back_transformer(self, transformed_variable: str):

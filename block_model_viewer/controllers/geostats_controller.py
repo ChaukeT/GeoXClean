@@ -34,6 +34,51 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_sgsim_domain_mask(
+    explicit_mask: Optional[np.ndarray],
+    irbf_domain_raw: Optional[Dict[str, Any]],
+    *,
+    xmin: float, ymin: float, zmin: float,
+    xinc: float, yinc: float, zinc: float,
+    nx: int, ny: int, nz: int,
+) -> Optional[np.ndarray]:
+    """Resolve the boolean ``domain_mask`` for an SGSIM run.
+
+    Priority:
+        1. An explicit mask emitted by the panel (already on grid).
+        2. A registered IRBF domain — resampled onto the simulation grid
+           via ``geostats.domain_mask.resample_irbf_mask_to_points``.
+        3. None — engine simulates every block.
+
+    Returns a flat boolean array of size ``nx * ny * nz`` (True = simulate)
+    or None if no domain is provided.
+    """
+    if explicit_mask is not None:
+        try:
+            return np.asarray(explicit_mask, dtype=bool).ravel()
+        except Exception:
+            logger.debug("SGSIM: explicit domain_mask was not coercible to bool", exc_info=True)
+    if not isinstance(irbf_domain_raw, dict) or not irbf_domain_raw:
+        return None
+    try:
+        from ..geostats.domain_mask import resample_irbf_mask_to_points
+        # Build cell-centre coordinates matching what the engine iterates over.
+        # SGSIMParameters' grid origin is at (xmin, ymin, zmin) and cell size
+        # (xinc, yinc, zinc); cells centred at origin + (i+0.5)*step.
+        ix = (np.arange(nx) + 0.5) * xinc + xmin
+        iy = (np.arange(ny) + 0.5) * yinc + ymin
+        iz = (np.arange(nz) + 0.5) * zinc + zmin
+        gx, gy, gz = np.meshgrid(ix, iy, iz, indexing='ij')
+        centres = np.column_stack([gx.ravel(), gy.ravel(), gz.ravel()])
+        mask = resample_irbf_mask_to_points(irbf_domain_raw, centres)
+        if mask is None or mask.shape[0] != centres.shape[0]:
+            return None
+        return mask.astype(bool, copy=False)
+    except Exception as exc:
+        logger.warning("SGSIM: IRBF→domain_mask resample failed: %s", exc, exc_info=True)
+        return None
+
+
 class GeostatsController:
     """
     Controller for geostatistical operations.
@@ -1111,7 +1156,13 @@ class GeostatsController:
             # Pass through panel-selected method (FFT-MA / sequential).
             # Falls back to the dataclass default if the panel didn't set it.
             method=params.get("method", "fft_ma"),
-            domain_mask=params.get("domain_mask"),
+            domain_mask=_resolve_sgsim_domain_mask(
+                params.get("domain_mask"),
+                params.get("irbf_domain_raw"),
+                xmin=params["xmin"], ymin=params["ymin"], zmin=params["zmin"],
+                xinc=params["xinc"], yinc=params["yinc"], zinc=params["zinc"],
+                nx=params["nx"], ny=params["ny"], nz=params["nz"],
+            ),
         )
         
         cutoffs = params.get("cutoffs", [])
