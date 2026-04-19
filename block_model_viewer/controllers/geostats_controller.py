@@ -3531,6 +3531,37 @@ class GeostatsController:
         adapter.set_composites(coords, values)
         adapter.set_block_model(centroids, block_sizes)
 
+        # IRBF hard-domain wiring. The panel emits the registered IRBF
+        # domain payload as `irbf_domain_raw`; resample it onto the
+        # composite coords AND the block centroids, then call
+        # adapter.set_domains() so the engine restricts each block's
+        # estimation to composites in the same domain. Without this,
+        # ARBF silently ignored the registered IRBF and produced an
+        # un-domained estimate even when the panel showed "IRBF_Domain:
+        # Inside" selected. (Engine API: ARBFEngine.set_domains.)
+        irbf_domain_raw = params.get("irbf_domain_raw")
+        if isinstance(irbf_domain_raw, dict) and irbf_domain_raw:
+            try:
+                from ..geostats.domain_mask import resample_irbf_mask_to_points
+                composite_inside = resample_irbf_mask_to_points(irbf_domain_raw, coords)
+                block_inside = resample_irbf_mask_to_points(irbf_domain_raw, centroids)
+                if (
+                    composite_inside is not None
+                    and block_inside is not None
+                    and composite_inside.shape[0] == coords.shape[0]
+                    and block_inside.shape[0] == centroids.shape[0]
+                ):
+                    composite_labels = np.where(composite_inside, "Inside", "Outside")
+                    block_labels = np.where(block_inside, "Inside", "Outside")
+                    adapter.set_domains(composite_labels, block_labels)
+                    logger.info(
+                        "ARBF: applied IRBF hard-domain mask (%d/%d composites inside, %d/%d blocks inside)",
+                        int(composite_inside.sum()), len(composite_inside),
+                        int(block_inside.sum()), len(block_inside),
+                    )
+            except Exception as exc:
+                logger.warning("ARBF: IRBF hard-domain wiring failed: %s", exc, exc_info=True)
+
         weights = params.get("declustering_weights")
         if weights is not None and len(weights) == len(coords):
             adapter.set_declustering_weights(np.asarray(weights, dtype=float))
