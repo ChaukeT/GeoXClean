@@ -131,16 +131,17 @@ GEOX_RECOVERY_*/
 /_build_prd_docx.py
 
 # Root-level scratch markdown / data outputs
-/BLOCK_MODEL_*.md
-/MAIN_WINDOW_WIRING_AUDIT.md
 /CLAUDE_CODE_PROMPT_*.md
-/PRD_v2.md
 /ARBF_audit_record.json
 /ARBF_results.csv
 /claude_sessions_*.json
 /requirements_filtered.tmp
 /modeling_logs/
 /project_drillholes/
+
+# Audit / review docs at repo root are NOT ignored — they document the
+# work history (BLOCK_MODEL_REVIEW.md, MAIN_WINDOW_WIRING_AUDIT.md,
+# BLOCK_MODEL_RENDERING_DIAGNOSTIC.md, PRD_v2.md). Tracked explicitly.
 
 # Windows reserved-name / lock files
 nul
