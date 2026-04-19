@@ -603,6 +603,12 @@ class BlockModel:
             self._positions = df[['XC', 'YC', 'ZC']].values.astype(np.float32, copy=False)
             positions_updated = True
             logger.info("Updated positions from XC, YC, ZC columns")
+        # Try short uppercase (X, Y, Z) — used by SGSIM/CoSGSIM/IK-SGSIM
+        # panels when extracting cell centres from a PyVista grid.
+        elif all(col in df.columns for col in ['X', 'Y', 'Z']):
+            self._positions = df[['X', 'Y', 'Z']].values.astype(np.float32, copy=False)
+            positions_updated = True
+            logger.info("Updated positions from X, Y, Z columns")
         # Try origin columns (XMORIG, YMORIG, ZMORIG)
         elif all(col in df.columns for col in ['XMORIG', 'YMORIG', 'ZMORIG']):
             self._positions = df[['XMORIG', 'YMORIG', 'ZMORIG']].values.astype(np.float32, copy=False)
@@ -632,9 +638,20 @@ class BlockModel:
         elif all(col in df.columns for col in ['XINC', 'YINC', 'ZINC']):
             self._dimensions = df[['XINC', 'YINC', 'ZINC']].values.astype(np.float32, copy=False)
             logger.info("Updated dimensions from XINC, YINC, ZINC columns")
+        else:
+            # No explicit dimension columns — infer from position spacing.
+            # See bug_report_sgsim_rendering_failure.md (2026-04-13): SGSIM
+            # output goes through PyVista grid → cell_centers → DataFrame and
+            # loses the grid's implicit spacing. Without DX/DY/DZ the renderer
+            # used to receive ~1e-13 dimensions and produce paper-thin blocks.
+            inferred = self._infer_dimensions_from_positions(self._positions)
+            if inferred is not None:
+                self._dimensions = inferred.astype(np.float32, copy=False)
+                logger.info("Inferred dimensions from position spacing")
         
         # Update properties (skip coordinate and dimension columns)
-        coord_cols = {'XMORIG', 'YMORIG', 'ZMORIG', 'x', 'y', 'z', 'XC', 'YC', 'ZC',
+        coord_cols = {'XMORIG', 'YMORIG', 'ZMORIG', 'x', 'y', 'z', 'X', 'Y', 'Z',
+                     'XC', 'YC', 'ZC',
                      'DX', 'DY', 'DZ', 'dx', 'dy', 'dz', 'XINC', 'YINC', 'ZINC'}
         
         for col in df.columns:
@@ -653,9 +670,53 @@ class BlockModel:
         # If rotation information is in the DataFrame, it should be set explicitly via set_rotation_matrix()
         
         self._update_bounds()
-        
+
         logger.info(f"✓ Updated block model from DataFrame: {self._block_count} blocks, {len(self._properties)} properties")
-    
+
+    @staticmethod
+    def _infer_dimensions_from_positions(positions: 'np.ndarray | None') -> 'np.ndarray | None':
+        """Infer per-block (dx, dy, dz) from coordinate spacing with float-jitter tolerance.
+
+        Bare ``np.unique`` on float64 cell centres treats values like 2.4999999999
+        and 2.5000000001 as distinct. Sub-ULP jitter from the
+        SGSIM → PyVista → DataFrame round-trip then inflates the unique count by
+        100×–400×, collapsing ``np.median(spacings)`` to near-zero and producing
+        ~1e-13 block sizes (the "scattered paper-thin fragments" symptom).
+
+        Fix: cluster near-duplicate coordinates before computing diffs, using a
+        tolerance that is a fraction of the largest gap on each axis.
+        """
+        if positions is None or len(positions) == 0:
+            return None
+        n = len(positions)
+        dims = np.zeros((n, 3), dtype=np.float64)
+        for axis in range(3):
+            coords = positions[:, axis]
+            unique_raw = np.sort(np.unique(coords))
+            if len(unique_raw) <= 1:
+                dims[:, axis] = 1.0
+                continue
+
+            diffs = np.diff(unique_raw)
+            # Use only the largest diffs to bootstrap a non-jittery scale.
+            large_diffs = diffs[diffs > np.max(diffs) * 1e-3]
+            if len(large_diffs) == 0:
+                dims[:, axis] = 1.0
+                continue
+            cluster_tol = float(np.median(large_diffs)) * 1e-6
+
+            # Keep only the first value in each near-duplicate cluster.
+            keep = np.concatenate([[True], diffs > cluster_tol])
+            unique_clean = unique_raw[keep]
+
+            if len(unique_clean) <= 1:
+                dims[:, axis] = 1.0
+                continue
+
+            spacings = np.diff(unique_clean)
+            dims[:, axis] = float(np.median(spacings))
+        return dims
+
     def memory_usage(self) -> int:
         """
         Calculate approximate memory usage in bytes.

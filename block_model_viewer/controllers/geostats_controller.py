@@ -1148,7 +1148,14 @@ class GeostatsController:
                     logger.warning(f"Could not reshape mean data, using zeros")
                     mean_data = np.zeros((sgsim_params.nz, sgsim_params.ny, sgsim_params.nx))
         
-        property_name = f"{variable}_SGSIM_mean"
+        # Canonical SGSIM property name — kept consistent with the panel
+        # and property_panel via utils.property_names.sgsim_property_name.
+        # Previously this was f"{variable}_SGSIM_mean" while the panel used
+        # f"{element}_SGSIM_{stat.upper()}", producing two different keys
+        # for the same statistic and causing the renderer to show
+        # "Property: None". See bug_report_sgsim_rendering_failure.md Fix 3.
+        from ..utils.property_names import sgsim_property_name
+        property_name = sgsim_property_name(variable, "mean")
         mean_grid = create_pyvista_grid(
             mean_data,
             sgsim_params,
@@ -1444,8 +1451,9 @@ class GeostatsController:
         # Create PyVista grid for visualization using ImageData (proper cell data handling)
         from ..models.visualization import create_block_model
         
-        property_name = f"{variable or 'IK_SGSIM'}_mean" if variable else "IK_SGSIM_mean"
-        
+        from ..utils.property_names import sgsim_property_name
+        property_name = sgsim_property_name(variable or "sim", "mean", method="IKSGSIM")
+
         # Get mean realization data
         mean_data = results['summary']['mean']
         if mean_data.ndim == 1:
@@ -1977,7 +1985,8 @@ class GeostatsController:
         # Create PyVista grid for visualization using ImageData (proper cell data handling)
         from ..models.visualization import create_block_model
 
-        property_name = f"{variable or 'CoSGSIM'}_mean" if variable else "CoSGSIM_mean"
+        from ..utils.property_names import sgsim_property_name
+        property_name = sgsim_property_name(variable or "sim", "mean", method="COSGSIM")
         
         # Get mean realization data
         mean_data = results['summary']['mean']

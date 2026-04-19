@@ -1900,7 +1900,11 @@ class PropertyPanel(QWidget):
                 spacing=(dx, dy, dz),
                 origin=(xmin, ymin, zmin),
             )
-            property_name = f"{variable}_SGSIM_{stat_key.upper()}"
+            # Canonical SGSIM property name — must match the keys produced
+            # by geostats_controller and sgsim_panel. See
+            # bug_report_sgsim_rendering_failure.md Fix 3.
+            from ..utils.property_names import sgsim_property_name
+            property_name = sgsim_property_name(variable, stat_key)
             grid.cell_data[property_name] = flat
 
             # Inherit the local-coordinate flag when origin is small

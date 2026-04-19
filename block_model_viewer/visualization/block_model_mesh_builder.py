@@ -40,43 +40,61 @@ def is_uniform_grid(block_model: BlockModel, tolerance: float = 1e-6) -> Tuple[b
     """
     if block_model.block_count == 0:
         return False, None
-    
+
     positions = block_model.positions
     dimensions = block_model.dimensions
-    
+
     if positions is None or dimensions is None:
         return False, None
-    
-    # Check 1: Constant spacing
-    # Get unique X, Y, Z coordinates
-    xs = np.sort(np.unique(positions[:, 0]))
-    ys = np.sort(np.unique(positions[:, 1]))
-    zs = np.sort(np.unique(positions[:, 2]))
-    
-    if len(xs) < 2 or len(ys) < 2 or len(zs) < 2:
-        logger.debug("Not enough unique coordinates for uniform grid detection")
+
+    # Check 1: Constant spacing — with tolerance-aware unique to handle the
+    # sub-ULP float jitter introduced by SGSIM → PyVista → DataFrame round-trips.
+    # Bare np.unique would over-count cell centres ~100x and cause is_uniform_grid
+    # to falsely report False on a perfectly regular SGSIM grid.
+    def _tolerant_unique(coords: np.ndarray) -> np.ndarray:
+        unique_raw = np.sort(np.unique(coords))
+        if len(unique_raw) <= 1:
+            return unique_raw
+        diffs = np.diff(unique_raw)
+        large_diffs = diffs[diffs > np.max(diffs) * 1e-3]
+        if len(large_diffs) == 0:
+            return unique_raw
+        cluster_tol = float(np.median(large_diffs)) * 1e-6
+        keep = np.concatenate([[True], diffs > cluster_tol])
+        return unique_raw[keep]
+
+    xs = _tolerant_unique(positions[:, 0])
+    ys = _tolerant_unique(positions[:, 1])
+    zs = _tolerant_unique(positions[:, 2])
+
+    # Allow single-layer grids (e.g. 2D resource models like 100×100×1).
+    # We compute spacing from block dimensions for any axis with only one
+    # value, since np.diff on a single value is empty.
+    if len(xs) < 1 or len(ys) < 1 or len(zs) < 1:
+        logger.debug("Empty coordinate array — cannot detect uniform grid")
         return False, None
-    
-    # Calculate spacing differences
-    dx_unique = np.unique(np.diff(xs))
-    dy_unique = np.unique(np.diff(ys))
-    dz_unique = np.unique(np.diff(zs))
-    
-    # Check if spacing is constant (within tolerance)
-    constant_spacing = (
-        len(dx_unique) == 1 and
-        len(dy_unique) == 1 and
-        len(dz_unique) == 1
-    )
-    
-    if not constant_spacing:
-        logger.debug(f"Non-constant spacing detected: dx={len(dx_unique)} unique, dy={len(dy_unique)} unique, dz={len(dz_unique)} unique")
+
+    def _axis_spacing(unique_vals: np.ndarray, dim_axis: int) -> Optional[float]:
+        if len(unique_vals) >= 2:
+            diffs = np.diff(unique_vals)
+            if len(np.unique(np.round(diffs / np.median(diffs), 6))) != 1:
+                return None  # non-constant spacing
+            return float(np.median(diffs))
+        # Single value on this axis — fall back to per-block dimension.
+        if dimensions is not None and len(dimensions) > 0:
+            axis_dims = dimensions[:, dim_axis]
+            if len(np.unique(np.round(axis_dims, 6))) == 1:
+                return float(axis_dims[0])
+        return None
+
+    dx = _axis_spacing(xs, 0)
+    dy = _axis_spacing(ys, 1)
+    dz = _axis_spacing(zs, 2)
+    if dx is None or dy is None or dz is None:
+        logger.debug(
+            f"Non-constant spacing or unresolvable single-layer dimension: dx={dx}, dy={dy}, dz={dz}"
+        )
         return False, None
-    
-    # Get spacing values
-    dx = float(dx_unique[0])
-    dy = float(dy_unique[0])
-    dz = float(dz_unique[0])
     
     # Check 2: Axis-aligned (no rotation)
     rotation_matrix = getattr(block_model, '_rotation_matrix', None)
@@ -196,19 +214,30 @@ def build_uniform_grid(block_model: BlockModel, grid_info: Dict[str, Any]) -> pv
         if not np.all(valid_mask):
             prop_values = prop_values[valid_mask]
         
-        # Initialize array with NaN for missing blocks
-        prop_array = np.full((nz, ny, nx), np.nan, dtype=prop_values.dtype)
-        
+        # Initialize empty cells with a dtype-appropriate sentinel.
+        # For float dtypes use NaN; for integer dtypes use np.iinfo(dtype).min
+        # (e.g., -2147483648 for int32). Using -1 here would collide with
+        # the common geological convention that "-1" means "outside domain"
+        # or "unclassified", inflating the count of legitimately-coded -1
+        # blocks. See BLOCK_MODEL_REVIEW.md Issue 5.
+        if np.issubdtype(prop_values.dtype, np.integer):
+            sentinel = np.iinfo(prop_values.dtype).min
+        else:
+            sentinel = np.nan
+        prop_array = np.full((nz, ny, nx), sentinel, dtype=prop_values.dtype)
+
         # Vectorized assignment using advanced indexing
         prop_array[z_indices, y_indices, x_indices] = prop_values
-        
+
         # Add to grid (VTK uses C-order)
         grid.cell_data[prop_name] = prop_array.ravel(order='C')
-    
+
     # CRITICAL FOR PICKING: Store Original_ID mapping for efficient block lookup
-    # This enables O(1) picking instead of O(N) search
-    # Create sequential IDs matching the original block order
-    original_id_array = np.full((nz, ny, nx), -1, dtype=np.int64)
+    # This enables O(1) picking instead of O(N) search.
+    # Use np.iinfo(int64).min as the empty-cell sentinel so that the picker
+    # can never confuse an empty cell with a legitimate block index.
+    _id_sentinel = np.iinfo(np.int64).min
+    original_id_array = np.full((nz, ny, nx), _id_sentinel, dtype=np.int64)
     
     # Create mapping: for each position, store its index in the original positions array
     # We need to map from grid indices back to original block indices

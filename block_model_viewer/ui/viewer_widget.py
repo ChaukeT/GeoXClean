@@ -2391,10 +2391,18 @@ class ViewerWidget(QWidget):
         block_id = None
         cell_id = info_dict.get('Cell ID', -1)
         
-        # Check if Original_ID is in the info_dict (from cell_data)
+        # Check if Original_ID is in the info_dict (from cell_data).
+        # Empty cells in the ImageData grid carry int64.min as a sentinel
+        # so the picker can distinguish them from legitimate -1 domain codes
+        # (Issue 5 / Issue 17). Treat any value below -2B as a miss.
+        _SENTINEL_MISS = -2_000_000_000
         if 'Original_ID' in info_dict:
-            block_id = int(info_dict['Original_ID'])
-            logger.info(f"Block clicked via global pick: block_id={block_id}, cell_id={cell_id}")
+            candidate = int(info_dict['Original_ID'])
+            if candidate >= _SENTINEL_MISS:
+                block_id = candidate
+                logger.info(f"Block clicked via global pick: block_id={block_id}, cell_id={cell_id}")
+            else:
+                logger.debug("Pick hit empty cell (Original_ID sentinel) — ignoring")
         else:
             # Fallback: try to get Original_ID from the picked mesh
             try:
@@ -2402,8 +2410,10 @@ class ViewerWidget(QWidget):
                     picked_mesh = self.renderer.plotter.picked_mesh
                     if picked_mesh is not None and "Original_ID" in picked_mesh.cell_data:
                         if 0 <= cell_id < len(picked_mesh.cell_data["Original_ID"]):
-                            block_id = int(picked_mesh.cell_data["Original_ID"][cell_id])
-                            logger.info(f"Block clicked via global pick (from mesh): block_id={block_id}, cell_id={cell_id}")
+                            candidate = int(picked_mesh.cell_data["Original_ID"][cell_id])
+                            if candidate >= _SENTINEL_MISS:
+                                block_id = candidate
+                                logger.info(f"Block clicked via global pick (from mesh): block_id={block_id}, cell_id={cell_id}")
             except Exception as e:
                 logger.debug(f"Could not extract Original_ID from mesh: {e}")
         

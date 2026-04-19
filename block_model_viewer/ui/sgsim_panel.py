@@ -555,6 +555,27 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
         l.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         l.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
+        # ── Simulation method selector (SGS vs FTA) ────────────────────
+        # Both paths live in sgsim3d.SGSIMParameters.method. SGS = per-node
+        # simple kriging (classic, slow). FTA = FFT-MA unconditional field
+        # + IDW conditioning (O(N log N), 100-1000x faster).
+        self.method_combo = QComboBox()
+        self.method_combo.addItems([
+            "SGS (Sequential Gaussian)",
+            "FTA (FFT-MA, fast)",
+        ])
+        self.method_combo.setCurrentIndex(0)  # SGS default to match Pictures UI
+        self.method_combo.setToolTip(
+            "SGS — classic Sequential Gaussian Simulation. Per-node simple\n"
+            "  kriging; conditions every node against data and previously\n"
+            "  simulated nodes. Textbook reference. Slower.\n\n"
+            "FTA — FFT-MA (Fast Transform Algorithm). Generates an\n"
+            "  unconditional Gaussian field via FFT and conditions the\n"
+            "  data points via IDW. O(N log N), 100-1000x faster for\n"
+            "  large grids."
+        )
+        l.addRow("Method:", self.method_combo)
+
         # Property/Variable selection
         self.variable_combo = QComboBox()
         self.variable_combo.setToolTip(
@@ -622,36 +643,6 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
         
         l.addRow("Realizations:", self.nreal_spin)
         l.addRow("Seed (required):", seed_widget)
-
-        # ── Simulation method selector (FFT-MA vs Sequential) ──────────
-        # Engine supports both methods (sgsim3d.SGSIMParameters.method);
-        # default is FFT-MA which is O(N log N) and 100-1000x faster than
-        # sequential for large grids. Sequential is the classic SGSIM
-        # algorithm — slower but conditions every node against previously-
-        # simulated nodes for the highest fidelity.
-        self.method_fft_radio = QRadioButton("FFT-MA (fast, default)")
-        self.method_seq_radio = QRadioButton("Sequential (classic SGSIM, slow)")
-        self.method_fft_radio.setChecked(True)
-        self.method_fft_radio.setToolTip(
-            "Fast Fourier Transform Moving Average — generates an "
-            "unconditional Gaussian field via FFT then conditions to the "
-            "data points. O(N log N), 100-1000x faster than sequential."
-        )
-        self.method_seq_radio.setToolTip(
-            "Classic Sequential Gaussian Simulation — visits every node "
-            "in random order, conditioning each one on data + previously-"
-            "simulated nodes. Slower but the textbook reference."
-        )
-        self._method_btn_group = QButtonGroup(self)
-        self._method_btn_group.addButton(self.method_fft_radio, 0)
-        self._method_btn_group.addButton(self.method_seq_radio, 1)
-        method_box = QWidget()
-        method_lay = QVBoxLayout(method_box)
-        method_lay.setContentsMargins(0, 0, 0, 0)
-        method_lay.setSpacing(2)
-        method_lay.addWidget(self.method_fft_radio)
-        method_lay.addWidget(self.method_seq_radio)
-        l.addRow("Method:", method_box)
 
         layout.addWidget(g)
 
@@ -1851,12 +1842,13 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
         ymin = self.ymin_spin.value()
         zmin = self.zmin_spin.value()
 
-        # Method choice (FFT-MA vs sequential). Engine default is fft_ma —
-        # we always pass an explicit value so the controller doesn't fall
-        # back to the dataclass default.
-        method = "sequential" if (
-            hasattr(self, "method_seq_radio") and self.method_seq_radio.isChecked()
-        ) else "fft_ma"
+        # Method choice (SGS vs FTA). Index 0 = SGS (sequential kriging),
+        # index 1 = FTA (FFT-MA + IDW). We always pass an explicit value
+        # so the controller doesn't fall back to the dataclass default.
+        if hasattr(self, "method_combo"):
+            method = "sequential" if self.method_combo.currentIndex() == 0 else "fft_ma"
+        else:
+            method = "fft_ma"
 
         return {
             "data_df": data_for_run,
@@ -2443,7 +2435,7 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
                         from ..models.block_model import BlockModel
                         import pyvista as pv
                         
-                        if isinstance(grid, (pv.RectilinearGrid, pv.UnstructuredGrid, pv.StructuredGrid)):
+                        if isinstance(grid, (pv.RectilinearGrid, pv.UnstructuredGrid, pv.StructuredGrid, pv.ImageData)):
                             if hasattr(grid, 'cell_centers'):
                                 centers = grid.cell_centers()
                                 if hasattr(centers, 'points'):
@@ -2453,10 +2445,38 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
                                         'Y': coords[:, 1],
                                         'Z': coords[:, 2]
                                     }
+                                    # Pass through the grid's implicit spacing as
+                                    # explicit DX/DY/DZ columns. Without this the
+                                    # downstream BlockModel would infer dimensions
+                                    # from cell centres, which under sub-ULP float
+                                    # jitter collapses to ~1e-13 (paper-thin
+                                    # fragments). See bug_report_sgsim_rendering_failure.md.
+                                    spacing = None
+                                    if hasattr(grid, 'spacing'):
+                                        try:
+                                            spacing = tuple(float(s) for s in grid.spacing)
+                                        except Exception:
+                                            spacing = None
+                                    if spacing is None:
+                                        # RectilinearGrid: derive spacing from coordinate arrays.
+                                        try:
+                                            sx = float(np.mean(np.diff(np.asarray(grid.x)))) if hasattr(grid, 'x') else None
+                                            sy = float(np.mean(np.diff(np.asarray(grid.y)))) if hasattr(grid, 'y') else None
+                                            sz = float(np.mean(np.diff(np.asarray(grid.z)))) if hasattr(grid, 'z') else None
+                                            if None not in (sx, sy, sz):
+                                                spacing = (sx, sy, sz)
+                                        except Exception:
+                                            spacing = None
+                                    if spacing is not None and len(spacing) == 3:
+                                        n_cells = len(coords)
+                                        df_data['DX'] = np.full(n_cells, spacing[0], dtype=np.float64)
+                                        df_data['DY'] = np.full(n_cells, spacing[1], dtype=np.float64)
+                                        df_data['DZ'] = np.full(n_cells, spacing[2], dtype=np.float64)
+
                                     if hasattr(grid, 'cell_data'):
                                         for key in grid.cell_data.keys():
                                             df_data[key] = grid.cell_data[key]
-                                    
+
                                     df = pd.DataFrame(df_data)
                                     bm = BlockModel()
                                     bm.update_from_dataframe(df)
@@ -2756,7 +2776,12 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
 
             stat_flat = stat_data.flatten(order='C')
             element = metadata.get('element', metadata.get('variable', 'VALUE'))
-            property_name = f"{element}_SGSIM_{stat.upper()}"
+            # Use the canonical helper so the panel-side name matches the
+            # controller-side name (controller previously emitted
+            # f"{variable}_SGSIM_mean", panel emitted f"{element}_SGSIM_MEAN")
+            # — see bug_report_sgsim_rendering_failure.md Fix 3.
+            from ..utils.property_names import sgsim_property_name
+            property_name = sgsim_property_name(element, stat)
             grid.cell_data[property_name] = stat_flat
 
             # ── Add DistToHole array for Block Model Filter panel ──
@@ -2868,7 +2893,9 @@ class SGSIMPanel(CodedDomainFilterMixin, DomainMaskMixin, BaseAnalysisPanel):
 
             prob_flat = prob_data.flatten(order='C')
             element = metadata.get('element', metadata.get('variable', 'VALUE'))
-            property_name = f"{element}_SGSIM_PROB_{cut}"
+            # Canonical probability-threshold name — see helper docstring.
+            from ..utils.property_names import sgsim_probability_name
+            property_name = sgsim_probability_name(element, str(cut))
             grid.cell_data[property_name] = prob_flat
 
             if abs(xmin) < 1000 and abs(ymin) < 1000:
