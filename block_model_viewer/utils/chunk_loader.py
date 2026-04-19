@@ -123,23 +123,26 @@ class ChunkLoader:
                 if len(chunk_df) == 0:
                     break
                 
-                # Extract positions
-                positions = chunk_df[coord_cols[:3]].values.astype(np.float32)
-                
+                # Extract positions — keep float64 to preserve sub-metre
+                # precision under UTM coordinates (BLOCK_MODEL_REVIEW Issue 18:
+                # casting to float32 lost ~0.5 m on coordinates near 500_000 m,
+                # which collided with the float-jitter sensitivity of
+                # is_uniform_grid / _infer_dimensions_from_positions).
+                positions = chunk_df[coord_cols[:3]].values.astype(np.float64)
+
                 # Extract dimensions if available
                 dimensions = None
                 if len(dim_cols) >= 3:
-                    dimensions = chunk_df[dim_cols[:3]].values.astype(np.float32)
-                
+                    dimensions = chunk_df[dim_cols[:3]].values.astype(np.float64)
+
                 # Extract properties
                 properties = {}
                 for prop_col in property_cols:
                     if prop_col in chunk_df.columns:
                         prop_values = chunk_df[prop_col].values
-                        # Use appropriate dtype
-                        if prop_values.dtype == 'float64':
-                            prop_values = prop_values.astype(np.float32)
-                        elif prop_values.dtype in ['int64', 'int32']:
+                        # Keep float dtype — only compress integers, never
+                        # downcast scientific values from float64 to float32.
+                        if prop_values.dtype in ['int64', 'int32']:
                             # Use smaller int types where possible
                             if prop_values.min() >= -128 and prop_values.max() <= 127:
                                 prop_values = prop_values.astype(np.int8)
@@ -180,20 +183,20 @@ class ChunkLoader:
             for start_idx in range(0, total_blocks, self.chunk_size):
                 end_idx = min(start_idx + self.chunk_size, total_blocks)
                 
-                chunk_positions = positions[start_idx:end_idx].astype(np.float32)
-                
+                # Preserve float64 for coordinates and dimensions
+                # (BLOCK_MODEL_REVIEW Issue 18 — see CSV path comment above).
+                chunk_positions = positions[start_idx:end_idx].astype(np.float64, copy=False)
+
                 chunk_dimensions = None
                 if block_model.dimensions is not None:
-                    chunk_dimensions = block_model.dimensions[start_idx:end_idx].astype(np.float32)
-                
+                    chunk_dimensions = block_model.dimensions[start_idx:end_idx].astype(np.float64, copy=False)
+
                 chunk_properties = {}
                 for prop_name in block_model.get_property_names():
                     prop_values = block_model.get_property(prop_name)
                     if prop_values is not None:
+                        # Keep original dtype — do not silently downcast.
                         chunk_values = prop_values[start_idx:end_idx]
-                        # Optimize dtype
-                        if chunk_values.dtype == 'float64':
-                            chunk_values = chunk_values.astype(np.float32)
                         chunk_properties[prop_name] = chunk_values
                 
                 yield BlockModelChunk(
