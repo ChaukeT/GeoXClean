@@ -1119,13 +1119,21 @@ class GeostatsController:
         # Use _progress_callback from params (injected by JobWorker) or the function argument
         effective_progress = params.get('_progress_callback') or progress_callback
 
-        # Run SGSIM workflow
-        # CRITICAL FIX: Use named parameter for progress_callback to avoid positional argument mismatch
+        # Run SGSIM workflow.
+        # CRITICAL: pass `transformer` through. The panel's
+        # gather_parameters() returns the fitted NormalScoreTransformer
+        # under params["transformer"], but the controller previously
+        # dropped it on the floor. run_full_sgsim_workflow then raised:
+        #   "SGSIM requires a pre-fitted transformer for back-transformation"
+        # even when the user had already transformed in the Grade
+        # Transformation panel.
+        transformer = params.get("transformer")
         results = run_full_sgsim_workflow(
             data_coords,
             data_values,
             sgsim_params,
             cutoffs=cutoffs,
+            transformer=transformer,
             progress_callback=effective_progress  # Must use named param - position 8, not 5!
         )
         
