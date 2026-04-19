@@ -499,6 +499,13 @@ class DBSPanel(BaseAnalysisPanel):
             'block_dx': self.bdx.value(),
             'block_dy': self.bdy.value(),
             'block_dz': self.bdz.value(),
+            # IRBF domain payload — controller masks results outside the domain.
+            'irbf_domain_raw': (
+                self.registry.get_indicator_rbf_domain()
+                if (getattr(self, 'registry', None) is not None
+                    and hasattr(self.registry, 'get_indicator_rbf_domain'))
+                else None
+            ),
         }
 
     def validate_inputs(self) -> bool:

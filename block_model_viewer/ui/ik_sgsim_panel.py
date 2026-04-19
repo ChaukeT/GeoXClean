@@ -540,6 +540,14 @@ class IKSGSIMPanel(DomainMaskMixin, BaseAnalysisPanel):
             "xinc": self.dx_spin.value(),
             "yinc": self.dy_spin.value(),
             "zinc": self.dz_spin.value(),
+            # IRBF domain payload — controller resamples onto the sim grid
+            # and masks results outside the domain.
+            "irbf_domain_raw": (
+                self.registry.get_indicator_rbf_domain()
+                if (getattr(self, "registry", None) is not None
+                    and hasattr(self.registry, "get_indicator_rbf_domain"))
+                else None
+            ),
         }
 
     def validate_inputs(self) -> bool:

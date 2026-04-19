@@ -494,6 +494,13 @@ class GRFPanel(BaseAnalysisPanel):
             'dx': self.dx_spin.value(),
             'dy': self.dy_spin.value(),
             'dz': self.dz_spin.value(),
+            # IRBF domain payload — controller masks results outside the domain.
+            'irbf_domain_raw': (
+                self.registry.get_indicator_rbf_domain()
+                if (getattr(self, 'registry', None) is not None
+                    and hasattr(self.registry, 'get_indicator_rbf_domain'))
+                else None
+            ),
         }
 
     def validate_inputs(self) -> bool:

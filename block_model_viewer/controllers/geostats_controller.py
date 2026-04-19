@@ -34,6 +34,108 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _apply_irbf_mask_to_sim_result(
+    result: Dict[str, Any],
+    irbf_domain_raw: Optional[Dict[str, Any]],
+    *,
+    xmin: float, ymin: float, zmin: float,
+    xinc: float, yinc: float, zinc: float,
+    nx: int, ny: int, nz: int,
+) -> Dict[str, Any]:
+    """Mask simulation results to an IRBF domain by setting blocks outside to NaN.
+
+    Engine-agnostic: works for CoSGSIM, IK-SGSIM, SIS, Turning-Bands, DBS,
+    and GRF without requiring engine modifications. The result dict is
+    mutated in place — every numeric array sized nx*ny*nz (mean, variance,
+    realisations stack, percentiles, probability maps) gets blocks where
+    mask=False set to NaN.
+    """
+    if not isinstance(irbf_domain_raw, dict) or not irbf_domain_raw:
+        return result
+    try:
+        from ..geostats.domain_mask import resample_irbf_mask_to_points
+        ix = (np.arange(nx) + 0.5) * xinc + xmin
+        iy = (np.arange(ny) + 0.5) * yinc + ymin
+        iz = (np.arange(nz) + 0.5) * zinc + zmin
+        gx, gy, gz = np.meshgrid(ix, iy, iz, indexing='ij')
+        centres = np.column_stack([gx.ravel(), gy.ravel(), gz.ravel()])
+        mask = resample_irbf_mask_to_points(irbf_domain_raw, centres)
+        if mask is None or mask.shape[0] != nx * ny * nz:
+            return result
+        mask = mask.astype(bool, copy=False)
+    except Exception as exc:
+        logger.warning("Sim IRBF mask resample failed: %s", exc, exc_info=True)
+        return result
+
+    n_grid = nx * ny * nz
+
+    def _mask_one(arr: Any) -> Any:
+        if arr is None:
+            return arr
+        a = np.asarray(arr)
+        flat = a.ravel()
+        if flat.size == n_grid:
+            out = flat.astype(float, copy=True)
+            out[~mask] = np.nan
+            return out.reshape(a.shape) if a.ndim > 1 else out
+        # Stack of realisations: (n_real, nx, ny, nz) or (n_real, n_grid)
+        if a.ndim >= 2 and a.shape[-1] == n_grid:
+            out = a.astype(float, copy=True)
+            out[..., ~mask] = np.nan
+            return out
+        if a.ndim == 4 and a.shape[1] * a.shape[2] * a.shape[3] == n_grid:
+            out = a.astype(float, copy=True)
+            mask_3d = mask.reshape(a.shape[1], a.shape[2], a.shape[3])
+            out[:, ~mask_3d] = np.nan
+            return out
+        return arr
+
+    candidate_keys = (
+        'estimates', 'mean', 'mean_realization', 'variance', 'variance_realization',
+        'std', 'p10', 'p25', 'p50', 'p75', 'p90', 'median_estimate',
+        'etype_estimate', 'realizations', 'realizations_raw', 'realizations_gaussian',
+    )
+    for key in candidate_keys:
+        if key in result:
+            result[key] = _mask_one(result[key])
+
+    # Probability maps: dict of cutoff -> array
+    prob = result.get('probability_maps')
+    if isinstance(prob, dict):
+        result['probability_maps'] = {k: _mask_one(v) for k, v in prob.items()}
+
+    # Summary dict (SGSIM-style)
+    summary = result.get('summary')
+    if isinstance(summary, dict):
+        result['summary'] = {k: _mask_one(v) for k, v in summary.items()}
+
+    n_inside = int(mask.sum())
+    logger.info(
+        "Sim IRBF mask applied: %d/%d blocks Inside (%.1f%%)",
+        n_inside, n_grid, 100.0 * n_inside / max(n_grid, 1),
+    )
+    return result
+
+
+def _fetch_irbf_from_registry(registry: Any) -> Optional[Dict[str, Any]]:
+    """Pull the registered IRBF domain payload from the registry, or None."""
+    if registry is None:
+        return None
+    try:
+        getter = getattr(registry, 'get_indicator_rbf_domain', None)
+        if callable(getter):
+            payload = getter()
+            if isinstance(payload, dict) and payload:
+                return payload
+        if hasattr(registry, 'get_data'):
+            payload = registry.get_data('indicator_rbf_domain', copy_data=False)
+            if isinstance(payload, dict) and payload:
+                return payload
+    except Exception:
+        return None
+    return None
+
+
 def _resolve_sgsim_domain_mask(
     explicit_mask: Optional[np.ndarray],
     irbf_domain_raw: Optional[Dict[str, Any]],
@@ -1419,6 +1521,14 @@ class GeostatsController:
             progress_callback=progress_callback
         )
 
+        # Apply IRBF domain mask to results (engine-agnostic post-processing).
+        _apply_irbf_mask_to_sim_result(
+            results, params.get("irbf_domain_raw"),
+            xmin=sim_params.xmin, ymin=sim_params.ymin, zmin=sim_params.zmin,
+            xinc=sim_params.xinc, yinc=sim_params.yinc, zinc=sim_params.zinc,
+            nx=sim_params.nx, ny=sim_params.ny, nz=sim_params.nz,
+        )
+
         if progress_callback:
             progress_callback(95, "Building visualization...")
 
@@ -1538,6 +1648,14 @@ class GeostatsController:
             params=sim_params,
             cutoffs=cutoffs,
             progress_callback=progress_callback
+        )
+
+        # Apply IRBF domain mask to results (engine-agnostic post-processing).
+        _apply_irbf_mask_to_sim_result(
+            results, params.get("irbf_domain_raw"),
+            xmin=sim_params.xmin, ymin=sim_params.ymin, zmin=sim_params.zmin,
+            xinc=sim_params.xinc, yinc=sim_params.yinc, zinc=sim_params.zinc,
+            nx=sim_params.nx, ny=sim_params.ny, nz=sim_params.nz,
         )
 
         if progress_callback:
@@ -1666,6 +1784,14 @@ class GeostatsController:
             params=sim_params,
             cutoffs=cutoffs,
             progress_callback=effective_progress
+        )
+
+        # Apply IRBF domain mask to results (engine-agnostic post-processing).
+        _apply_irbf_mask_to_sim_result(
+            results, params.get("irbf_domain_raw"),
+            xmin=sim_params.xmin, ymin=sim_params.ymin, zmin=sim_params.zmin,
+            xinc=sim_params.xinc, yinc=sim_params.yinc, zinc=sim_params.zinc,
+            nx=sim_params.nx, ny=sim_params.ny, nz=sim_params.nz,
         )
 
         if effective_progress:
@@ -1803,6 +1929,14 @@ class GeostatsController:
             progress_callback=effective_progress
         )
 
+        # Apply IRBF domain mask to results (engine-agnostic post-processing).
+        _apply_irbf_mask_to_sim_result(
+            results, params.get("irbf_domain_raw"),
+            xmin=sim_params.xmin, ymin=sim_params.ymin, zmin=sim_params.zmin,
+            xinc=sim_params.xinc, yinc=sim_params.yinc, zinc=sim_params.zinc,
+            nx=sim_params.nx, ny=sim_params.ny, nz=sim_params.nz,
+        )
+
         if effective_progress:
             effective_progress(95, "Building visualization...")
 
@@ -1933,6 +2067,14 @@ class GeostatsController:
             params=sim_params,
             cutoffs=cutoffs,
             progress_callback=effective_progress
+        )
+
+        # Apply IRBF domain mask to results (engine-agnostic post-processing).
+        _apply_irbf_mask_to_sim_result(
+            results, params.get("irbf_domain_raw"),
+            xmin=sim_params.xmin, ymin=sim_params.ymin, zmin=sim_params.zmin,
+            xinc=sim_params.xinc, yinc=sim_params.yinc, zinc=sim_params.zinc,
+            nx=sim_params.nx, ny=sim_params.ny, nz=sim_params.nz,
         )
 
         if effective_progress:
@@ -2072,6 +2214,14 @@ class GeostatsController:
             params=sim_params,
             cutoffs=cutoffs,
             progress_callback=effective_progress
+        )
+
+        # Apply IRBF domain mask to results (engine-agnostic post-processing).
+        _apply_irbf_mask_to_sim_result(
+            results, params.get("irbf_domain_raw"),
+            xmin=sim_params.xmin, ymin=sim_params.ymin, zmin=sim_params.zmin,
+            xinc=sim_params.xinc, yinc=sim_params.yinc, zinc=sim_params.zinc,
+            nx=sim_params.nx, ny=sim_params.ny, nz=sim_params.nz,
         )
 
         if effective_progress:
