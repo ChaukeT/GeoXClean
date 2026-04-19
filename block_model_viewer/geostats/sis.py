@@ -518,7 +518,20 @@ def run_sis(
                 sim_indicators[thresh][i_node] = sim_value
                 indicator_bufs[thresh][cur_size] = sim_value
                 prev_indicator = prob
-            
+
+            # SIMULATION_AUDIT BUG SIM-03 fix: enforce order relations on
+            # the actual *draws*, not just the kriged probabilities.
+            # Independent Bernoulli draws can produce physically-impossible
+            # states like indicator(low_threshold)=0 + indicator(high_threshold)=1
+            # ("above 2 g/t but below 1 g/t"). Sweep high → low: if a draw
+            # at a higher threshold = 1, force every lower-threshold draw to 1.
+            for j in range(len(sorted_thresholds) - 1, 0, -1):
+                hi = sorted_thresholds[j]
+                lo = sorted_thresholds[j - 1]
+                if sim_indicators[hi][i_node] == 1.0 and sim_indicators[lo][i_node] != 1.0:
+                    sim_indicators[lo][i_node] = 1.0
+                    indicator_bufs[lo][cur_size] = 1.0
+
             # Add to buffer
             coords_buf[cur_size] = target_coord
             cur_size += 1
